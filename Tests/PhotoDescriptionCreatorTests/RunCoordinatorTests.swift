@@ -899,6 +899,142 @@ final class RunCoordinatorTests: XCTestCase {
         XCTAssertEqual(enumeratePageCount, 0)
     }
 
+    func testPrepareAheadOverlapsNextExportWithCurrentAnalysis() async {
+        let assets = makeAssets(count: 3)
+        let metadata = Dictionary(uniqueKeysWithValues: assets.map { asset in
+            (asset.id, ExistingMetadataState(caption: nil, keywords: [], ownershipTag: nil, isExternal: false))
+        })
+        let timeline = TimelineRecorder()
+        let writer = MockPhotosWriter(
+            assets: assets,
+            metadataByID: metadata,
+            exportDelayNanoseconds: 120_000_000,
+            exportDelayByID: ["asset-0": 20_000_000],
+            timelineRecorder: timeline
+        )
+        let analyzerState = ContentionAwareAnalyzerState(
+            result: GeneratedMetadata(caption: "caption", keywords: ["k1"]),
+            baseDelayNanoseconds: 180_000_000,
+            concurrentPenaltyNanoseconds: 0,
+            timelineRecorder: timeline
+        )
+        let coordinator = RunCoordinator(
+            photosWriter: writer,
+            analyzer: ContentionAwareAnalyzer(state: analyzerState),
+            analysisConcurrency: 1,
+            prepareAheadLimit: 1
+        )
+
+        let summary = await coordinator.run(
+            options: defaultRunOptions(),
+            capabilities: defaultCapabilities(),
+            callbacks: RunCallbacks()
+        )
+
+        let analyzeStart = await timeline.timestamp(for: "analyze-start:asset-0")
+        let analyzeEnd = await timeline.timestamp(for: "analyze-end:asset-0")
+        let exportStart = await timeline.timestamp(for: "export-start:asset-2")
+        let exportEnd = await timeline.timestamp(for: "export-end:asset-2")
+        let maxActive = await analyzerState.maxActiveCountValue()
+
+        XCTAssertEqual(summary.progress.changed, 3)
+        XCTAssertEqual(summary.progress.failed, 0)
+        XCTAssertEqual(maxActive, 1)
+        XCTAssertNotNil(analyzeStart)
+        XCTAssertNotNil(analyzeEnd)
+        XCTAssertNotNil(exportStart)
+        XCTAssertNotNil(exportEnd)
+        XCTAssertLessThan(exportStart!, analyzeEnd!)
+        XCTAssertGreaterThan(exportEnd!, analyzeStart!)
+    }
+
+    func testSingleAnalysisWithPrepareAheadBeatsDualAnalysisUnderContention() async {
+        let dualAnalysis = await runSyntheticContentionScenario(
+            analysisConcurrency: 2,
+            prepareAheadLimit: 0
+        )
+        let pipelinedSingleAnalysis = await runSyntheticContentionScenario(
+            analysisConcurrency: 1,
+            prepareAheadLimit: 1
+        )
+
+        let dualMilliseconds = Double(dualAnalysis.elapsedNanoseconds) / 1_000_000
+        let pipelinedMilliseconds = Double(pipelinedSingleAnalysis.elapsedNanoseconds) / 1_000_000
+        print(
+            String(
+                format: "[RunCoordinatorTests] synthetic contention benchmark dual=%.1fms pipelined=%.1fms",
+                dualMilliseconds,
+                pipelinedMilliseconds
+            )
+        )
+
+        XCTAssertEqual(dualAnalysis.summary.progress.failed, 0)
+        XCTAssertEqual(pipelinedSingleAnalysis.summary.progress.failed, 0)
+        XCTAssertGreaterThanOrEqual(dualAnalysis.maxActiveAnalyses, 2)
+        XCTAssertEqual(pipelinedSingleAnalysis.maxActiveAnalyses, 1)
+        XCTAssertLessThan(
+            pipelinedSingleAnalysis.elapsedNanoseconds,
+            dualAnalysis.elapsedNanoseconds - 80_000_000
+        )
+    }
+
+    private func defaultRunOptions() -> RunOptions {
+        RunOptions(
+            source: .library,
+            optionalCaptureDateRange: nil,
+            overwriteAppOwnedSameOrNewer: false
+        )
+    }
+
+    private func defaultCapabilities() -> AppCapabilities {
+        AppCapabilities(
+            photosAutomationAvailable: true,
+            qwenModelAvailable: true,
+            pickerCapability: .supported
+        )
+    }
+
+    private func runSyntheticContentionScenario(
+        analysisConcurrency: Int,
+        prepareAheadLimit: Int
+    ) async -> SyntheticContentionResult {
+        let assets = makeAssets(count: 4)
+        let metadata = Dictionary(uniqueKeysWithValues: assets.map { asset in
+            (asset.id, ExistingMetadataState(caption: nil, keywords: [], ownershipTag: nil, isExternal: false))
+        })
+        let writer = MockPhotosWriter(
+            assets: assets,
+            metadataByID: metadata,
+            exportDelayNanoseconds: 80_000_000
+        )
+        let analyzerState = ContentionAwareAnalyzerState(
+            result: GeneratedMetadata(caption: "caption", keywords: ["k1"]),
+            baseDelayNanoseconds: 150_000_000,
+            concurrentPenaltyNanoseconds: 220_000_000
+        )
+        let coordinator = RunCoordinator(
+            photosWriter: writer,
+            analyzer: ContentionAwareAnalyzer(state: analyzerState),
+            analysisConcurrency: analysisConcurrency,
+            prepareAheadLimit: prepareAheadLimit
+        )
+
+        let started = DispatchTime.now().uptimeNanoseconds
+        let summary = await coordinator.run(
+            options: defaultRunOptions(),
+            capabilities: defaultCapabilities(),
+            callbacks: RunCallbacks()
+        )
+        let elapsed = DispatchTime.now().uptimeNanoseconds - started
+        let maxActiveAnalyses = await analyzerState.maxActiveCountValue()
+
+        return SyntheticContentionResult(
+            summary: summary,
+            elapsedNanoseconds: elapsed,
+            maxActiveAnalyses: maxActiveAnalyses
+        )
+    }
+
     private func makeAssets(count: Int) -> [MediaAsset] {
         (0..<count).map { index in
             MediaAsset(
@@ -908,6 +1044,74 @@ final class RunCoordinatorTests: XCTestCase {
                 kind: .photo
             )
         }
+    }
+}
+
+private struct SyntheticContentionResult {
+    let summary: RunSummary
+    let elapsedNanoseconds: UInt64
+    let maxActiveAnalyses: Int
+}
+
+private actor TimelineRecorder {
+    private var timestamps: [String: UInt64] = [:]
+
+    func record(_ event: String) {
+        timestamps[event] = DispatchTime.now().uptimeNanoseconds
+    }
+
+    func timestamp(for event: String) -> UInt64? {
+        timestamps[event]
+    }
+}
+
+private actor ContentionAwareAnalyzerState {
+    private let result: GeneratedMetadata
+    private let baseDelayNanoseconds: UInt64
+    private let concurrentPenaltyNanoseconds: UInt64
+    private let timelineRecorder: TimelineRecorder?
+    private var activeCount = 0
+    private var maxActiveCount = 0
+
+    init(
+        result: GeneratedMetadata,
+        baseDelayNanoseconds: UInt64,
+        concurrentPenaltyNanoseconds: UInt64,
+        timelineRecorder: TimelineRecorder? = nil
+    ) {
+        self.result = result
+        self.baseDelayNanoseconds = baseDelayNanoseconds
+        self.concurrentPenaltyNanoseconds = concurrentPenaltyNanoseconds
+        self.timelineRecorder = timelineRecorder
+    }
+
+    func begin(assetID: String) async -> (delayNanoseconds: UInt64, result: GeneratedMetadata) {
+        activeCount += 1
+        maxActiveCount = max(maxActiveCount, activeCount)
+        await timelineRecorder?.record("analyze-start:\(assetID)")
+        let contentionPenalty = concurrentPenaltyNanoseconds * UInt64(max(0, activeCount - 1))
+        return (baseDelayNanoseconds + contentionPenalty, result)
+    }
+
+    func end(assetID: String) async {
+        await timelineRecorder?.record("analyze-end:\(assetID)")
+        activeCount = max(0, activeCount - 1)
+    }
+
+    func maxActiveCountValue() -> Int {
+        maxActiveCount
+    }
+}
+
+private struct ContentionAwareAnalyzer: Analyzer {
+    let state: ContentionAwareAnalyzerState
+
+    func analyze(mediaURL: URL, kind: MediaKind) async throws -> GeneratedMetadata {
+        let assetID = mediaURL.deletingPathExtension().lastPathComponent
+        let (delayNanoseconds, result) = await state.begin(assetID: assetID)
+        try await Task.sleep(nanoseconds: delayNanoseconds)
+        await state.end(assetID: assetID)
+        return result
     }
 }
 
@@ -946,6 +1150,9 @@ private actor MockPhotosWriter: PhotosWriter, PhotosProcessMonitoring, PhotoPrev
     private let photosResidentMemoryBytesValue: UInt64?
     private let previewDataByID: [String: Data]
     private let enumerateTimeoutWhenLimitExceeds: Int?
+    private let exportDelayNanoseconds: UInt64
+    private let exportDelayByID: [String: UInt64]
+    private let timelineRecorder: TimelineRecorder?
     private var metadataByID: [String: ExistingMetadataState]
     private(set) var writes: [String: (caption: String, keywords: [String])] = [:]
     private(set) var writeOrder: [String] = []
@@ -963,13 +1170,19 @@ private actor MockPhotosWriter: PhotosWriter, PhotosProcessMonitoring, PhotoPrev
         metadataByID: [String: ExistingMetadataState],
         photosResidentMemoryBytes: UInt64? = nil,
         previewDataByID: [String: Data] = [:],
-        enumerateTimeoutWhenLimitExceeds: Int? = nil
+        enumerateTimeoutWhenLimitExceeds: Int? = nil,
+        exportDelayNanoseconds: UInt64 = 0,
+        exportDelayByID: [String: UInt64] = [:],
+        timelineRecorder: TimelineRecorder? = nil
     ) {
         self.assets = assets
         self.metadataByID = metadataByID
         self.photosResidentMemoryBytesValue = photosResidentMemoryBytes
         self.previewDataByID = previewDataByID
         self.enumerateTimeoutWhenLimitExceeds = enumerateTimeoutWhenLimitExceeds
+        self.exportDelayNanoseconds = exportDelayNanoseconds
+        self.exportDelayByID = exportDelayByID
+        self.timelineRecorder = timelineRecorder
     }
 
     func enumerate(scope: ScopeSource, dateRange: CaptureDateRange?) async throws -> [MediaAsset] {
@@ -1059,12 +1272,18 @@ private actor MockPhotosWriter: PhotosWriter, PhotosProcessMonitoring, PhotoPrev
 
     func exportAssetToTemporaryURL(id: String) async throws -> URL {
         exportRequests.append(id)
+        await timelineRecorder?.record("export-start:\(id)")
+        let delayNanoseconds = exportDelayByID[id] ?? exportDelayNanoseconds
+        if delayNanoseconds > 0 {
+            try await Task.sleep(nanoseconds: delayNanoseconds)
+        }
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("pdc-tests", isDirectory: true)
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let fileURL = root.appendingPathComponent("\(id).jpg")
         FileManager.default.createFile(atPath: fileURL.path, contents: Data())
+        await timelineRecorder?.record("export-end:\(id)")
         return fileURL
     }
 

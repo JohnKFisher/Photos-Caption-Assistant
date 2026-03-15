@@ -92,10 +92,51 @@ public final class RunCoordinator {
         let errorMessage: String?
     }
 
+    private struct PreparationJobResult: Sendable {
+        let index: Int
+        let asset: MediaAsset
+        let inputURL: URL?
+        let errorMessage: String?
+    }
+
     private struct PendingWrite {
         let asset: MediaAsset
         let inputURL: URL
         let generated: GeneratedMetadata
+    }
+
+    private actor PreparedInputChannel {
+        private var buffer: [PreparationJobResult] = []
+        private var waiters: [CheckedContinuation<PreparationJobResult?, Never>] = []
+        private var finished = false
+
+        func send(_ result: PreparationJobResult) {
+            if let waiter = waiters.first {
+                waiters.removeFirst()
+                waiter.resume(returning: result)
+            } else {
+                buffer.append(result)
+            }
+        }
+
+        func finish() {
+            finished = true
+            let pendingWaiters = waiters
+            waiters.removeAll(keepingCapacity: false)
+            pendingWaiters.forEach { $0.resume(returning: nil) }
+        }
+
+        func receive() async -> PreparationJobResult? {
+            if !buffer.isEmpty {
+                return buffer.removeFirst()
+            }
+            if finished {
+                return nil
+            }
+            return await withCheckedContinuation { continuation in
+                waiters.append(continuation)
+            }
+        }
     }
 
     private static let enumerationPageSize = 250
@@ -115,6 +156,7 @@ public final class RunCoordinator {
     private let photosMemoryCheckInterval: Int
     private let photosMemoryWarningBytes: UInt64
     private let analysisConcurrency: Int
+    private let prepareAheadLimit: Int
     private let writeBatchSize: Int
     private var lastPreviewFileURL: URL?
 
@@ -129,7 +171,8 @@ public final class RunCoordinator {
         photosRefreshPromptInterval: Int = 500,
         photosMemoryCheckInterval: Int = 40,
         photosMemoryWarningBytes: UInt64 = 20 * 1024 * 1024 * 1024,
-        analysisConcurrency: Int = 2,
+        analysisConcurrency: Int = 1,
+        prepareAheadLimit: Int = 1,
         writeBatchSize: Int = 16
     ) {
         self.photosWriter = photosWriter
@@ -141,6 +184,7 @@ public final class RunCoordinator {
         self.photosMemoryCheckInterval = max(1, photosMemoryCheckInterval)
         self.photosMemoryWarningBytes = max(1, photosMemoryWarningBytes)
         self.analysisConcurrency = max(1, analysisConcurrency)
+        self.prepareAheadLimit = max(0, prepareAheadLimit)
         self.writeBatchSize = max(1, writeBatchSize)
     }
 
@@ -432,38 +476,44 @@ public final class RunCoordinator {
             guard !assets.isEmpty else { return [] }
             let writer = photosWriter
             let analysisEngine = analyzer
+            let pipelineDepth = max(1, analysisConcurrency + prepareAheadLimit)
+            let preparedInputs = PreparedInputChannel()
 
             var orderedResults = Array<AnalysisJobResult?>(repeating: nil, count: assets.count)
-            await withTaskGroup(of: (Int, AnalysisJobResult).self) { group in
-                var nextIndex = 0
+            let producerTask = Task(priority: .userInitiated) {
+                await Self.producePreparedInputs(
+                    from: assets,
+                    photosWriter: writer,
+                    timingRecorder: timingRecorder,
+                    maxInFlight: pipelineDepth,
+                    channel: preparedInputs
+                )
+            }
 
-                func scheduleTask(_ index: Int) {
-                    let asset = assets[index]
+            await withTaskGroup(of: [(Int, AnalysisJobResult)].self) { group in
+                for _ in 0..<analysisConcurrency {
                     group.addTask(priority: .userInitiated) {
-                        let result = await Self.analyzeAsset(
-                            asset: asset,
-                            photosWriter: writer,
-                            analyzer: analysisEngine,
-                            timingRecorder: timingRecorder
-                        )
-                        return (index, result)
+                        var workerResults: [(Int, AnalysisJobResult)] = []
+                        while let prepared = await preparedInputs.receive() {
+                            let analyzed = await Self.analyzePreparedInput(
+                                prepared,
+                                analyzer: analysisEngine,
+                                timingRecorder: timingRecorder
+                            )
+                            workerResults.append(analyzed)
+                        }
+                        return workerResults
                     }
                 }
 
-                let initialCount = min(analysisConcurrency, assets.count)
-                for _ in 0..<initialCount {
-                    scheduleTask(nextIndex)
-                    nextIndex += 1
-                }
-
-                while let (completedIndex, result) = await group.next() {
-                    orderedResults[completedIndex] = result
-                    if nextIndex < assets.count {
-                        scheduleTask(nextIndex)
-                        nextIndex += 1
+                for await workerResults in group {
+                    for (index, result) in workerResults {
+                        orderedResults[index] = result
                     }
                 }
             }
+
+            _ = await producerTask.result
 
             return orderedResults.compactMap { $0 }
         }
@@ -989,38 +1039,103 @@ public final class RunCoordinator {
         return bitmap.representation(using: .jpeg, properties: [.compressionFactor: 0.82])
     }
 
-    private nonisolated static func analyzeAsset(
+    private nonisolated static func producePreparedInputs(
+        from assets: [MediaAsset],
+        photosWriter: PhotosWriter,
+        timingRecorder: RunTimingRecorder,
+        maxInFlight: Int,
+        channel: PreparedInputChannel
+    ) async {
+        await withTaskGroup(of: PreparationJobResult.self) { group in
+            var nextIndex = 0
+
+            func schedulePreparation(_ index: Int) {
+                let asset = assets[index]
+                group.addTask(priority: .userInitiated) {
+                    await Self.prepareAnalysisInput(
+                        index: index,
+                        asset: asset,
+                        photosWriter: photosWriter,
+                        timingRecorder: timingRecorder
+                    )
+                }
+            }
+
+            let initialCount = min(maxInFlight, assets.count)
+            for _ in 0..<initialCount {
+                schedulePreparation(nextIndex)
+                nextIndex += 1
+            }
+
+            while let prepared = await group.next() {
+                await channel.send(prepared)
+                if nextIndex < assets.count {
+                    schedulePreparation(nextIndex)
+                    nextIndex += 1
+                }
+            }
+        }
+
+        await channel.finish()
+    }
+
+    private nonisolated static func prepareAnalysisInput(
+        index: Int,
         asset: MediaAsset,
         photosWriter: PhotosWriter,
-        analyzer: Analyzer,
         timingRecorder: RunTimingRecorder
-    ) async -> AnalysisJobResult {
+    ) async -> PreparationJobResult {
         var inputURL: URL?
 
         do {
             inputURL = try await measureStage(.assetAcquire, recorder: timingRecorder) {
                 try await acquireAnalysisInputURL(for: asset, photosWriter: photosWriter)
             }
-            guard let inputURL else {
-                return AnalysisJobResult(
-                    asset: asset,
-                    inputURL: nil,
-                    generated: nil,
-                    errorMessage: "Analysis input was unavailable."
-                )
-            }
-
-            let generated = try await measureStage(.analyze, recorder: timingRecorder) {
-                try await analyzer.analyze(mediaURL: inputURL, kind: asset.kind)
-            }
-            return AnalysisJobResult(asset: asset, inputURL: inputURL, generated: generated, errorMessage: nil)
+            return PreparationJobResult(index: index, asset: asset, inputURL: inputURL, errorMessage: nil)
         } catch {
-            return AnalysisJobResult(
+            return PreparationJobResult(
+                index: index,
                 asset: asset,
+                inputURL: inputURL,
+                errorMessage: error.localizedDescription
+            )
+        }
+    }
+
+    private nonisolated static func analyzePreparedInput(
+        _ prepared: PreparationJobResult,
+        analyzer: Analyzer,
+        timingRecorder: RunTimingRecorder
+    ) async -> (Int, AnalysisJobResult) {
+        guard let inputURL = prepared.inputURL else {
+            let result = AnalysisJobResult(
+                asset: prepared.asset,
+                inputURL: nil,
+                generated: nil,
+                errorMessage: prepared.errorMessage ?? "Analysis input was unavailable."
+            )
+            return (prepared.index, result)
+        }
+
+        do {
+            let generated = try await measureStage(.analyze, recorder: timingRecorder) {
+                try await analyzer.analyze(mediaURL: inputURL, kind: prepared.asset.kind)
+            }
+            let result = AnalysisJobResult(
+                asset: prepared.asset,
+                inputURL: inputURL,
+                generated: generated,
+                errorMessage: nil
+            )
+            return (prepared.index, result)
+        } catch {
+            let result = AnalysisJobResult(
+                asset: prepared.asset,
                 inputURL: inputURL,
                 generated: nil,
                 errorMessage: error.localizedDescription
             )
+            return (prepared.index, result)
         }
     }
 
