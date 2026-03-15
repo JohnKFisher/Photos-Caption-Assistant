@@ -2,7 +2,7 @@ import AppKit
 import CoreGraphics
 import Foundation
 
-public struct QwenVisionLanguageAnalyzer: Analyzer {
+public struct QwenVisionLanguageAnalyzer: PreparedInputAnalyzer {
     private let frameSampler: VideoFrameSampler
     private let endpointURL: URL
     private let modelName: String
@@ -216,6 +216,11 @@ public struct QwenVisionLanguageAnalyzer: Analyzer {
     }
 
     public func analyze(mediaURL: URL, kind: MediaKind) async throws -> GeneratedMetadata {
+        let preparedPayload = try await prepareAnalysis(mediaURL: mediaURL, kind: kind)
+        return try await analyze(preparedPayload: preparedPayload)
+    }
+
+    public func prepareAnalysis(mediaURL: URL, kind: MediaKind) async throws -> PreparedAnalysisPayload {
         let imageData: [Data]
         let prompt: String
 
@@ -233,7 +238,14 @@ public struct QwenVisionLanguageAnalyzer: Analyzer {
             prompt = Self.videoPrompt
         }
 
-        let generatedText = try await request(prompt: prompt, images: imageData)
+        return PreparedAnalysisPayload(prompt: prompt, images: imageData)
+    }
+
+    public func analyze(preparedPayload: PreparedAnalysisPayload) async throws -> GeneratedMetadata {
+        let generatedText = try await request(
+            prompt: preparedPayload.prompt,
+            images: preparedPayload.images
+        )
         return try decodeGeneratedMetadata(from: generatedText)
     }
 

@@ -17,6 +17,8 @@ What is working now:
 - Future builds from this source baseline now embed the current prompt files and use prompt logic 2.4.0.
 - Video analysis now selects three ordered key frames from a larger candidate set using time coverage plus lightweight visual-difference scoring.
 - The run pipeline now defaults to one in-flight LLM analysis with bounded prepare-ahead overlap so the next asset can be readied without competing model calls.
+- Analyzer-ready payloads are now prepared ahead of the LLM handoff when the analyzer supports it, so image encoding and video frame packaging can overlap with the current analysis.
+- Completion preview rendering is now deferred off the metadata-write critical path with a small bounded backlog.
 
 What is partially implemented:
 - Long-run resilience is improved, but still depends on AppleScript and Photos staying responsive.
@@ -32,7 +34,7 @@ Known limitations and trust warnings:
 - The app depends on Apple Photos automation and local Ollama availability.
 - Prompt quality and throughput can vary with model readiness and local machine performance.
 - Video-analysis throughput may vary modestly with clip format because key-frame selection now evaluates a larger candidate set before sending frames to the model.
-- Metadata writes still happen after each analyzed window, so the pipeline is only partially streamed end to end.
+- Metadata writes still happen after each analyzed window, so the pipeline is only partially streamed end to end even though preview generation now overlaps later writes.
 - The internal metadata ownership logic version in code is currently separate from the app marketing version.
 - This repo started a fresh baseline on March 14, 2026; earlier rollback points should be treated cautiously.
 

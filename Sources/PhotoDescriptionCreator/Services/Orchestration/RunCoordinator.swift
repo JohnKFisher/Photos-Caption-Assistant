@@ -51,6 +51,7 @@ public struct RunCallbacks {
 private enum RunTimingStage: String, CaseIterable, Hashable, Sendable {
     case metadataRead = "metadata-read"
     case assetAcquire = "asset-acquire"
+    case analysisPrepare = "analysis-prepare"
     case analyze = "analyze"
     case write = "write"
     case preview = "preview"
@@ -83,6 +84,137 @@ private actor RunTimingRecorder {
     }
 }
 
+protocol PreviewRendering: Sendable {
+    func persistPreviewFile(from inputURL: URL, fallbackFilename: String, kind: MediaKind) async -> URL?
+}
+
+actor DefaultPreviewRenderer: PreviewRendering {
+    private let videoFrameSampler: VideoFrameSampler
+    private var lastPreviewFileURL: URL?
+
+    init(videoFrameSampler: VideoFrameSampler) {
+        self.videoFrameSampler = videoFrameSampler
+    }
+
+    func persistPreviewFile(from inputURL: URL, fallbackFilename: String, kind: MediaKind) async -> URL? {
+        let fileManager = FileManager.default
+        let previewRoot = fileManager.temporaryDirectory
+            .appendingPathComponent("PhotoDescriptionCreatorLastCompleted", isDirectory: true)
+
+        do {
+            try fileManager.createDirectory(at: previewRoot, withIntermediateDirectories: true)
+            if let lastPreviewFileURL {
+                try? fileManager.removeItem(at: lastPreviewFileURL)
+            }
+
+            if kind == .video,
+               let extractedFrameDestination = await persistVideoPreviewFrame(
+                   from: inputURL,
+                   previewRoot: previewRoot
+               )
+            {
+                lastPreviewFileURL = extractedFrameDestination
+                return extractedFrameDestination
+            }
+
+            let inputExtension = inputURL.pathExtension
+            let fallbackExtension = (fallbackFilename as NSString).pathExtension
+            let pathExtension = inputExtension.isEmpty ? fallbackExtension : inputExtension
+            let filename = pathExtension.isEmpty
+                ? "last-completed-\(UUID().uuidString)"
+                : "last-completed-\(UUID().uuidString).\(pathExtension)"
+            let destination = previewRoot.appendingPathComponent(filename)
+
+            try fileManager.copyItem(at: inputURL, to: destination)
+            lastPreviewFileURL = destination
+            return destination
+        } catch {
+            return nil
+        }
+    }
+
+    private func persistVideoPreviewFrame(from videoURL: URL, previewRoot: URL) async -> URL? {
+        guard let frameImage = await representativeVideoPreviewFrame(from: videoURL) else {
+            return nil
+        }
+        guard let jpegData = jpegData(from: frameImage) else {
+            return nil
+        }
+
+        let destination = previewRoot.appendingPathComponent("last-completed-\(UUID().uuidString).jpg")
+        do {
+            try jpegData.write(to: destination, options: [.atomic])
+            return destination
+        } catch {
+            return nil
+        }
+    }
+
+    private func representativeVideoPreviewFrame(from videoURL: URL) async -> CGImage? {
+        let asset = AVURLAsset(url: videoURL)
+        if let duration = try? await asset.load(.duration) {
+            let durationSeconds = max(0, CMTimeGetSeconds(duration))
+            let targetTime = durationSeconds > 0
+                ? CMTime(seconds: durationSeconds * 0.5, preferredTimescale: 600)
+                : .zero
+            let generator = AVAssetImageGenerator(asset: asset)
+            generator.appliesPreferredTrackTransform = true
+            if let cgImage = await generatePreviewFrame(generator: generator, at: targetTime) {
+                return cgImage
+            }
+        }
+
+        guard let frames = try? await videoFrameSampler.sampleFrames(from: videoURL, count: 3),
+              !frames.isEmpty
+        else {
+            return nil
+        }
+        return frames[min(1, frames.count - 1)]
+    }
+
+    private func generatePreviewFrame(
+        generator: AVAssetImageGenerator,
+        at time: CMTime
+    ) async -> CGImage? {
+        final class ResumeState: @unchecked Sendable {
+            var resumed = false
+        }
+
+        return await withCheckedContinuation { continuation in
+            let times = [NSValue(time: time)]
+            let lock = NSLock()
+            let state = ResumeState()
+
+            generator.generateCGImagesAsynchronously(forTimes: times) { _, image, _, result, _ in
+                lock.lock()
+                guard !state.resumed else {
+                    lock.unlock()
+                    return
+                }
+
+                let outputImage: CGImage?
+                if result == .succeeded, let image {
+                    outputImage = image
+                } else if result == .failed || result == .cancelled {
+                    outputImage = nil
+                } else {
+                    lock.unlock()
+                    return
+                }
+
+                state.resumed = true
+                lock.unlock()
+                continuation.resume(returning: outputImage)
+            }
+        }
+    }
+
+    private func jpegData(from image: CGImage) -> Data? {
+        let bitmap = NSBitmapImageRep(cgImage: image)
+        return bitmap.representation(using: .jpeg, properties: [.compressionFactor: 0.82])
+    }
+}
+
 @MainActor
 public final class RunCoordinator {
     private struct AnalysisJobResult: Sendable {
@@ -96,10 +228,11 @@ public final class RunCoordinator {
         let index: Int
         let asset: MediaAsset
         let inputURL: URL?
+        let preparedPayload: PreparedAnalysisPayload?
         let errorMessage: String?
     }
 
-    private struct PendingWrite {
+    private struct PendingWrite: Sendable {
         let asset: MediaAsset
         let inputURL: URL
         let generated: GeneratedMetadata
@@ -145,11 +278,13 @@ public final class RunCoordinator {
     private static let slowOrderWarningThreshold = 5_000
     private static let maxRetainedErrors = 500
     private static let maxRetainedFailedAssets = 2000
+    private static let maxPendingPreviewTasks = 2
     private nonisolated static let photoPreviewMaxPixelSize = 2048
 
     private let photosWriter: PhotosWriter
     private let analyzer: Analyzer
     private let videoFrameSampler: VideoFrameSampler
+    private let previewRenderer: any PreviewRendering
     private let logicVersion: LogicVersion
     private let checkpointInterval: Int
     private let photosRefreshPromptInterval: Int
@@ -158,11 +293,10 @@ public final class RunCoordinator {
     private let analysisConcurrency: Int
     private let prepareAheadLimit: Int
     private let writeBatchSize: Int
-    private var lastPreviewFileURL: URL?
 
     private var isCancelled = false
 
-    public init(
+    public convenience init(
         photosWriter: PhotosWriter,
         analyzer: Analyzer,
         videoFrameSampler: VideoFrameSampler = VideoFrameSampler(),
@@ -175,9 +309,40 @@ public final class RunCoordinator {
         prepareAheadLimit: Int = 1,
         writeBatchSize: Int = 16
     ) {
+        self.init(
+            photosWriter: photosWriter,
+            analyzer: analyzer,
+            videoFrameSampler: videoFrameSampler,
+            logicVersion: logicVersion,
+            checkpointInterval: checkpointInterval,
+            photosRefreshPromptInterval: photosRefreshPromptInterval,
+            photosMemoryCheckInterval: photosMemoryCheckInterval,
+            photosMemoryWarningBytes: photosMemoryWarningBytes,
+            analysisConcurrency: analysisConcurrency,
+            prepareAheadLimit: prepareAheadLimit,
+            writeBatchSize: writeBatchSize,
+            previewRenderer: DefaultPreviewRenderer(videoFrameSampler: videoFrameSampler)
+        )
+    }
+
+    init(
+        photosWriter: PhotosWriter,
+        analyzer: Analyzer,
+        videoFrameSampler: VideoFrameSampler = VideoFrameSampler(),
+        logicVersion: LogicVersion = .current,
+        checkpointInterval: Int = 1000,
+        photosRefreshPromptInterval: Int = 500,
+        photosMemoryCheckInterval: Int = 40,
+        photosMemoryWarningBytes: UInt64 = 20 * 1024 * 1024 * 1024,
+        analysisConcurrency: Int = 1,
+        prepareAheadLimit: Int = 1,
+        writeBatchSize: Int = 16,
+        previewRenderer: any PreviewRendering
+    ) {
         self.photosWriter = photosWriter
         self.analyzer = analyzer
         self.videoFrameSampler = videoFrameSampler
+        self.previewRenderer = previewRenderer
         self.logicVersion = logicVersion
         self.checkpointInterval = max(1, checkpointInterval)
         self.photosRefreshPromptInterval = max(1, photosRefreshPromptInterval)
@@ -373,6 +538,52 @@ public final class RunCoordinator {
         }
 
         let batchWriter = photosWriter as? BatchWritePhotosWriter
+        let preparedAnalyzer = analyzer as? any PreparedInputAnalyzer
+        var pendingPreviewTasks: [Task<Void, Never>] = []
+
+        func drainCompletedPreviewTasks(forceWaitForAll: Bool = false) async {
+            while let firstTask = pendingPreviewTasks.first,
+                  forceWaitForAll || pendingPreviewTasks.count >= Self.maxPendingPreviewTasks
+            {
+                await firstTask.value
+                pendingPreviewTasks.removeFirst()
+            }
+        }
+
+        func enqueuePreview(for write: PendingWrite) async {
+            await drainCompletedPreviewTasks()
+            let priorTask = pendingPreviewTasks.last
+            let previewRenderer = self.previewRenderer
+
+            let task = Task(priority: .utility) { [timingRecorder] in
+                _ = await priorTask?.value
+
+                let previewStart = DispatchTime.now().uptimeNanoseconds
+                let previewFileURL = await previewRenderer.persistPreviewFile(
+                    from: write.inputURL,
+                    fallbackFilename: write.asset.filename,
+                    kind: write.asset.kind
+                )
+                await timingRecorder.record(
+                    stage: .preview,
+                    nanoseconds: DispatchTime.now().uptimeNanoseconds - previewStart
+                )
+
+                callbacks.onItemCompleted(
+                    CompletedItemPreview(
+                        filename: write.asset.filename,
+                        kind: write.asset.kind,
+                        previewFileURL: previewFileURL,
+                        caption: write.generated.caption,
+                        keywords: write.generated.keywords
+                    )
+                )
+
+                Self.cleanupTemporaryInput(at: write.inputURL)
+            }
+
+            pendingPreviewTasks.append(task)
+        }
 
         func writeChunk(_ writes: [PendingWrite]) async {
             guard !writes.isEmpty else { return }
@@ -432,31 +643,11 @@ public final class RunCoordinator {
                 )
 
                 if writeResult.success {
-                    let previewStart = DispatchTime.now().uptimeNanoseconds
-                    let previewFileURL = await persistPreviewFile(
-                        from: write.inputURL,
-                        fallbackFilename: write.asset.filename,
-                        kind: write.asset.kind
-                    )
-                    await timingRecorder.record(
-                        stage: .preview,
-                        nanoseconds: DispatchTime.now().uptimeNanoseconds - previewStart
-                    )
-
-                    callbacks.onItemCompleted(
-                        CompletedItemPreview(
-                            filename: write.asset.filename,
-                            kind: write.asset.kind,
-                            previewFileURL: previewFileURL,
-                            caption: write.generated.caption,
-                            keywords: write.generated.keywords
-                        )
-                    )
-
                     progress.processed += 1
                     progress.changed += 1
                     callbacks.onProgress(progress)
                     markAssetProcessed(write.asset.id)
+                    await enqueuePreview(for: write)
                     await handlePostChangePromptsIfNeeded()
                 } else {
                     progress.processed += 1
@@ -466,9 +657,8 @@ public final class RunCoordinator {
                     recordFailedAsset(write.asset)
                     callbacks.onProgress(progress)
                     markAssetProcessed(write.asset.id)
+                    Self.cleanupTemporaryInput(at: write.inputURL)
                 }
-
-                cleanupExport(at: write.inputURL)
             }
         }
 
@@ -484,6 +674,7 @@ public final class RunCoordinator {
                 await Self.producePreparedInputs(
                     from: assets,
                     photosWriter: writer,
+                    preparedAnalyzer: preparedAnalyzer,
                     timingRecorder: timingRecorder,
                     maxInFlight: pipelineDepth,
                     channel: preparedInputs
@@ -498,6 +689,7 @@ public final class RunCoordinator {
                             let analyzed = await Self.analyzePreparedInput(
                                 prepared,
                                 analyzer: analysisEngine,
+                                preparedAnalyzer: preparedAnalyzer,
                                 timingRecorder: timingRecorder
                             )
                             workerResults.append(analyzed)
@@ -614,7 +806,7 @@ public final class RunCoordinator {
                         pendingWrites.append(PendingWrite(asset: result.asset, inputURL: inputURL, generated: generated))
                     } else {
                         if let inputURL = result.inputURL {
-                            cleanupExport(at: inputURL)
+                            Self.cleanupTemporaryInput(at: inputURL)
                         }
                         progress.processed += 1
                         progress.failed += 1
@@ -846,6 +1038,7 @@ public final class RunCoordinator {
             }
         }
 
+        await drainCompletedPreviewTasks(forceWaitForAll: true)
         return RunSummary(progress: progress, errors: errors, failedAssets: failedAssets)
     }
 
@@ -918,130 +1111,15 @@ public final class RunCoordinator {
         return lhs.id < rhs.id
     }
 
-    private func cleanupExport(at exportURL: URL) {
+    private nonisolated static func cleanupTemporaryInput(at exportURL: URL) {
         let parent = exportURL.deletingLastPathComponent()
         try? FileManager.default.removeItem(at: parent)
-    }
-
-    private func persistPreviewFile(from exportURL: URL, fallbackFilename: String, kind: MediaKind) async -> URL? {
-        let fileManager = FileManager.default
-        let previewRoot = fileManager.temporaryDirectory
-            .appendingPathComponent("PhotoDescriptionCreatorLastCompleted", isDirectory: true)
-
-        do {
-            try fileManager.createDirectory(at: previewRoot, withIntermediateDirectories: true)
-            if let lastPreviewFileURL {
-                try? fileManager.removeItem(at: lastPreviewFileURL)
-            }
-
-            if kind == .video,
-               let extractedFrameDestination = await persistVideoPreviewFrame(
-                   from: exportURL,
-                   previewRoot: previewRoot
-               )
-            {
-                lastPreviewFileURL = extractedFrameDestination
-                return extractedFrameDestination
-            }
-
-            let exportExtension = exportURL.pathExtension
-            let fallbackExtension = (fallbackFilename as NSString).pathExtension
-            let pathExtension = exportExtension.isEmpty ? fallbackExtension : exportExtension
-            let filename = pathExtension.isEmpty
-                ? "last-completed-\(UUID().uuidString)"
-                : "last-completed-\(UUID().uuidString).\(pathExtension)"
-            let destination = previewRoot.appendingPathComponent(filename)
-
-            try fileManager.copyItem(at: exportURL, to: destination)
-            lastPreviewFileURL = destination
-            return destination
-        } catch {
-            return nil
-        }
-    }
-
-    private func persistVideoPreviewFrame(from videoURL: URL, previewRoot: URL) async -> URL? {
-        guard let frameImage = await representativeVideoPreviewFrame(from: videoURL) else {
-            return nil
-        }
-        guard let jpegData = jpegData(from: frameImage) else {
-            return nil
-        }
-
-        let destination = previewRoot.appendingPathComponent("last-completed-\(UUID().uuidString).jpg")
-        do {
-            try jpegData.write(to: destination, options: [.atomic])
-            return destination
-        } catch {
-            return nil
-        }
-    }
-
-    private func representativeVideoPreviewFrame(from videoURL: URL) async -> CGImage? {
-        let asset = AVURLAsset(url: videoURL)
-        if let duration = try? await asset.load(.duration) {
-            let durationSeconds = max(0, CMTimeGetSeconds(duration))
-            let targetTime = durationSeconds > 0
-                ? CMTime(seconds: durationSeconds * 0.5, preferredTimescale: 600)
-                : .zero
-            let generator = AVAssetImageGenerator(asset: asset)
-            generator.appliesPreferredTrackTransform = true
-            if let cgImage = await generatePreviewFrame(generator: generator, at: targetTime) {
-                return cgImage
-            }
-        }
-
-        guard let frames = try? await videoFrameSampler.sampleFrames(from: videoURL, count: 3), !frames.isEmpty else {
-            return nil
-        }
-        return frames[min(1, frames.count - 1)]
-    }
-
-    private func generatePreviewFrame(
-        generator: AVAssetImageGenerator,
-        at time: CMTime
-    ) async -> CGImage? {
-        final class ResumeState: @unchecked Sendable {
-            var resumed = false
-        }
-
-        return await withCheckedContinuation { continuation in
-            let times = [NSValue(time: time)]
-            let lock = NSLock()
-            let state = ResumeState()
-
-            generator.generateCGImagesAsynchronously(forTimes: times) { _, image, _, result, _ in
-                lock.lock()
-                guard !state.resumed else {
-                    lock.unlock()
-                    return
-                }
-
-                let outputImage: CGImage?
-                if result == .succeeded, let image {
-                    outputImage = image
-                } else if result == .failed || result == .cancelled {
-                    outputImage = nil
-                } else {
-                    lock.unlock()
-                    return
-                }
-
-                state.resumed = true
-                lock.unlock()
-                continuation.resume(returning: outputImage)
-            }
-        }
-    }
-
-    private func jpegData(from image: CGImage) -> Data? {
-        let bitmap = NSBitmapImageRep(cgImage: image)
-        return bitmap.representation(using: .jpeg, properties: [.compressionFactor: 0.82])
     }
 
     private nonisolated static func producePreparedInputs(
         from assets: [MediaAsset],
         photosWriter: PhotosWriter,
+        preparedAnalyzer: (any PreparedInputAnalyzer)?,
         timingRecorder: RunTimingRecorder,
         maxInFlight: Int,
         channel: PreparedInputChannel
@@ -1056,6 +1134,7 @@ public final class RunCoordinator {
                         index: index,
                         asset: asset,
                         photosWriter: photosWriter,
+                        preparedAnalyzer: preparedAnalyzer,
                         timingRecorder: timingRecorder
                     )
                 }
@@ -1083,20 +1162,34 @@ public final class RunCoordinator {
         index: Int,
         asset: MediaAsset,
         photosWriter: PhotosWriter,
+        preparedAnalyzer: (any PreparedInputAnalyzer)?,
         timingRecorder: RunTimingRecorder
     ) async -> PreparationJobResult {
         var inputURL: URL?
+        var preparedPayload: PreparedAnalysisPayload?
 
         do {
             inputURL = try await measureStage(.assetAcquire, recorder: timingRecorder) {
                 try await acquireAnalysisInputURL(for: asset, photosWriter: photosWriter)
             }
-            return PreparationJobResult(index: index, asset: asset, inputURL: inputURL, errorMessage: nil)
+            if let preparedAnalyzer, let inputURL {
+                preparedPayload = try await measureStage(.analysisPrepare, recorder: timingRecorder) {
+                    try await preparedAnalyzer.prepareAnalysis(mediaURL: inputURL, kind: asset.kind)
+                }
+            }
+            return PreparationJobResult(
+                index: index,
+                asset: asset,
+                inputURL: inputURL,
+                preparedPayload: preparedPayload,
+                errorMessage: nil
+            )
         } catch {
             return PreparationJobResult(
                 index: index,
                 asset: asset,
                 inputURL: inputURL,
+                preparedPayload: preparedPayload,
                 errorMessage: error.localizedDescription
             )
         }
@@ -1105,6 +1198,7 @@ public final class RunCoordinator {
     private nonisolated static func analyzePreparedInput(
         _ prepared: PreparationJobResult,
         analyzer: Analyzer,
+        preparedAnalyzer: (any PreparedInputAnalyzer)?,
         timingRecorder: RunTimingRecorder
     ) async -> (Int, AnalysisJobResult) {
         guard let inputURL = prepared.inputURL else {
@@ -1118,8 +1212,17 @@ public final class RunCoordinator {
         }
 
         do {
-            let generated = try await measureStage(.analyze, recorder: timingRecorder) {
-                try await analyzer.analyze(mediaURL: inputURL, kind: prepared.asset.kind)
+            let generated: GeneratedMetadata
+            if let preparedPayload = prepared.preparedPayload,
+               let preparedAnalyzer
+            {
+                generated = try await measureStage(.analyze, recorder: timingRecorder) {
+                    try await preparedAnalyzer.analyze(preparedPayload: preparedPayload)
+                }
+            } else {
+                generated = try await measureStage(.analyze, recorder: timingRecorder) {
+                    try await analyzer.analyze(mediaURL: inputURL, kind: prepared.asset.kind)
+                }
             }
             let result = AnalysisJobResult(
                 asset: prepared.asset,

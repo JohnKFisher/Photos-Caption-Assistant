@@ -204,8 +204,23 @@ public struct CompletedItemPreview: Sendable, Equatable {
     }
 }
 
+public struct PreparedAnalysisPayload: Sendable, Equatable {
+    public let prompt: String
+    public let images: [Data]
+
+    public init(prompt: String, images: [Data]) {
+        self.prompt = prompt
+        self.images = images
+    }
+}
+
 public protocol Analyzer: Sendable {
     func analyze(mediaURL: URL, kind: MediaKind) async throws -> GeneratedMetadata
+}
+
+public protocol PreparedInputAnalyzer: Analyzer {
+    func prepareAnalysis(mediaURL: URL, kind: MediaKind) async throws -> PreparedAnalysisPayload
+    func analyze(preparedPayload: PreparedAnalysisPayload) async throws -> GeneratedMetadata
 }
 
 public protocol PhotosWriter: Sendable {

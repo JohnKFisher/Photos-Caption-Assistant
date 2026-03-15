@@ -948,6 +948,94 @@ final class RunCoordinatorTests: XCTestCase {
         XCTAssertGreaterThan(exportEnd!, analyzeStart!)
     }
 
+    func testPreparedAnalyzerBuildsNextPayloadDuringCurrentAnalysis() async {
+        let assets = makeAssets(count: 3)
+        let metadata = Dictionary(uniqueKeysWithValues: assets.map { asset in
+            (asset.id, ExistingMetadataState(caption: nil, keywords: [], ownershipTag: nil, isExternal: false))
+        })
+        let timeline = TimelineRecorder()
+        let writer = MockPhotosWriter(
+            assets: assets,
+            metadataByID: metadata,
+            exportDelayByID: [
+                "asset-0": 10_000_000,
+                "asset-1": 150_000_000
+            ],
+            timelineRecorder: timeline
+        )
+        let analyzerState = PreparedOverlapAnalyzerState(
+            result: GeneratedMetadata(caption: "caption", keywords: ["k1"]),
+            preparationDelayNanoseconds: 60_000_000,
+            analysisDelayNanoseconds: 180_000_000,
+            timelineRecorder: timeline
+        )
+        let coordinator = RunCoordinator(
+            photosWriter: writer,
+            analyzer: PreparedOverlapAnalyzer(state: analyzerState),
+            analysisConcurrency: 1,
+            prepareAheadLimit: 1
+        )
+
+        let summary = await coordinator.run(
+            options: defaultRunOptions(),
+            capabilities: defaultCapabilities(),
+            callbacks: RunCallbacks()
+        )
+
+        let analyzeStart = await timeline.timestamp(for: "analyze-start:asset-0")
+        let analyzeEnd = await timeline.timestamp(for: "analyze-end:asset-0")
+        let prepareStart = await timeline.timestamp(for: "prepare-start:asset-1")
+        let prepareEnd = await timeline.timestamp(for: "prepare-end:asset-1")
+        let maxActive = await analyzerState.maxActiveCountValue()
+
+        XCTAssertEqual(summary.progress.changed, 3)
+        XCTAssertEqual(summary.progress.failed, 0)
+        XCTAssertEqual(maxActive, 1)
+        XCTAssertNotNil(analyzeStart)
+        XCTAssertNotNil(analyzeEnd)
+        XCTAssertNotNil(prepareStart)
+        XCTAssertNotNil(prepareEnd)
+        XCTAssertLessThan(prepareStart!, analyzeEnd!)
+        XCTAssertGreaterThan(prepareEnd!, analyzeStart!)
+    }
+
+    func testPreviewGenerationDoesNotBlockLaterWrites() async {
+        let assets = makeAssets(count: 3)
+        let metadata = Dictionary(uniqueKeysWithValues: assets.map { asset in
+            (asset.id, ExistingMetadataState(caption: nil, keywords: [], ownershipTag: nil, isExternal: false))
+        })
+        let timeline = TimelineRecorder()
+        let writer = MockPhotosWriter(
+            assets: assets,
+            metadataByID: metadata,
+            timelineRecorder: timeline
+        )
+        let coordinator = RunCoordinator(
+            photosWriter: writer,
+            analyzer: MockAnalyzer(result: GeneratedMetadata(caption: "caption", keywords: ["k1"])),
+            writeBatchSize: 1,
+            previewRenderer: MockPreviewRenderer(
+                delayNanoseconds: 180_000_000,
+                timelineRecorder: timeline
+            )
+        )
+
+        let summary = await coordinator.run(
+            options: defaultRunOptions(),
+            capabilities: defaultCapabilities(),
+            callbacks: RunCallbacks()
+        )
+
+        let firstPreviewEnd = await timeline.timestamp(for: "preview-end:asset-0")
+        let secondWriteStart = await timeline.timestamp(for: "write-start:asset-1")
+
+        XCTAssertEqual(summary.progress.changed, 3)
+        XCTAssertEqual(summary.progress.failed, 0)
+        XCTAssertNotNil(firstPreviewEnd)
+        XCTAssertNotNil(secondWriteStart)
+        XCTAssertLessThan(secondWriteStart!, firstPreviewEnd!)
+    }
+
     func testSingleAnalysisWithPrepareAheadBeatsDualAnalysisUnderContention() async {
         let dualAnalysis = await runSyntheticContentionScenario(
             analysisConcurrency: 2,
@@ -1115,6 +1203,114 @@ private struct ContentionAwareAnalyzer: Analyzer {
     }
 }
 
+private actor PreparedOverlapAnalyzerState {
+    private let result: GeneratedMetadata
+    private let preparationDelayNanoseconds: UInt64
+    private let analysisDelayNanoseconds: UInt64
+    private let timelineRecorder: TimelineRecorder?
+    private var activeCount = 0
+    private var maxActiveCount = 0
+
+    init(
+        result: GeneratedMetadata,
+        preparationDelayNanoseconds: UInt64,
+        analysisDelayNanoseconds: UInt64,
+        timelineRecorder: TimelineRecorder? = nil
+    ) {
+        self.result = result
+        self.preparationDelayNanoseconds = preparationDelayNanoseconds
+        self.analysisDelayNanoseconds = analysisDelayNanoseconds
+        self.timelineRecorder = timelineRecorder
+    }
+
+    func beginPreparation(assetID: String) async -> UInt64 {
+        await timelineRecorder?.record("prepare-start:\(assetID)")
+        return preparationDelayNanoseconds
+    }
+
+    func endPreparation(assetID: String) async {
+        await timelineRecorder?.record("prepare-end:\(assetID)")
+    }
+
+    func beginAnalysis(assetID: String) async -> (delayNanoseconds: UInt64, result: GeneratedMetadata) {
+        activeCount += 1
+        maxActiveCount = max(maxActiveCount, activeCount)
+        await timelineRecorder?.record("analyze-start:\(assetID)")
+        return (analysisDelayNanoseconds, result)
+    }
+
+    func endAnalysis(assetID: String) async {
+        await timelineRecorder?.record("analyze-end:\(assetID)")
+        activeCount = max(0, activeCount - 1)
+    }
+
+    func maxActiveCountValue() -> Int {
+        maxActiveCount
+    }
+}
+
+private struct PreparedOverlapAnalyzer: PreparedInputAnalyzer {
+    let state: PreparedOverlapAnalyzerState
+
+    func analyze(mediaURL: URL, kind: MediaKind) async throws -> GeneratedMetadata {
+        let payload = try await prepareAnalysis(mediaURL: mediaURL, kind: kind)
+        return try await analyze(preparedPayload: payload)
+    }
+
+    func prepareAnalysis(mediaURL: URL, kind: MediaKind) async throws -> PreparedAnalysisPayload {
+        let assetID = mediaURL.deletingPathExtension().lastPathComponent
+        let delayNanoseconds = await state.beginPreparation(assetID: assetID)
+        try await Task.sleep(nanoseconds: delayNanoseconds)
+        await state.endPreparation(assetID: assetID)
+        return PreparedAnalysisPayload(prompt: assetID, images: [])
+    }
+
+    func analyze(preparedPayload: PreparedAnalysisPayload) async throws -> GeneratedMetadata {
+        let assetID = preparedPayload.prompt
+        let (delayNanoseconds, result) = await state.beginAnalysis(assetID: assetID)
+        try await Task.sleep(nanoseconds: delayNanoseconds)
+        await state.endAnalysis(assetID: assetID)
+        return result
+    }
+}
+
+private actor MockPreviewRenderer: PreviewRendering {
+    private let delayNanoseconds: UInt64
+    private let timelineRecorder: TimelineRecorder?
+
+    init(delayNanoseconds: UInt64 = 0, timelineRecorder: TimelineRecorder? = nil) {
+        self.delayNanoseconds = delayNanoseconds
+        self.timelineRecorder = timelineRecorder
+    }
+
+    func persistPreviewFile(from inputURL: URL, fallbackFilename: String, kind: MediaKind) async -> URL? {
+        let assetID = inputURL.deletingPathExtension().lastPathComponent
+        await timelineRecorder?.record("preview-start:\(assetID)")
+        if delayNanoseconds > 0 {
+            try? await Task.sleep(nanoseconds: delayNanoseconds)
+        }
+
+        let fallbackExtension = (fallbackFilename as NSString).pathExtension
+        let pathExtension = inputURL.pathExtension.isEmpty
+            ? (fallbackExtension.isEmpty ? "jpg" : fallbackExtension)
+            : inputURL.pathExtension
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pdc-tests-rendered-preview", isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+
+        do {
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            let fileURL = root.appendingPathComponent("preview.\(pathExtension)")
+            FileManager.default.createFile(atPath: fileURL.path, contents: Data())
+            await timelineRecorder?.record("preview-end:\(assetID)")
+            return fileURL
+        } catch {
+            await timelineRecorder?.record("preview-end:\(assetID)")
+            return nil
+        }
+    }
+}
+
 private actor PromptRecorder {
     private(set) var checkpoints: [Int] = []
     private(set) var externalPromptCount = 0
@@ -1235,6 +1431,7 @@ private actor MockPhotosWriter: PhotosWriter, PhotosProcessMonitoring, PhotoPrev
     }
 
     func writeMetadata(id: String, caption: String, keywords: [String]) async throws {
+        await timelineRecorder?.record("write-start:\(id)")
         if firstWriteAfterEnumeratePageCount == nil {
             firstWriteAfterEnumeratePageCount = enumeratePageCallCount
         }
@@ -1247,6 +1444,7 @@ private actor MockPhotosWriter: PhotosWriter, PhotosProcessMonitoring, PhotoPrev
             ownershipTag: tag,
             isExternal: false
         )
+        await timelineRecorder?.record("write-end:\(id)")
     }
 
     func writeMetadata(batch writes: [MetadataWritePayload]) async throws -> [MetadataWriteResult] {
