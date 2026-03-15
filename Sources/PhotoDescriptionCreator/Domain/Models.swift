@@ -44,7 +44,7 @@ public struct LogicVersion: Sendable, Equatable, Codable, Comparable {
         return lhs.patch < rhs.patch
     }
 
-    public static let current = LogicVersion(major: 2, minor: 1, patch: 0)
+    public static let current = LogicVersion(major: 2, minor: 3, patch: 0)
 }
 
 public struct OwnershipTag: Sendable, Equatable, Codable {
@@ -231,6 +231,34 @@ public protocol IncrementalPhotosWriter: PhotosWriter {
 
 public protocol BatchMetadataPhotosWriter: PhotosWriter {
     func readMetadata(ids: [String]) async throws -> [String: ExistingMetadataState]
+}
+
+public struct MetadataWritePayload: Sendable, Equatable {
+    public let id: String
+    public let caption: String
+    public let keywords: [String]
+
+    public init(id: String, caption: String, keywords: [String]) {
+        self.id = id
+        self.caption = caption
+        self.keywords = keywords
+    }
+}
+
+public struct MetadataWriteResult: Sendable, Equatable {
+    public let id: String
+    public let success: Bool
+    public let errorMessage: String?
+
+    public init(id: String, success: Bool, errorMessage: String? = nil) {
+        self.id = id
+        self.success = success
+        self.errorMessage = errorMessage
+    }
+}
+
+public protocol BatchWritePhotosWriter: PhotosWriter {
+    func writeMetadata(batch writes: [MetadataWritePayload]) async throws -> [MetadataWriteResult]
 }
 
 public enum PickerCapability: Sendable, Equatable {

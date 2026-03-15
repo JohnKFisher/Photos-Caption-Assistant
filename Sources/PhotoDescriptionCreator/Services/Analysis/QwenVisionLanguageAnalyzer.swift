@@ -13,8 +13,136 @@ public struct QwenVisionLanguageAnalyzer: Analyzer {
     private let keepAliveDuration = "30m"
     private let generationOptions: [String: Double] = [
         "temperature": 0.2,
-        "num_predict": 256
+        "num_predict": 128
     ]
+
+    // Keep V3 prompts in source so packaged builds do not depend on loose workspace files.
+    static let photoPromptV3 = """
+    You are generating Apple Photos metadata for one photo.
+    Return ONLY valid JSON in exactly this shape:
+    {"caption":"<one sentence factual description>","keywords":["k1","k2","k3"]}
+
+    Rules:
+
+    Caption
+    - Caption must be one sentence fragment, <= 20 words, plain factual language.
+    - Use a present participle phrase with no auxiliary verbs (no is/are/was), e.g., "two girls biking in a park".
+    - No commas, semicolons, em dashes, or parentheses. No ending punctuation.
+    - Prefer this structure when possible: count/article + subject (or role) + present participle + setting (if there is room) + up to two distinctive details.
+    - Describe only what is clearly visible. Do not guess names, relationships, or private identity traits.
+    - If screenshot, use caption starting "screenshot showing" and include keyword "screenshot".
+    - If document/whiteboard, use caption "document page showing" or "whiteboard showing" and include keyword "document" or "whiteboard".
+    - If photo of a screen (tv/monitor/phone), use caption "screen showing"
+    - If photo of a drawing or painting, use caption "drawing showing" or "painting showing"
+    - If 1 person, include most-specific visible category (e.g., "girl", "man", "bride", "baby").
+    - If 2-5 people, include a count + most-specific visible category (e.g., "two men", "three girls", "four people").
+    - If 6+ people, use "group" or "crowd".
+    - If mixed categories (adults and children), use count + "people" unless one category clearly dominates.
+    - Do not describe attractiveness or subjective traits.
+    - Do not infer: health status, disability, pregnancy, religion, ethnicity, nationality, sexuality, political affiliation.
+    - Do not read or quote license plates, addresses, emails, or phone numbers, even if visible (you may still say "car" or "street sign").
+    - If clothing/signage/posters/text clearly indicate a known character/brand/team/franchise, include that term.
+    - Only include specific terms like Star Trek or Mickey Mouse when clearly visible from logos, readable text, or unmistakable imagery.
+    - You may name specific locations, buildings, landmarks, or businesses only when confidence is high from clear signage/text or unmistakable visual cues.
+    - Role nouns allowed when visually unambiguous: You may use role-based nouns (e.g., bride, groom, wedding party, soldier, firefighter, police officer, graduate) only when clearly indicated by distinctive attire, uniforms, or context objects (e.g., wedding dress/veil/bouquet, military uniform/insignia, turnout gear, police uniform, cap and gown) - If role is not clearly indicated, use generic terms (man/woman/boy/girl/baby/person/group).
+    - If uncertain, use broader terms (person, indoor, outdoor, crowd) instead of specific guesses.
+    - Include up to two distinctive visible details that improve search, prioritizing unusual objects and distinctive clothing/accessories/colors (e.g., trombone, cowboy hat, orange hat, stroller, wheelchair, guitar). Prefer details that disambiguate similar photos. If needed to stay <= 20 words, drop setting before dropping distinctive details.
+    - When visible, include event cues (birthday, graduation, wedding, concert, soccer) and animal/vehicle types (dog, cat, fire truck, airplane) in the caption.
+
+    Keywords
+    - Keywords must be 6-12 items, lowercase, unique, search-friendly.
+    - Keywords must contain only letters/numbers/spaces (no punctuation). Normalize by removing punctuation.
+    - Do not include numeric counts as keywords (counts belong in the caption).
+    - Keywords may be 1-3 words max.
+    - Use singular forms when possible.
+    - Include specific differentiators (character names, distinctive objects, recognizable places/buildings) only when clearly visible.
+    - Prefer specific, searchable nouns over generic ones when evidence is clear; if uncertain, use broader terms.
+    - When a role noun is used in the caption, include it as a keyword (e.g., bride, soldier, wedding).
+    - Aim to include, when visible:
+      - 1-2 subjects (person/child/dog/etc.)
+      - 1 activity/action (walking, eating, hugging, skating)
+      - 1-2 setting/location type (kitchen, beach, stadium, classroom)
+      - 1 notable object (balloon, stroller, guitar, laptop)
+      - 1 lighting/time (day, night, sunset) or weather (snow, rain)
+      - Include 1-2 distinctive details as keywords (notable object and a distinctive clothing/accessory/color phrase like "orange hat") when clearly visible.
+      - If readable public text is present (store name, team name, event banner), include 1-2 normalized text keywords.
+    - If a category is not evident (e.g., no clear action), replace it with another strong, visible noun (object/scene/text).
+    - Do not invent actions; if no clear action, use an object/scene keyword instead of an action keyword
+    - Do not include generic filler words like: photo, image, picture, thing, stuff.
+    - Do not include reserved/internal tags or prefixes (for example __pdc*_).
+
+    Output
+    - Output JSON only. No markdown, no commentary, no extra keys.
+    - Before output, verify: caption <= 20 words, one fragment with no ending punctuation, keywords 6-12, all lowercase, unique, no punctuation, no forbidden guesses. Conforms to JSON format.
+
+    Example output:
+    {"caption":"two girls wearing green scout vests smiling on playground equipment at dusk","keywords":["girl","scout","playground","smile","outdoor","dusk","park","swing"]}
+    """
+
+    static let videoPromptV3 = """
+    You are generating Apple Photos metadata for one video.
+    The provided images are key frames from the same video in time order.
+
+    Return ONLY valid JSON in exactly this shape:
+    {"caption":"<one sentence factual description>","keywords":["k1","k2","k3"]}
+
+    Rules:
+
+    Caption
+    - Caption must be one sentence fragment, <= 20 words, plain factual language.
+    - Use a present participle phrase with no auxiliary verbs (no is/are/was), e.g., "two girls biking in a park".
+    - No commas, semicolons, em dashes, or parentheses. No ending punctuation.
+    - Prefer this structure when possible: count/article + subject (or role) + present participle + setting (if there is room) + up to two distinctive details.
+    - Describe only what is clearly visible. Do not guess names, relationships, or private identity traits.
+    - If screenshot, use caption starting "screenshot showing" and include keyword "screenshot".
+    - If document/whiteboard, use caption "document page showing" or "whiteboard showing" and include keyword "document" or "whiteboard".
+    - If photo of a screen (tv/monitor/phone), use caption "screen showing"
+    - If photo of a drawing or painting, use caption "drawing showing" or "painting showing"
+    - If 1 person, include most-specific visible category (e.g., "girl", "man", "bride", "baby").
+    - If 2-5 people, include a count + most-specific visible category (e.g., "two men", "three girls", "four people").
+    - If 6+ people, use "group" or "crowd".
+    - If mixed categories (adults and children), use count + "people" unless one category clearly dominates.
+    - Do not describe attractiveness or subjective traits.
+    - Do not infer: health status, disability, pregnancy, religion, ethnicity, nationality, sexuality, political affiliation.
+    - Do not read or quote license plates, addresses, emails, or phone numbers, even if visible (you may still say "car" or "street sign").
+    - If clothing/signage/posters/text clearly indicate a known character/brand/team/franchise, include that term.
+    - Only include specific terms like Star Trek or Mickey Mouse when clearly visible from logos, readable text, or unmistakable imagery.
+    - You may name specific locations, buildings, landmarks, or businesses only when confidence is high from clear signage/text or unmistakable visual cues.
+    - Role nouns allowed when visually unambiguous: You may use role-based nouns (e.g., bride, groom, wedding party, soldier, firefighter, police officer, graduate) only when clearly indicated by distinctive attire, uniforms, or context objects (e.g., wedding dress/veil/bouquet, military uniform/insignia, turnout gear, police uniform, cap and gown) - If role is not clearly indicated, use generic terms (man/woman/boy/girl/baby/person/group).
+    - If uncertain, use broader terms (person, indoor, outdoor, crowd) instead of specific guesses.
+    - Include up to two distinctive visible details that improve search, prioritizing unusual objects and distinctive clothing/accessories/colors (e.g., trombone, cowboy hat, orange hat, stroller, wheelchair, guitar). Prefer details that disambiguate similar photos. If needed to stay <= 20 words, drop setting before dropping distinctive details.
+    - When visible, include event cues (birthday, graduation, wedding, concert, soccer) and animal/vehicle types (dog, cat, fire truck, airplane) in the caption.
+    - Describe motion/action, not just a single frame snapshot.
+
+    Keywords
+    - Keywords must be 6-12 items, lowercase, unique, search-friendly.
+    - Keywords must contain only letters/numbers/spaces (no punctuation). Normalize by removing punctuation.
+    - Do not include numeric counts as keywords (counts belong in the caption).
+    - Keywords may be 1-3 words max.
+    - Use singular forms when possible.
+    - Include specific differentiators (character names, distinctive objects, recognizable places/buildings) only when clearly visible.
+    - Prefer specific, searchable nouns over generic ones when evidence is clear; if uncertain, use broader terms.
+    - When a role noun is used in the caption, include it as a keyword (e.g., bride, soldier, wedding).
+    - Aim to include, when visible:
+      - 1-2 subjects (person/child/dog/etc.)
+      - 1 activity/action (walking, eating, hugging, skating)
+      - 1-2 setting/location type (kitchen, beach, stadium, classroom)
+      - 1 notable object (balloon, stroller, guitar, laptop)
+      - 1 lighting/time (day, night, sunset) or weather (snow, rain)
+      - Include 1-2 distinctive details as keywords (notable object and a distinctive clothing/accessory/color phrase like "orange hat") when clearly visible.
+      - If readable public text is present (store name, team name, event banner), include 1-2 normalized text keywords.
+    - If a category is not evident (e.g., no clear action), replace it with another strong, visible noun (object/scene/text).
+    - Do not invent actions; if no clear action, use an object/scene keyword instead of an action keyword
+    - Do not include generic filler words like: photo, image, picture, thing, stuff.
+    - Do not include reserved/internal tags or prefixes (for example __pdc*_).
+
+    Output
+    - Output JSON only. No markdown, no commentary, no extra keys.
+    - Before output, verify: caption <= 20 words, one fragment with no ending punctuation, keywords 6-12, all lowercase, unique, no punctuation, no forbidden guesses. Conforms to JSON format.
+
+    Example output:
+    {"caption":"two girls wearing green scout vests smiling on playground equipment at dusk","keywords":["girl","scout","playground","smile","outdoor","dusk","park","swing"]}
+    """
 
     public init(
         frameSampler: VideoFrameSampler = VideoFrameSampler(),
@@ -22,7 +150,7 @@ public struct QwenVisionLanguageAnalyzer: Analyzer {
         modelName: String = "qwen2.5vl:7b",
         requestTimeoutSeconds: TimeInterval = 420,
         requestRetryCount: Int = 0,
-        maxImageDimension: CGFloat = 1280,
+        maxImageDimension: CGFloat = 1024,
         jpegCompression: CGFloat = 0.82
     ) {
         self.frameSampler = frameSampler
@@ -41,66 +169,12 @@ public struct QwenVisionLanguageAnalyzer: Analyzer {
         switch kind {
         case .photo:
             imageData = [try jpegData(from: mediaURL)]
-            prompt = """
-            You are generating Apple Photos metadata for one photo.
-            Return ONLY valid JSON in exactly this shape:
-            {"caption":"<one sentence factual description>","keywords":["k1","k2","k3"]}
-
-            Rules:
-            - Caption must be one sentence, <= 20 words, plain factual language.
-            - Describe only what is clearly visible; do not guess names, relationships, or private identity traits.
-            - Prefer this caption structure when possible: subject + action + setting.
-            - Prefer specific, searchable nouns over generic ones when evidence is clear.
-            - Use man/woman/boy/girl when visually clear; use person only when sex/age is unclear.
-            - If clothing/signage/posters/text clearly indicate a known character/brand/team/franchise, include that term.
-            - You may include specific terms like Mickey Mouse or Wolverine only when clearly visible from logos, readable text, or unmistakable imagery.
-            - You may name specific locations, buildings, landmarks, businesses, or notable objects when confidence is high from clear signage/text or unmistakable visual cues.
-            - If uncertain, use broader terms (for example: person, indoor, outdoor, crowd) instead of specific guesses.
-            - Keywords must be 6-10 items, lowercase, unique, short, and search-friendly.
-            - Use mostly noun/scene/activity terms that improve library search.
-            - Include a balanced spread when possible: people/subjects, activity, setting, notable objects, time/lighting.
-            - Include specific differentiators (for example logo text, character names, distinctive objects, recognizable places/buildings) when clearly visible.
-            - Use singular forms when possible (child not children, tree not trees).
-            - Do not include punctuation, hashtags, or multi-sentence phrases in keywords.
-            - Do not include generic filler words like: photo, image, picture, thing, stuff.
-            - Do not include reserved/internal tags or prefixes (for example __pdc_*).
-            - Output JSON only. No markdown, no commentary, no extra keys.
-
-            Example output:
-            {"caption":"two children smiling on playground equipment at dusk","keywords":["children","playground","smile","outdoor","dusk","family","park"]}
-            """
+            prompt = Self.photoPromptV3
         case .video:
             let frames = try await frameSampler.sampleFrames(from: mediaURL, count: 5)
             let keyFrames = Array(frames.prefix(3))
             imageData = try keyFrames.map(jpegData(from:))
-            prompt = """
-            You are generating Apple Photos metadata for one video.
-            The provided images are key frames from the same video in time order.
-            Return ONLY valid JSON in exactly this shape:
-            {"caption":"<one sentence factual description of the overall video>","keywords":["k1","k2","k3"]}
-
-            Rules:
-            - Caption must be one sentence, <= 20 words, summarizing the overall action across the clip.
-            - Describe motion/action, not just a single frame snapshot.
-            - Describe only what is clearly visible; do not guess names, relationships, or private identity traits.
-            - Prefer specific, searchable nouns over generic ones when evidence is clear.
-            - Use man/woman/boy/girl when visually clear; use person only when sex/age is unclear.
-            - If clothing/signage/posters/text clearly indicate a known character/brand/team/franchise, include that term.
-            - You may include specific terms like Mickey Mouse or Wolverine only when clearly visible from logos, readable text, or unmistakable imagery.
-            - You may name specific locations, buildings, landmarks, businesses, or notable objects when confidence is high from clear signage/text or unmistakable visual cues.
-            - If uncertain, use broader terms instead of specific guesses.
-            - Keywords must be 6-10 items, lowercase, unique, short, and search-friendly.
-            - Include at least one action/motion keyword when motion is visible (for example walking, dancing, driving, playing).
-            - Include a balanced spread when possible: subjects, action, setting, notable objects, time/lighting.
-            - Include specific differentiators (for example logo text, character names, distinctive objects, recognizable places/buildings) when clearly visible.
-            - Use singular forms when possible.
-            - Do not include punctuation, hashtags, or filler words like photo/image/picture/thing/stuff.
-            - Do not include reserved/internal tags or prefixes (for example __pdc_*).
-            - Output JSON only. No markdown, no commentary, no extra keys.
-
-            Example output:
-            {"caption":"a child runs across a backyard lawn while adults watch nearby","keywords":["child","running","backyard","family","outdoor","daylight","grass"]}
-            """
+            prompt = Self.videoPromptV3
         }
 
         let generatedText = try await request(prompt: prompt, images: imageData)

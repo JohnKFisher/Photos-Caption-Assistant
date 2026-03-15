@@ -52,4 +52,43 @@ final class PhotosAppleScriptClientTests: XCTestCase {
         )
         XCTAssertEqual(chunks, [["one"], [oversizedID], ["two"]])
     }
+
+    func testChunkedMetadataWritesRespectsCountAndArgumentBudgets() {
+        let writes = [
+            MetadataWritePayload(id: "a", caption: "cat", keywords: ["pet"]),
+            MetadataWritePayload(id: "bb", caption: "dog", keywords: ["pet"]),
+            MetadataWritePayload(id: "ccc", caption: "bird", keywords: ["animal"]),
+            MetadataWritePayload(id: "dddd", caption: "fish", keywords: ["aquatic"])
+        ]
+
+        let chunks = PhotosAppleScriptClient.chunkedMetadataWrites(
+            writes,
+            maxItems: 2,
+            maxArgumentBytes: 40
+        )
+
+        XCTAssertEqual(chunks.count, 2)
+        XCTAssertEqual(chunks[0].map(\.id), ["a", "bb"])
+        XCTAssertEqual(chunks[1].map(\.id), ["ccc", "dddd"])
+    }
+
+    func testChunkedMetadataWritesSplitsOversizedEntryIntoOwnChunk() {
+        let oversizedCaption = String(repeating: "x", count: 60)
+        let writes = [
+            MetadataWritePayload(id: "one", caption: "ok", keywords: ["k1"]),
+            MetadataWritePayload(id: "two", caption: oversizedCaption, keywords: ["k2"]),
+            MetadataWritePayload(id: "three", caption: "ok", keywords: ["k3"])
+        ]
+
+        let chunks = PhotosAppleScriptClient.chunkedMetadataWrites(
+            writes,
+            maxItems: 10,
+            maxArgumentBytes: 24
+        )
+
+        XCTAssertEqual(chunks.count, 3)
+        XCTAssertEqual(chunks[0].map(\.id), ["one"])
+        XCTAssertEqual(chunks[1].map(\.id), ["two"])
+        XCTAssertEqual(chunks[2].map(\.id), ["three"])
+    }
 }

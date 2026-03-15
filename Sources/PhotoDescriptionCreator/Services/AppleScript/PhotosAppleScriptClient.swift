@@ -3,7 +3,7 @@ import Darwin
 import Foundation
 import Photos
 
-public actor PhotosAppleScriptClient: PhotosWriter, PhotosProcessMonitoring, PhotoPreviewSource, IncrementalPhotosWriter, BatchMetadataPhotosWriter {
+public actor PhotosAppleScriptClient: PhotosWriter, PhotosProcessMonitoring, PhotoPreviewSource, IncrementalPhotosWriter, BatchMetadataPhotosWriter, BatchWritePhotosWriter {
     private enum ScriptTimeout {
         static let enumerateLibrary: TimeInterval = 900
         static let enumerateNarrowScope: TimeInterval = 180
@@ -13,6 +13,7 @@ public actor PhotosAppleScriptClient: PhotosWriter, PhotosProcessMonitoring, Pho
         static let readMetadata: TimeInterval = 30
         static let readMetadataBatchBase: TimeInterval = 20
         static let writeMetadata: TimeInterval = 45
+        static let writeMetadataBatchBase: TimeInterval = 25
         static let exportAsset: TimeInterval = 120
         static let capabilityProbe: TimeInterval = 15
         static let listAlbums: TimeInterval = 120
@@ -20,6 +21,8 @@ public actor PhotosAppleScriptClient: PhotosWriter, PhotosProcessMonitoring, Pho
         static let previewImageRequestGuard: TimeInterval = 3
         static let readMetadataBatchMaxIDs = 64
         static let readMetadataBatchMaxArgumentBytes = 12_000
+        static let writeMetadataBatchMaxItems = 24
+        static let writeMetadataBatchMaxArgumentBytes = 36_000
         static let maximumCommandArgumentBytes = 64_000
     }
 
@@ -258,6 +261,55 @@ public actor PhotosAppleScriptClient: PhotosWriter, PhotosProcessMonitoring, Pho
         return chunks
     }
 
+    static func chunkedMetadataWrites(
+        _ writes: [MetadataWritePayload],
+        maxItems: Int,
+        maxArgumentBytes: Int
+    ) -> [[MetadataWritePayload]] {
+        guard !writes.isEmpty else { return [] }
+        guard maxItems > 0 else { return writes.map { [$0] } }
+        guard maxArgumentBytes > 0 else { return writes.map { [$0] } }
+
+        func writeArgumentBytes(_ write: MetadataWritePayload) -> Int {
+            let keywordBlob = write.keywords.joined(separator: String(Character(UnicodeScalar(31))))
+            return write.id.lengthOfBytes(using: .utf8)
+                + write.caption.lengthOfBytes(using: .utf8)
+                + keywordBlob.lengthOfBytes(using: .utf8)
+                + 3
+        }
+
+        var chunks: [[MetadataWritePayload]] = []
+        chunks.reserveCapacity((writes.count / maxItems) + 1)
+        var current: [MetadataWritePayload] = []
+        current.reserveCapacity(min(writes.count, maxItems))
+        var currentBytes = 0
+
+        for write in writes {
+            let bytes = writeArgumentBytes(write)
+            let exceedsCount = current.count >= maxItems
+            let exceedsByteBudget = !current.isEmpty && (currentBytes + bytes > maxArgumentBytes)
+            if exceedsCount || exceedsByteBudget {
+                chunks.append(current)
+                current.removeAll(keepingCapacity: true)
+                currentBytes = 0
+            }
+
+            if bytes > maxArgumentBytes {
+                chunks.append([write])
+                continue
+            }
+
+            current.append(write)
+            currentBytes += bytes
+        }
+
+        if !current.isEmpty {
+            chunks.append(current)
+        }
+
+        return chunks
+    }
+
     private func runReadMetadataBatch(ids: [String]) throws -> [String: ExistingMetadataState] {
         let script = """
         \(mediaItemResolverAppleScript)
@@ -362,7 +414,7 @@ public actor PhotosAppleScriptClient: PhotosWriter, PhotosProcessMonitoring, Pho
         return byID
     }
 
-    public func writeMetadata(id: String, caption: String, keywords: [String]) async throws {
+    private func normalizedWriteParts(caption: String, keywords: [String]) -> (caption: String, keywordBlob: String) {
         let normalizedCaption = caption.replacingOccurrences(of: "\n", with: " ")
         let normalizedKeywords = keywords
             .map { keyword in
@@ -372,7 +424,165 @@ public actor PhotosAppleScriptClient: PhotosWriter, PhotosProcessMonitoring, Pho
             }
             .filter { !$0.isEmpty && $0.caseInsensitiveCompare("missing value") != .orderedSame }
         let keywordBlob = normalizedKeywords.joined(separator: String(Character(UnicodeScalar(31))))
+        return (normalizedCaption, keywordBlob)
+    }
 
+    public func writeMetadata(batch writes: [MetadataWritePayload]) async throws -> [MetadataWriteResult] {
+        guard !writes.isEmpty else { return [] }
+        let chunks = Self.chunkedMetadataWrites(
+            writes,
+            maxItems: ScriptTimeout.writeMetadataBatchMaxItems,
+            maxArgumentBytes: ScriptTimeout.writeMetadataBatchMaxArgumentBytes
+        )
+
+        var resultsByID: [String: MetadataWriteResult] = [:]
+        for chunk in chunks {
+            do {
+                let chunkResults = try runWriteMetadataBatch(writes: chunk)
+                for result in chunkResults where resultsByID[result.id] == nil {
+                    resultsByID[result.id] = result
+                }
+            } catch {
+                // Fall back to single-item writes for this chunk.
+                for write in chunk where resultsByID[write.id] == nil {
+                    do {
+                        try await writeMetadata(id: write.id, caption: write.caption, keywords: write.keywords)
+                        resultsByID[write.id] = MetadataWriteResult(id: write.id, success: true)
+                    } catch {
+                        resultsByID[write.id] = MetadataWriteResult(
+                            id: write.id,
+                            success: false,
+                            errorMessage: error.localizedDescription
+                        )
+                    }
+                }
+            }
+        }
+
+        return writes.map { write in
+            resultsByID[write.id] ?? MetadataWriteResult(
+                id: write.id,
+                success: false,
+                errorMessage: "Batch write did not return a result."
+            )
+        }
+    }
+
+    private func runWriteMetadataBatch(writes: [MetadataWritePayload]) throws -> [MetadataWriteResult] {
+        guard !writes.isEmpty else { return [] }
+
+        let script = """
+        \(mediaItemResolverAppleScript)
+
+        on replaceText(findText, replaceWith, sourceText)
+            set AppleScript's text item delimiters to findText
+            set textParts to text items of sourceText
+            set AppleScript's text item delimiters to replaceWith
+            set rebuilt to textParts as text
+            set AppleScript's text item delimiters to \"\"
+            return rebuilt
+        end replaceText
+
+        on sanitizeText(inputText)
+            set cleaned to inputText as text
+            set cleaned to my replaceText((character id 29), \" \", cleaned)
+            set cleaned to my replaceText((character id 30), \" \", cleaned)
+            set cleaned to my replaceText(linefeed, \" \", cleaned)
+            set cleaned to my replaceText(return, \" \", cleaned)
+            return cleaned
+        end sanitizeText
+
+        on run argv
+            set recordDelimiter to (character id 29)
+            set fieldDelimiter to (character id 30)
+            set rows to {}
+            set argvCount to count of argv
+            set itemIndex to 1
+
+            repeat while itemIndex <= argvCount
+                set targetID to (item itemIndex of argv) as text
+                set captionText to item (itemIndex + 1) of argv
+                set keywordBlob to item (itemIndex + 2) of argv
+
+                set keywordList to {}
+                if keywordBlob is not \"\" then
+                    set AppleScript's text item delimiters to (character id 31)
+                    set keywordList to text items of keywordBlob
+                    set AppleScript's text item delimiters to \"\"
+                end if
+
+                try
+                    set targetItem to my resolveMediaItem(targetID)
+                    tell application \"Photos\"
+                        set description of targetItem to captionText
+                        set keywords of targetItem to keywordList
+                    end tell
+                    set end of rows to targetID & fieldDelimiter & \"ok\" & fieldDelimiter & \"\"
+                on error errorMessage
+                    set safeMessage to my sanitizeText(errorMessage)
+                    set end of rows to targetID & fieldDelimiter & \"error\" & fieldDelimiter & safeMessage
+                end try
+
+                set itemIndex to itemIndex + 3
+            end repeat
+
+            set AppleScript's text item delimiters to recordDelimiter
+            set outputText to rows as text
+            set AppleScript's text item delimiters to \"\"
+            return outputText
+        end run
+        """
+
+        var arguments: [String] = []
+        arguments.reserveCapacity(writes.count * 3)
+        for write in writes {
+            let normalized = normalizedWriteParts(caption: write.caption, keywords: write.keywords)
+            arguments.append(write.id)
+            arguments.append(normalized.caption)
+            arguments.append(normalized.keywordBlob)
+        }
+
+        let timeout = min(
+            300,
+            max(
+                ScriptTimeout.writeMetadataBatchBase,
+                Double(writes.count) * 1.2
+            )
+        )
+        let output = try runAppleScript(
+            script,
+            arguments: arguments,
+            timeoutSeconds: timeout,
+            operationName: "write metadata batch"
+        )
+
+        let rowDelimiter = Character(UnicodeScalar(29))
+        let fieldDelimiter = Character(UnicodeScalar(30))
+        var parsedByID: [String: MetadataWriteResult] = [:]
+        for row in output.split(separator: rowDelimiter, omittingEmptySubsequences: true) {
+            let fields = row.split(separator: fieldDelimiter, omittingEmptySubsequences: false)
+            guard fields.count >= 2 else { continue }
+            let id = String(fields[0])
+            let status = String(fields[1])
+            if status == "ok" {
+                parsedByID[id] = MetadataWriteResult(id: id, success: true)
+            } else {
+                let message = fields.indices.contains(2) ? String(fields[2]) : "Metadata write failed."
+                parsedByID[id] = MetadataWriteResult(id: id, success: false, errorMessage: message)
+            }
+        }
+
+        return writes.map { write in
+            parsedByID[write.id] ?? MetadataWriteResult(
+                id: write.id,
+                success: false,
+                errorMessage: "No batch result was returned for this item."
+            )
+        }
+    }
+
+    public func writeMetadata(id: String, caption: String, keywords: [String]) async throws {
+        let normalized = normalizedWriteParts(caption: caption, keywords: keywords)
         let script = """
         \(mediaItemResolverAppleScript)
 
@@ -399,7 +609,7 @@ public actor PhotosAppleScriptClient: PhotosWriter, PhotosProcessMonitoring, Pho
 
         _ = try runAppleScript(
             script,
-            arguments: [id, normalizedCaption, keywordBlob],
+            arguments: [id, normalized.caption, normalized.keywordBlob],
             timeoutSeconds: ScriptTimeout.writeMetadata,
             operationName: "write metadata"
         )

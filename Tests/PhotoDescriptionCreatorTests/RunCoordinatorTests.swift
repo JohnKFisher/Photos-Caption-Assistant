@@ -682,6 +682,48 @@ final class RunCoordinatorTests: XCTestCase {
         XCTAssertEqual(countCalls, 0)
     }
 
+    func testFastTraversalRetriesEnumeratePageWithSmallerLimitAfterTimeout() async {
+        let assets = makeAssets(count: 300)
+        let metadata = Dictionary(uniqueKeysWithValues: assets.map { asset in
+            (asset.id, ExistingMetadataState(caption: nil, keywords: [], ownershipTag: nil, isExternal: false))
+        })
+
+        let writer = MockPhotosWriter(
+            assets: assets,
+            metadataByID: metadata,
+            enumerateTimeoutWhenLimitExceeds: 200
+        )
+        let coordinator = RunCoordinator(
+            photosWriter: writer,
+            analyzer: MockAnalyzer(result: GeneratedMetadata(caption: "retry", keywords: ["k"])),
+            checkpointInterval: 1000
+        )
+
+        let summary = await coordinator.run(
+            options: RunOptions(
+                source: .library,
+                optionalCaptureDateRange: nil,
+                traversalOrder: .photosOrderFast,
+                overwriteAppOwnedSameOrNewer: false
+            ),
+            capabilities: AppCapabilities(
+                photosAutomationAvailable: true,
+                qwenModelAvailable: true,
+                pickerCapability: .supported
+            ),
+            callbacks: RunCallbacks(
+                onProgress: { _ in },
+                confirmExternalOverwrite: { _, _ in false },
+                confirmContinueAfterCheckpoint: { _ in true }
+            )
+        )
+
+        let enumeratePageCallCount = await writer.enumeratePageCallCountValue()
+        XCTAssertEqual(summary.progress.changed, assets.count)
+        XCTAssertTrue(summary.errors.isEmpty)
+        XCTAssertGreaterThan(enumeratePageCallCount, 3)
+    }
+
     func testLargeOrderedRunReadsBatchMetadataInProcessingChunks() async {
         let assets = makeAssets(count: 620)
         let metadata = Dictionary(uniqueKeysWithValues: assets.map { asset in
@@ -723,6 +765,46 @@ final class RunCoordinatorTests: XCTestCase {
         XCTAssertTrue(batchReadSizes.allSatisfy { $0 <= 32 })
         XCTAssertEqual(firstWriteAfterEnumeratePages, 3)
         XCTAssertEqual(countCalls, 1)
+    }
+
+    func testWriteBatchingUsesConfiguredChunkSize() async {
+        let assets = makeAssets(count: 70)
+        let metadata = Dictionary(uniqueKeysWithValues: assets.map { asset in
+            (asset.id, ExistingMetadataState(caption: nil, keywords: [], ownershipTag: nil, isExternal: false))
+        })
+
+        let writer = MockPhotosWriter(assets: assets, metadataByID: metadata)
+        let coordinator = RunCoordinator(
+            photosWriter: writer,
+            analyzer: MockAnalyzer(result: GeneratedMetadata(caption: "batched", keywords: ["k"])),
+            checkpointInterval: 1000,
+            writeBatchSize: 16
+        )
+
+        let summary = await coordinator.run(
+            options: RunOptions(
+                source: .library,
+                optionalCaptureDateRange: nil,
+                traversalOrder: .photosOrderFast,
+                overwriteAppOwnedSameOrNewer: false
+            ),
+            capabilities: AppCapabilities(
+                photosAutomationAvailable: true,
+                qwenModelAvailable: true,
+                pickerCapability: .supported
+            ),
+            callbacks: RunCallbacks(
+                onProgress: { _ in },
+                confirmExternalOverwrite: { _, _ in false },
+                confirmContinueAfterCheckpoint: { _ in true }
+            )
+        )
+
+        let batchWriteSizes = await writer.batchWriteSizesValue()
+        XCTAssertEqual(summary.progress.changed, assets.count)
+        XCTAssertFalse(batchWriteSizes.isEmpty)
+        XCTAssertEqual(batchWriteSizes.reduce(0, +), assets.count)
+        XCTAssertTrue(batchWriteSizes.allSatisfy { $0 <= 16 })
     }
 
     func testOrderedPreparationProgressReportsEnumeratedCounts() async {
@@ -859,10 +941,11 @@ private actor PromptRecorder {
     }
 }
 
-private actor MockPhotosWriter: PhotosWriter, PhotosProcessMonitoring, PhotoPreviewSource, BatchMetadataPhotosWriter, IncrementalPhotosWriter {
+private actor MockPhotosWriter: PhotosWriter, PhotosProcessMonitoring, PhotoPreviewSource, BatchMetadataPhotosWriter, BatchWritePhotosWriter, IncrementalPhotosWriter {
     private let assets: [MediaAsset]
     private let photosResidentMemoryBytesValue: UInt64?
     private let previewDataByID: [String: Data]
+    private let enumerateTimeoutWhenLimitExceeds: Int?
     private var metadataByID: [String: ExistingMetadataState]
     private(set) var writes: [String: (caption: String, keywords: [String])] = [:]
     private(set) var writeOrder: [String] = []
@@ -870,6 +953,7 @@ private actor MockPhotosWriter: PhotosWriter, PhotosProcessMonitoring, PhotoPrev
     private(set) var previewRequestedPixelSizes: [Int] = []
     private(set) var exportRequests: [String] = []
     private(set) var batchReadSizes: [Int] = []
+    private(set) var batchWriteSizes: [Int] = []
     private(set) var enumeratePageCallCount = 0
     private(set) var firstWriteAfterEnumeratePageCount: Int?
     private(set) var countCallCount = 0
@@ -878,12 +962,14 @@ private actor MockPhotosWriter: PhotosWriter, PhotosProcessMonitoring, PhotoPrev
         assets: [MediaAsset],
         metadataByID: [String: ExistingMetadataState],
         photosResidentMemoryBytes: UInt64? = nil,
-        previewDataByID: [String: Data] = [:]
+        previewDataByID: [String: Data] = [:],
+        enumerateTimeoutWhenLimitExceeds: Int? = nil
     ) {
         self.assets = assets
         self.metadataByID = metadataByID
         self.photosResidentMemoryBytesValue = photosResidentMemoryBytes
         self.previewDataByID = previewDataByID
+        self.enumerateTimeoutWhenLimitExceeds = enumerateTimeoutWhenLimitExceeds
     }
 
     func enumerate(scope: ScopeSource, dateRange: CaptureDateRange?) async throws -> [MediaAsset] {
@@ -919,6 +1005,9 @@ private actor MockPhotosWriter: PhotosWriter, PhotosProcessMonitoring, PhotoPrev
         enumeratePageCallCount += 1
         let selected = try await enumerate(scope: scope, dateRange: nil)
         guard offset < selected.count, limit > 0 else { return [] }
+        if let threshold = enumerateTimeoutWhenLimitExceeds, limit > threshold {
+            throw PhotosAppleScriptError.scriptTimedOut(operation: "enumerate page", timeoutSeconds: 45)
+        }
         let end = min(offset + limit, selected.count)
         return Array(selected[offset..<end])
     }
@@ -945,6 +1034,27 @@ private actor MockPhotosWriter: PhotosWriter, PhotosProcessMonitoring, PhotoPrev
             ownershipTag: tag,
             isExternal: false
         )
+    }
+
+    func writeMetadata(batch writes: [MetadataWritePayload]) async throws -> [MetadataWriteResult] {
+        batchWriteSizes.append(writes.count)
+        var results: [MetadataWriteResult] = []
+        results.reserveCapacity(writes.count)
+        for write in writes {
+            do {
+                try await writeMetadata(id: write.id, caption: write.caption, keywords: write.keywords)
+                results.append(MetadataWriteResult(id: write.id, success: true))
+            } catch {
+                results.append(
+                    MetadataWriteResult(
+                        id: write.id,
+                        success: false,
+                        errorMessage: error.localizedDescription
+                    )
+                )
+            }
+        }
+        return results
     }
 
     func exportAssetToTemporaryURL(id: String) async throws -> URL {
@@ -1000,6 +1110,10 @@ private actor MockPhotosWriter: PhotosWriter, PhotosProcessMonitoring, PhotoPrev
 
     func batchReadSizesValue() async -> [Int] {
         batchReadSizes
+    }
+
+    func batchWriteSizesValue() async -> [Int] {
+        batchWriteSizes
     }
 
     func enumeratePageCallCountValue() async -> Int {

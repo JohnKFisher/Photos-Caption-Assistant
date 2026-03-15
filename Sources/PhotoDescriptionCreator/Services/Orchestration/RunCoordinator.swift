@@ -1,4 +1,5 @@
 import AppKit
+import AVFoundation
 import CoreGraphics
 import Foundation
 
@@ -47,15 +48,63 @@ public struct RunCallbacks {
     }
 }
 
+private enum RunTimingStage: String, CaseIterable, Hashable, Sendable {
+    case metadataRead = "metadata-read"
+    case assetAcquire = "asset-acquire"
+    case analyze = "analyze"
+    case write = "write"
+    case preview = "preview"
+}
+
+private actor RunTimingRecorder {
+    private var totals: [RunTimingStage: UInt64] = [:]
+
+    func record(stage: RunTimingStage, nanoseconds: UInt64) {
+        guard nanoseconds > 0 else { return }
+        totals[stage, default: 0] += nanoseconds
+    }
+
+    func summary(totalWallNanoseconds: UInt64) -> String {
+        let wallSeconds = Double(totalWallNanoseconds) / 1_000_000_000
+        let entries = RunTimingStage.allCases.map { stage -> String in
+            let elapsedNs = totals[stage, default: 0]
+            let elapsedSeconds = Double(elapsedNs) / 1_000_000_000
+            let pct = totalWallNanoseconds > 0
+                ? (Double(elapsedNs) / Double(totalWallNanoseconds)) * 100.0
+                : 0.0
+            let pctText = String(format: "%.1f", pct)
+            return "\(stage.rawValue)=\(Self.formatSeconds(elapsedSeconds))s (\(pctText)%)"
+        }
+        return "[RunCoordinator] stage timings wall=\(Self.formatSeconds(wallSeconds))s " + entries.joined(separator: ", ")
+    }
+
+    private static func formatSeconds(_ value: Double) -> String {
+        String(format: "%.2f", value)
+    }
+}
+
 @MainActor
 public final class RunCoordinator {
+    private struct AnalysisJobResult: Sendable {
+        let asset: MediaAsset
+        let inputURL: URL?
+        let generated: GeneratedMetadata?
+        let errorMessage: String?
+    }
+
+    private struct PendingWrite {
+        let asset: MediaAsset
+        let inputURL: URL
+        let generated: GeneratedMetadata
+    }
+
     private static let enumerationPageSize = 250
     private static let processingBatchSize = 250
     private static let metadataPrefetchWindowSize = 32
     private static let slowOrderWarningThreshold = 5_000
     private static let maxRetainedErrors = 500
     private static let maxRetainedFailedAssets = 2000
-    private static let photoPreviewMaxPixelSize = 2048
+    private nonisolated static let photoPreviewMaxPixelSize = 2048
 
     private let photosWriter: PhotosWriter
     private let analyzer: Analyzer
@@ -65,6 +114,8 @@ public final class RunCoordinator {
     private let photosRefreshPromptInterval: Int
     private let photosMemoryCheckInterval: Int
     private let photosMemoryWarningBytes: UInt64
+    private let analysisConcurrency: Int
+    private let writeBatchSize: Int
     private var lastPreviewFileURL: URL?
 
     private var isCancelled = false
@@ -77,7 +128,9 @@ public final class RunCoordinator {
         checkpointInterval: Int = 1000,
         photosRefreshPromptInterval: Int = 500,
         photosMemoryCheckInterval: Int = 40,
-        photosMemoryWarningBytes: UInt64 = 20 * 1024 * 1024 * 1024
+        photosMemoryWarningBytes: UInt64 = 20 * 1024 * 1024 * 1024,
+        analysisConcurrency: Int = 2,
+        writeBatchSize: Int = 16
     ) {
         self.photosWriter = photosWriter
         self.analyzer = analyzer
@@ -87,6 +140,8 @@ public final class RunCoordinator {
         self.photosRefreshPromptInterval = max(1, photosRefreshPromptInterval)
         self.photosMemoryCheckInterval = max(1, photosMemoryCheckInterval)
         self.photosMemoryWarningBytes = max(1, photosMemoryWarningBytes)
+        self.analysisConcurrency = max(1, analysisConcurrency)
+        self.writeBatchSize = max(1, writeBatchSize)
     }
 
     public func cancel() {
@@ -117,18 +172,33 @@ public final class RunCoordinator {
             )
         }
 
+        let timingRecorder = RunTimingRecorder()
+        let runStartedNanoseconds = DispatchTime.now().uptimeNanoseconds
+        defer {
+            let elapsedNs = DispatchTime.now().uptimeNanoseconds - runStartedNanoseconds
+            Task {
+                let summary = await timingRecorder.summary(totalWallNanoseconds: elapsedNs)
+                print(summary)
+            }
+        }
+
         var progress = RunProgress()
         var errors: [String] = []
         var failedAssets: [MediaAsset] = []
         var nextPhotosRefreshPromptAtChanged = photosRefreshPromptInterval
         var nextPhotosMemoryCheckAtChanged = photosMemoryCheckInterval
+
         var queuedAssetIDs: [String] = []
+        var processedAssetIDs = Set<String>()
         var queueCursor = 0
         var processedSincePendingUpdate = 0
 
         let targetEngine: EngineTier = .qwen25vl7b
 
         func snapshotPendingIDs() -> [String] {
+            while queueCursor < queuedAssetIDs.count && processedAssetIDs.contains(queuedAssetIDs[queueCursor]) {
+                queueCursor += 1
+            }
             guard queueCursor < queuedAssetIDs.count else {
                 return []
             }
@@ -150,15 +220,8 @@ public final class RunCoordinator {
         }
 
         func markAssetProcessed(_ assetID: String) {
-            guard queueCursor < queuedAssetIDs.count else { return }
-            if queuedAssetIDs[queueCursor] == assetID {
-                queueCursor += 1
-            } else if let foundIndex = queuedAssetIDs[queueCursor...].firstIndex(of: assetID) {
-                queueCursor = foundIndex + 1
-            } else {
-                return
-            }
-
+            let inserted = processedAssetIDs.insert(assetID).inserted
+            guard inserted else { return }
             processedSincePendingUpdate += 1
             emitPendingIDs()
         }
@@ -175,6 +238,33 @@ public final class RunCoordinator {
             callbacks.onError(message)
         }
 
+        func recordFailedAsset(_ asset: MediaAsset) {
+            if failedAssets.count < Self.maxRetainedFailedAssets {
+                failedAssets.append(asset)
+            }
+        }
+
+        func measureOnMain<T>(
+            _ stage: RunTimingStage,
+            operation: () async throws -> T
+        ) async throws -> T {
+            let start = DispatchTime.now().uptimeNanoseconds
+            do {
+                let value = try await operation()
+                await timingRecorder.record(
+                    stage: stage,
+                    nanoseconds: DispatchTime.now().uptimeNanoseconds - start
+                )
+                return value
+            } catch {
+                await timingRecorder.record(
+                    stage: stage,
+                    nanoseconds: DispatchTime.now().uptimeNanoseconds - start
+                )
+                throw error
+            }
+        }
+
         func verifyPhotosStillRunning() async -> Bool {
             let photosRunningNow = await photosWriter.isPhotosAppRunning()
             if photosRunningNow {
@@ -184,24 +274,198 @@ public final class RunCoordinator {
             return false
         }
 
-        func recordFailedAsset(_ asset: MediaAsset) {
-            if failedAssets.count < Self.maxRetainedFailedAssets {
-                failedAssets.append(asset)
+        func handlePostChangePromptsIfNeeded() async {
+            if progress.changed > 0 && progress.changed.isMultiple(of: checkpointInterval) {
+                let shouldContinue = await callbacks.confirmContinueAfterCheckpoint(progress.changed)
+                if !shouldContinue {
+                    isCancelled = true
+                }
+            }
+
+            if !isCancelled, progress.changed >= nextPhotosRefreshPromptAtChanged {
+                let prompt = RunSafetyPausePrompt(
+                    title: "Refresh Photos Before Continuing?",
+                    message: "\(progress.changed) items have been changed. To reduce memory pressure, close and reopen Photos now, then click Continue.",
+                    confirmLabel: "Continue",
+                    cancelLabel: "Stop"
+                )
+                let shouldContinue = await callbacks.confirmSafetyPause(prompt)
+                if !shouldContinue {
+                    isCancelled = true
+                } else if !(await verifyPhotosStillRunning()) {
+                    isCancelled = true
+                }
+                repeat {
+                    nextPhotosRefreshPromptAtChanged += photosRefreshPromptInterval
+                } while nextPhotosRefreshPromptAtChanged <= progress.changed
+            }
+
+            if !isCancelled, progress.changed >= nextPhotosMemoryCheckAtChanged {
+                nextPhotosMemoryCheckAtChanged = progress.changed + photosMemoryCheckInterval
+                if let monitor = photosWriter as? PhotosProcessMonitoring,
+                   let photosMemoryBytes = await monitor.photosResidentMemoryBytes(),
+                   photosMemoryBytes >= photosMemoryWarningBytes
+                {
+                    let currentGiB = Double(photosMemoryBytes) / Double(1024 * 1024 * 1024)
+                    let thresholdGiB = Double(photosMemoryWarningBytes) / Double(1024 * 1024 * 1024)
+                    let prompt = RunSafetyPausePrompt(
+                        title: "Photos Memory Is High",
+                        message: String(
+                            format: "Photos is using about %.1f GB (threshold %.1f GB). Close and reopen Photos now, then click Continue.",
+                            currentGiB,
+                            thresholdGiB
+                        ),
+                        confirmLabel: "Continue",
+                        cancelLabel: "Stop"
+                    )
+                    let shouldContinue = await callbacks.confirmSafetyPause(prompt)
+                    if !shouldContinue {
+                        isCancelled = true
+                    } else if !(await verifyPhotosStillRunning()) {
+                        isCancelled = true
+                    }
+                }
             }
         }
 
-        func acquireAnalysisInputURL(for asset: MediaAsset) async throws -> URL {
-            if asset.kind == .photo,
-               let previewSource = photosWriter as? PhotoPreviewSource,
-               let previewURL = try? await previewSource.photoPreviewToTemporaryURL(
-                   id: asset.id,
-                   maxPixelSize: Self.photoPreviewMaxPixelSize
-               )
-            {
-                return previewURL
+        let batchWriter = photosWriter as? BatchWritePhotosWriter
+
+        func writeChunk(_ writes: [PendingWrite]) async {
+            guard !writes.isEmpty else { return }
+
+            let payloads = writes.map { write in
+                MetadataWritePayload(
+                    id: write.asset.id,
+                    caption: write.generated.caption,
+                    keywords: OwnershipTagCodec.appendTags(
+                        OwnershipTag(logicVersion: logicVersion, engineTier: targetEngine),
+                        to: write.generated.keywords
+                    )
+                )
             }
 
-            return try await photosWriter.exportAssetToTemporaryURL(id: asset.id)
+            var resultsByID: [String: MetadataWriteResult] = [:]
+            if let batchWriter {
+                do {
+                    let batchResults = try await measureOnMain(.write) {
+                        try await batchWriter.writeMetadata(batch: payloads)
+                    }
+                    resultsByID.reserveCapacity(batchResults.count)
+                    for result in batchResults where resultsByID[result.id] == nil {
+                        resultsByID[result.id] = result
+                    }
+                } catch {
+                    resultsByID.removeAll(keepingCapacity: true)
+                }
+            }
+
+            if resultsByID.isEmpty {
+                for (index, write) in writes.enumerated() {
+                    do {
+                        try await measureOnMain(.write) {
+                            try await photosWriter.writeMetadata(
+                                id: write.asset.id,
+                                caption: payloads[index].caption,
+                                keywords: payloads[index].keywords
+                            )
+                        }
+                        resultsByID[write.asset.id] = MetadataWriteResult(id: write.asset.id, success: true)
+                    } catch {
+                        resultsByID[write.asset.id] = MetadataWriteResult(
+                            id: write.asset.id,
+                            success: false,
+                            errorMessage: error.localizedDescription
+                        )
+                    }
+                }
+            }
+
+            for write in writes {
+                let writeResult = resultsByID[write.asset.id] ?? MetadataWriteResult(
+                    id: write.asset.id,
+                    success: false,
+                    errorMessage: "Write operation did not return a result."
+                )
+
+                if writeResult.success {
+                    let previewStart = DispatchTime.now().uptimeNanoseconds
+                    let previewFileURL = await persistPreviewFile(
+                        from: write.inputURL,
+                        fallbackFilename: write.asset.filename,
+                        kind: write.asset.kind
+                    )
+                    await timingRecorder.record(
+                        stage: .preview,
+                        nanoseconds: DispatchTime.now().uptimeNanoseconds - previewStart
+                    )
+
+                    callbacks.onItemCompleted(
+                        CompletedItemPreview(
+                            filename: write.asset.filename,
+                            kind: write.asset.kind,
+                            previewFileURL: previewFileURL,
+                            caption: write.generated.caption,
+                            keywords: write.generated.keywords
+                        )
+                    )
+
+                    progress.processed += 1
+                    progress.changed += 1
+                    callbacks.onProgress(progress)
+                    markAssetProcessed(write.asset.id)
+                    await handlePostChangePromptsIfNeeded()
+                } else {
+                    progress.processed += 1
+                    progress.failed += 1
+                    let message = writeResult.errorMessage ?? "Metadata write failed."
+                    recordError("\(write.asset.filename): \(message)")
+                    recordFailedAsset(write.asset)
+                    callbacks.onProgress(progress)
+                    markAssetProcessed(write.asset.id)
+                }
+
+                cleanupExport(at: write.inputURL)
+            }
+        }
+
+        func runAnalysisJobs(for assets: [MediaAsset]) async -> [AnalysisJobResult] {
+            guard !assets.isEmpty else { return [] }
+            let writer = photosWriter
+            let analysisEngine = analyzer
+
+            var orderedResults = Array<AnalysisJobResult?>(repeating: nil, count: assets.count)
+            await withTaskGroup(of: (Int, AnalysisJobResult).self) { group in
+                var nextIndex = 0
+
+                func scheduleTask(_ index: Int) {
+                    let asset = assets[index]
+                    group.addTask(priority: .userInitiated) {
+                        let result = await Self.analyzeAsset(
+                            asset: asset,
+                            photosWriter: writer,
+                            analyzer: analysisEngine,
+                            timingRecorder: timingRecorder
+                        )
+                        return (index, result)
+                    }
+                }
+
+                let initialCount = min(analysisConcurrency, assets.count)
+                for _ in 0..<initialCount {
+                    scheduleTask(nextIndex)
+                    nextIndex += 1
+                }
+
+                while let (completedIndex, result) = await group.next() {
+                    orderedResults[completedIndex] = result
+                    if nextIndex < assets.count {
+                        scheduleTask(nextIndex)
+                        nextIndex += 1
+                    }
+                }
+            }
+
+            return orderedResults.compactMap { $0 }
         }
 
         func processAssets(_ assets: ArraySlice<MediaAsset>) async {
@@ -215,75 +479,35 @@ public final class RunCoordinator {
                 }
 
                 let ids = windowAssets.map(\.id)
-                if let batch = try? await batchReader.readMetadata(ids: ids) {
-                    return batch
+                do {
+                    return try await measureOnMain(.metadataRead) {
+                        try await batchReader.readMetadata(ids: ids)
+                    }
+                } catch {
+                    return [:]
                 }
-                return [:]
             }
 
             func processWindow(
                 _ windowAssets: [MediaAsset],
                 prefetchedMetadata: [String: ExistingMetadataState]
             ) async {
-                var lookaheadTask: Task<URL, Error>?
-                var lookaheadAssetID: String?
+                var assetsToAnalyze: [MediaAsset] = []
+                assetsToAnalyze.reserveCapacity(windowAssets.count)
 
-                func discardLookahead() {
-                    guard let pendingTask = lookaheadTask else {
-                        lookaheadAssetID = nil
-                        return
-                    }
-
-                    Task { @MainActor in
-                        if let url = try? await pendingTask.value {
-                            cleanupExport(at: url)
-                        }
-                    }
-                    lookaheadTask = nil
-                    lookaheadAssetID = nil
-                }
-
-                func scheduleLookahead(after index: Int) {
-                    guard lookaheadTask == nil else { return }
-                    let nextIndex = index + 1
-                    guard nextIndex < windowAssets.count else { return }
-                    let nextAsset = windowAssets[nextIndex]
-                    lookaheadAssetID = nextAsset.id
-                    lookaheadTask = Task(priority: .userInitiated) {
-                        try await acquireAnalysisInputURL(for: nextAsset)
-                    }
-                }
-
-                func acquireInputURL(
-                    for asset: MediaAsset
-                ) async throws -> URL {
-                    guard lookaheadAssetID == asset.id,
-                          let pendingTask = lookaheadTask
-                    else {
-                        return try await acquireAnalysisInputURL(for: asset)
-                    }
-
-                    lookaheadTask = nil
-                    lookaheadAssetID = nil
-
-                    do {
-                        return try await pendingTask.value
-                    } catch {
-                        // Lookahead is best effort: fall back to direct acquire for this item.
-                        return try await acquireAnalysisInputURL(for: asset)
-                    }
-                }
-
-                for (index, asset) in windowAssets.enumerated() {
+                for asset in windowAssets {
                     if isCancelled {
                         break
                     }
 
                     do {
-                        let existing = if let prefetched = prefetchedMetadata[asset.id] {
-                            prefetched
+                        let existing: ExistingMetadataState
+                        if let prefetched = prefetchedMetadata[asset.id] {
+                            existing = prefetched
                         } else {
-                            try await photosWriter.readMetadata(id: asset.id)
+                            existing = try await measureOnMain(.metadataRead) {
+                                try await photosWriter.readMetadata(id: asset.id)
+                            }
                         }
 
                         let decision = OverwritePolicy.decide(
@@ -309,103 +533,15 @@ public final class RunCoordinator {
                             shouldWrite = false
                         }
 
-                        if !shouldWrite {
-                            if lookaheadAssetID == asset.id {
-                                discardLookahead()
-                            }
+                        if shouldWrite {
+                            assetsToAnalyze.append(asset)
+                        } else {
                             progress.processed += 1
                             progress.skipped += 1
                             callbacks.onProgress(progress)
                             markAssetProcessed(asset.id)
-                            continue
-                        }
-
-                        let analysisInputURL = try await acquireInputURL(for: asset)
-                        defer { cleanupExport(at: analysisInputURL) }
-
-                        scheduleLookahead(after: index)
-
-                        let generated = try await analyzer.analyze(mediaURL: analysisInputURL, kind: asset.kind)
-
-                        let ownership = OwnershipTag(logicVersion: logicVersion, engineTier: targetEngine)
-                        let taggedKeywords = OwnershipTagCodec.appendTags(ownership, to: generated.keywords)
-
-                        try await photosWriter.writeMetadata(id: asset.id, caption: generated.caption, keywords: taggedKeywords)
-                        let previewFileURL = await persistPreviewFile(
-                            from: analysisInputURL,
-                            fallbackFilename: asset.filename,
-                            kind: asset.kind
-                        )
-                        callbacks.onItemCompleted(
-                            CompletedItemPreview(
-                                filename: asset.filename,
-                                kind: asset.kind,
-                                previewFileURL: previewFileURL,
-                                caption: generated.caption,
-                                keywords: generated.keywords
-                            )
-                        )
-
-                        progress.processed += 1
-                        progress.changed += 1
-                        callbacks.onProgress(progress)
-                        markAssetProcessed(asset.id)
-
-                        if progress.changed > 0 && progress.changed.isMultiple(of: checkpointInterval) {
-                            let shouldContinue = await callbacks.confirmContinueAfterCheckpoint(progress.changed)
-                            if !shouldContinue {
-                                isCancelled = true
-                            }
-                        }
-
-                        if !isCancelled, progress.changed >= nextPhotosRefreshPromptAtChanged {
-                            let prompt = RunSafetyPausePrompt(
-                                title: "Refresh Photos Before Continuing?",
-                                message: "\(progress.changed) items have been changed. To reduce memory pressure, close and reopen Photos now, then click Continue.",
-                                confirmLabel: "Continue",
-                                cancelLabel: "Stop"
-                            )
-                            let shouldContinue = await callbacks.confirmSafetyPause(prompt)
-                            if !shouldContinue {
-                                isCancelled = true
-                            } else if !(await verifyPhotosStillRunning()) {
-                                isCancelled = true
-                            }
-                            repeat {
-                                nextPhotosRefreshPromptAtChanged += photosRefreshPromptInterval
-                            } while nextPhotosRefreshPromptAtChanged <= progress.changed
-                        }
-
-                        if !isCancelled, progress.changed >= nextPhotosMemoryCheckAtChanged {
-                            nextPhotosMemoryCheckAtChanged = progress.changed + photosMemoryCheckInterval
-                            if let monitor = photosWriter as? PhotosProcessMonitoring,
-                               let photosMemoryBytes = await monitor.photosResidentMemoryBytes(),
-                               photosMemoryBytes >= photosMemoryWarningBytes
-                            {
-                                let currentGiB = Double(photosMemoryBytes) / Double(1024 * 1024 * 1024)
-                                let thresholdGiB = Double(photosMemoryWarningBytes) / Double(1024 * 1024 * 1024)
-                                let prompt = RunSafetyPausePrompt(
-                                    title: "Photos Memory Is High",
-                                    message: String(
-                                        format: "Photos is using about %.1f GB (threshold %.1f GB). Close and reopen Photos now, then click Continue.",
-                                        currentGiB,
-                                        thresholdGiB
-                                    ),
-                                    confirmLabel: "Continue",
-                                    cancelLabel: "Stop"
-                                )
-                                let shouldContinue = await callbacks.confirmSafetyPause(prompt)
-                                if !shouldContinue {
-                                    isCancelled = true
-                                } else if !(await verifyPhotosStillRunning()) {
-                                    isCancelled = true
-                                }
-                            }
                         }
                     } catch {
-                        if lookaheadAssetID == asset.id {
-                            discardLookahead()
-                        }
                         progress.processed += 1
                         progress.failed += 1
                         recordError("\(asset.filename): \(error.localizedDescription)")
@@ -415,7 +551,46 @@ public final class RunCoordinator {
                     }
                 }
 
-                discardLookahead()
+                guard !assetsToAnalyze.isEmpty else { return }
+
+                let analysisResults = await runAnalysisJobs(for: assetsToAnalyze)
+                var pendingWrites: [PendingWrite] = []
+                pendingWrites.reserveCapacity(analysisResults.count)
+
+                for result in analysisResults {
+                    if let generated = result.generated,
+                       let inputURL = result.inputURL
+                    {
+                        pendingWrites.append(PendingWrite(asset: result.asset, inputURL: inputURL, generated: generated))
+                    } else {
+                        if let inputURL = result.inputURL {
+                            cleanupExport(at: inputURL)
+                        }
+                        progress.processed += 1
+                        progress.failed += 1
+                        let message = result.errorMessage ?? "Analysis failed."
+                        recordError("\(result.asset.filename): \(message)")
+                        recordFailedAsset(result.asset)
+                        callbacks.onProgress(progress)
+                        markAssetProcessed(result.asset.id)
+                    }
+                }
+
+                var start = pendingWrites.startIndex
+                while start < pendingWrites.endIndex && !isCancelled {
+                    let untilCheckpoint: Int = {
+                        let remainder = progress.changed % checkpointInterval
+                        return remainder == 0 ? checkpointInterval : (checkpointInterval - remainder)
+                    }()
+                    let untilRefresh = max(1, nextPhotosRefreshPromptAtChanged - progress.changed)
+                    let untilMemory = max(1, nextPhotosMemoryCheckAtChanged - progress.changed)
+                    let safeChunkSize = max(1, min(writeBatchSize, untilCheckpoint, untilRefresh, untilMemory))
+
+                    let end = min(start + safeChunkSize, pendingWrites.endIndex)
+                    let chunk = Array(pendingWrites[start..<end])
+                    await writeChunk(chunk)
+                    start = end
+                }
             }
 
             var windowStart = 0
@@ -490,6 +665,49 @@ public final class RunCoordinator {
             return await verifyPhotosStillRunning()
         }
 
+        func isEnumeratePageTimeout(_ error: Error) -> Bool {
+            if case let PhotosAppleScriptError.scriptTimedOut(operation, _) = error {
+                return operation.localizedCaseInsensitiveContains("enumerate page")
+            }
+            return error.localizedDescription
+                .localizedLowercase
+                .contains("enumerate page timed out")
+        }
+
+        func enumeratePageResilient(
+            incrementalWriter: IncrementalPhotosWriter,
+            scope: ScopeSource,
+            offset: Int,
+            preferredLimit: Int
+        ) async throws -> [MediaAsset] {
+            let candidates = [preferredLimit, min(preferredLimit, 128), 64, 32]
+            var triedLimits = Set<Int>()
+            var lastTimeoutError: Error?
+
+            for limit in candidates where limit > 0 && triedLimits.insert(limit).inserted {
+                do {
+                    return try await incrementalWriter.enumerate(
+                        scope: scope,
+                        offset: offset,
+                        limit: limit
+                    )
+                } catch {
+                    guard isEnumeratePageTimeout(error) else {
+                        throw error
+                    }
+                    lastTimeoutError = error
+                    print(
+                        "[RunCoordinator] enumerate page timed out at offset \(offset) with page size \(limit); retrying with smaller page size."
+                    )
+                }
+            }
+
+            throw lastTimeoutError ?? PhotosAppleScriptError.scriptTimedOut(
+                operation: "enumerate page",
+                timeoutSeconds: 45
+            )
+        }
+
         let isFastTraversal = options.traversalOrder == .photosOrderFast
 
         if options.optionalCaptureDateRange == nil,
@@ -498,10 +716,11 @@ public final class RunCoordinator {
                 if isFastTraversal {
                     var offset = 0
                     while !isCancelled {
-                        let batch = try await incrementalWriter.enumerate(
+                        let batch = try await enumeratePageResilient(
+                            incrementalWriter: incrementalWriter,
                             scope: options.source,
                             offset: offset,
-                            limit: Self.enumerationPageSize
+                            preferredLimit: Self.enumerationPageSize
                         )
                         if batch.isEmpty {
                             break
@@ -527,10 +746,11 @@ public final class RunCoordinator {
                     var allAssets: [MediaAsset] = []
                     allAssets.reserveCapacity(totalCount)
                     while offset < totalCount && !isCancelled {
-                        let batch = try await incrementalWriter.enumerate(
+                        let batch = try await enumeratePageResilient(
+                            incrementalWriter: incrementalWriter,
                             scope: options.source,
                             offset: offset,
-                            limit: Self.enumerationPageSize
+                            preferredLimit: Self.enumerationPageSize
                         )
                         if batch.isEmpty {
                             break
@@ -708,18 +928,138 @@ public final class RunCoordinator {
     }
 
     private func representativeVideoPreviewFrame(from videoURL: URL) async -> CGImage? {
-        guard let frames = try? await videoFrameSampler.sampleFrames(from: videoURL, count: 5), !frames.isEmpty else {
+        let asset = AVURLAsset(url: videoURL)
+        if let duration = try? await asset.load(.duration) {
+            let durationSeconds = max(0, CMTimeGetSeconds(duration))
+            let targetTime = durationSeconds > 0
+                ? CMTime(seconds: durationSeconds * 0.5, preferredTimescale: 600)
+                : .zero
+            let generator = AVAssetImageGenerator(asset: asset)
+            generator.appliesPreferredTrackTransform = true
+            if let cgImage = await generatePreviewFrame(generator: generator, at: targetTime) {
+                return cgImage
+            }
+        }
+
+        guard let frames = try? await videoFrameSampler.sampleFrames(from: videoURL, count: 3), !frames.isEmpty else {
             return nil
         }
-        if frames.count >= 3 {
-            // Requested behavior: use the 3rd frame from the 5-frame sample.
-            return frames[2]
+        return frames[min(1, frames.count - 1)]
+    }
+
+    private func generatePreviewFrame(
+        generator: AVAssetImageGenerator,
+        at time: CMTime
+    ) async -> CGImage? {
+        final class ResumeState: @unchecked Sendable {
+            var resumed = false
         }
-        return frames[frames.count / 2]
+
+        return await withCheckedContinuation { continuation in
+            let times = [NSValue(time: time)]
+            let lock = NSLock()
+            let state = ResumeState()
+
+            generator.generateCGImagesAsynchronously(forTimes: times) { _, image, _, result, _ in
+                lock.lock()
+                guard !state.resumed else {
+                    lock.unlock()
+                    return
+                }
+
+                let outputImage: CGImage?
+                if result == .succeeded, let image {
+                    outputImage = image
+                } else if result == .failed || result == .cancelled {
+                    outputImage = nil
+                } else {
+                    lock.unlock()
+                    return
+                }
+
+                state.resumed = true
+                lock.unlock()
+                continuation.resume(returning: outputImage)
+            }
+        }
     }
 
     private func jpegData(from image: CGImage) -> Data? {
         let bitmap = NSBitmapImageRep(cgImage: image)
         return bitmap.representation(using: .jpeg, properties: [.compressionFactor: 0.82])
+    }
+
+    private nonisolated static func analyzeAsset(
+        asset: MediaAsset,
+        photosWriter: PhotosWriter,
+        analyzer: Analyzer,
+        timingRecorder: RunTimingRecorder
+    ) async -> AnalysisJobResult {
+        var inputURL: URL?
+
+        do {
+            inputURL = try await measureStage(.assetAcquire, recorder: timingRecorder) {
+                try await acquireAnalysisInputURL(for: asset, photosWriter: photosWriter)
+            }
+            guard let inputURL else {
+                return AnalysisJobResult(
+                    asset: asset,
+                    inputURL: nil,
+                    generated: nil,
+                    errorMessage: "Analysis input was unavailable."
+                )
+            }
+
+            let generated = try await measureStage(.analyze, recorder: timingRecorder) {
+                try await analyzer.analyze(mediaURL: inputURL, kind: asset.kind)
+            }
+            return AnalysisJobResult(asset: asset, inputURL: inputURL, generated: generated, errorMessage: nil)
+        } catch {
+            return AnalysisJobResult(
+                asset: asset,
+                inputURL: inputURL,
+                generated: nil,
+                errorMessage: error.localizedDescription
+            )
+        }
+    }
+
+    private nonisolated static func acquireAnalysisInputURL(
+        for asset: MediaAsset,
+        photosWriter: PhotosWriter
+    ) async throws -> URL {
+        if asset.kind == .photo,
+           let previewSource = photosWriter as? PhotoPreviewSource,
+           let previewURL = try? await previewSource.photoPreviewToTemporaryURL(
+               id: asset.id,
+               maxPixelSize: Self.photoPreviewMaxPixelSize
+           )
+        {
+            return previewURL
+        }
+
+        return try await photosWriter.exportAssetToTemporaryURL(id: asset.id)
+    }
+
+    private nonisolated static func measureStage<T>(
+        _ stage: RunTimingStage,
+        recorder: RunTimingRecorder,
+        operation: () async throws -> T
+    ) async throws -> T {
+        let start = DispatchTime.now().uptimeNanoseconds
+        do {
+            let value = try await operation()
+            await recorder.record(
+                stage: stage,
+                nanoseconds: DispatchTime.now().uptimeNanoseconds - start
+            )
+            return value
+        } catch {
+            await recorder.record(
+                stage: stage,
+                nanoseconds: DispatchTime.now().uptimeNanoseconds - start
+            )
+            throw error
+        }
     }
 }
