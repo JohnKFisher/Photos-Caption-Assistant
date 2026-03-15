@@ -44,7 +44,7 @@ public struct LogicVersion: Sendable, Equatable, Codable, Comparable {
         return lhs.patch < rhs.patch
     }
 
-    public static let current = LogicVersion(major: 2, minor: 4, patch: 0)
+    public static let current = LogicVersion(major: 2, minor: 5, patch: 0)
 }
 
 public struct OwnershipTag: Sendable, Equatable, Codable {

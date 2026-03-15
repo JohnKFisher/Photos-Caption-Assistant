@@ -1,10 +1,10 @@
 # Photo Description Creator
 
-Current version/build: 2.2 (1)
-Current description logic version: 2.4.0
+Current version/build: 2.2 (2)
+Current description logic version: 2.5.0
 
 Current overall status:
-Version 2.2 is the current known-good release as of March 15, 2026. We are treating this as the forward baseline for future work after earlier rollback history became unreliable.
+Version 2.2 build 2 with description logic 2.5.0 is the current known-good release as of March 15, 2026. We are treating this as the forward baseline for future work after earlier rollback history became unreliable.
 
 What is working now:
 - Local photo and video analysis through Ollama with the `qwen2.5vl:7b` model.
@@ -14,7 +14,7 @@ What is working now:
 - Batched metadata reads and batched metadata writes in the current source tree.
 - Resilient enumerate-page retry behavior for large fast-order runs.
 - Safety prompts for checkpoints, long ordered runs, and high Photos memory usage.
-- Future builds from this source baseline now embed the current prompt files and use prompt logic 2.4.0.
+- Future builds from this source baseline now embed the current prompt files and use prompt logic 2.5.0.
 - Video analysis now selects three ordered key frames from a larger candidate set using time coverage plus lightweight visual-difference scoring.
 - The run pipeline now defaults to one in-flight LLM analysis with bounded prepare-ahead overlap so the next asset can be readied without competing model calls.
 - Analyzer-ready payloads are now prepared ahead of the LLM handoff when the analyzer supports it, so image encoding and video frame packaging can overlap with the current analysis.
@@ -56,4 +56,4 @@ Recommended next priorities:
 - Add a small, repeatable smoke-test workflow for known-good verification before future anchors.
 
 Most recent durable known-good anchor:
-- `known-good/20260315-v2-2`
+- `known-good/20260315-v2-2-logic-2-5-0`
