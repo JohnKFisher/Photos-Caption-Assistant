@@ -1,0 +1,33 @@
+{
+  "": {
+    "swift-dependencies": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/debug/PhotoDescriptionCreatorTests.build/master.swiftdeps"
+  },
+  "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/Tests/PhotoDescriptionCreatorTests/OverwritePolicyTests.swift": {
+    "dependencies": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/debug/PhotoDescriptionCreatorTests.build/OverwritePolicyTests.d",
+    "object": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/debug/PhotoDescriptionCreatorTests.build/OverwritePolicyTests.swift.o",
+    "swiftmodule": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/debug/PhotoDescriptionCreatorTests.build/OverwritePolicyTests~partial.swiftmodule",
+    "swift-dependencies": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/debug/PhotoDescriptionCreatorTests.build/OverwritePolicyTests.swiftdeps",
+    "diagnostics": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/debug/PhotoDescriptionCreatorTests.build/OverwritePolicyTests.dia"
+  },
+  "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/Tests/PhotoDescriptionCreatorTests/OwnershipTagTests.swift": {
+    "dependencies": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/debug/PhotoDescriptionCreatorTests.build/OwnershipTagTests.d",
+    "object": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/debug/PhotoDescriptionCreatorTests.build/OwnershipTagTests.swift.o",
+    "swiftmodule": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/debug/PhotoDescriptionCreatorTests.build/OwnershipTagTests~partial.swiftmodule",
+    "swift-dependencies": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/debug/PhotoDescriptionCreatorTests.build/OwnershipTagTests.swiftdeps",
+    "diagnostics": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/debug/PhotoDescriptionCreatorTests.build/OwnershipTagTests.dia"
+  },
+  "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/Tests/PhotoDescriptionCreatorTests/PhotosAppleScriptClientTests.swift": {
+    "dependencies": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/debug/PhotoDescriptionCreatorTests.build/PhotosAppleScriptClientTests.d",
+    "object": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/debug/PhotoDescriptionCreatorTests.build/PhotosAppleScriptClientTests.swift.o",
+    "swiftmodule": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/debug/PhotoDescriptionCreatorTests.build/PhotosAppleScriptClientTests~partial.swiftmodule",
+    "swift-dependencies": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/debug/PhotoDescriptionCreatorTests.build/PhotosAppleScriptClientTests.swiftdeps",
+    "diagnostics": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/debug/PhotoDescriptionCreatorTests.build/PhotosAppleScriptClientTests.dia"
+  },
+  "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/Tests/PhotoDescriptionCreatorTests/RunCoordinatorTests.swift": {
+    "dependencies": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/debug/PhotoDescriptionCreatorTests.build/RunCoordinatorTests.d",
+    "object": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/debug/PhotoDescriptionCreatorTests.build/RunCoordinatorTests.swift.o",
+    "swiftmodule": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/debug/PhotoDescriptionCreatorTests.build/RunCoordinatorTests~partial.swiftmodule",
+    "swift-dependencies": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/debug/PhotoDescriptionCreatorTests.build/RunCoordinatorTests.swiftdeps",
+    "diagnostics": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/debug/PhotoDescriptionCreatorTests.build/RunCoordinatorTests.dia"
+  }
+}

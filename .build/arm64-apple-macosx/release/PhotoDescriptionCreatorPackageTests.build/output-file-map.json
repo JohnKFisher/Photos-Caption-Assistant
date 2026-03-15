@@ -1,0 +1,13 @@
+{
+  "": {
+    "dependencies": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/release/PhotoDescriptionCreatorPackageTests.build/PhotoDescriptionCreatorPackageTests.d",
+    "object": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/release/PhotoDescriptionCreatorPackageTests.build/PhotoDescriptionCreatorPackageTests.o",
+    "swift-dependencies": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/release/PhotoDescriptionCreatorPackageTests.build/master.swiftdeps"
+  },
+  "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/release/PhotoDescriptionCreatorPackageTests.derived/runner.swift": {
+    "object": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/release/PhotoDescriptionCreatorPackageTests.build/runner.swift.o",
+    "swiftmodule": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/release/PhotoDescriptionCreatorPackageTests.build/runner~partial.swiftmodule",
+    "swift-dependencies": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/release/PhotoDescriptionCreatorPackageTests.build/runner.swiftdeps",
+    "diagnostics": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/release/PhotoDescriptionCreatorPackageTests.build/runner.dia"
+  }
+}

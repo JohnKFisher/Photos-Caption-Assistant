@@ -1,0 +1,5 @@
+---
+triple:          'arm64-apple-darwin'
+binary-path:     '/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/debug/PhotoDescriptionCreator'
+relocations:     []
+...

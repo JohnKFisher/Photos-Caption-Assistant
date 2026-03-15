@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDisplayName</key>
+	<string>Photo Description Creator</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.jkfisher.PhotoDescriptionCreator</string>
+	<key>CFBundleName</key>
+	<string>PhotoDescriptionCreator</string>
+	<key>CFBundleShortVersionString</key>
+	<string>2.0</string>
+	<key>CFBundleVersion</key>
+	<string>8</string>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>Photo Description Creator needs automation access to update captions and keywords in Photos.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Photo Description Creator reads selected photos and videos to generate captions and keywords.</string>
+</dict>
+</plist>

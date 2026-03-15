@@ -1,0 +1,103 @@
+{
+  "": {
+    "dependencies": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/release/PhotoDescriptionCreator.build/PhotoDescriptionCreator.d",
+    "object": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/release/PhotoDescriptionCreator.build/PhotoDescriptionCreator.o",
+    "swift-dependencies": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/release/PhotoDescriptionCreator.build/master.swiftdeps"
+  },
+  "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/Sources/PhotoDescriptionCreator/App/PhotoDescriptionCreatorApp.swift": {
+    "object": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/release/PhotoDescriptionCreator.build/PhotoDescriptionCreatorApp.swift.o",
+    "swiftmodule": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/release/PhotoDescriptionCreator.build/PhotoDescriptionCreatorApp~partial.swiftmodule",
+    "swift-dependencies": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/release/PhotoDescriptionCreator.build/PhotoDescriptionCreatorApp.swiftdeps",
+    "diagnostics": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/release/PhotoDescriptionCreator.build/PhotoDescriptionCreatorApp.dia"
+  },
+  "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/Sources/PhotoDescriptionCreator/Domain/Models.swift": {
+    "object": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/release/PhotoDescriptionCreator.build/Models.swift.o",
+    "swiftmodule": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/release/PhotoDescriptionCreator.build/Models~partial.swiftmodule",
+    "swift-dependencies": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/release/PhotoDescriptionCreator.build/Models.swiftdeps",
+    "diagnostics": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/release/PhotoDescriptionCreator.build/Models.dia"
+  },
+  "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/Sources/PhotoDescriptionCreator/Domain/OverwritePolicy.swift": {
+    "object": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/release/PhotoDescriptionCreator.build/OverwritePolicy.swift.o",
+    "swiftmodule": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/release/PhotoDescriptionCreator.build/OverwritePolicy~partial.swiftmodule",
+    "swift-dependencies": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/release/PhotoDescriptionCreator.build/OverwritePolicy.swiftdeps",
+    "diagnostics": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/release/PhotoDescriptionCreator.build/OverwritePolicy.dia"
+  },
+  "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/Sources/PhotoDescriptionCreator/Domain/OwnershipTag.swift": {
+    "object": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/release/PhotoDescriptionCreator.build/OwnershipTag.swift.o",
+    "swiftmodule": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/release/PhotoDescriptionCreator.build/OwnershipTag~partial.swiftmodule",
+    "swift-dependencies": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/release/PhotoDescriptionCreator.build/OwnershipTag.swiftdeps",
+    "diagnostics": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/release/PhotoDescriptionCreator.build/OwnershipTag.dia"
+  },
+  "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/Sources/PhotoDescriptionCreator/Services/Analysis/QwenVisionLanguageAnalyzer.swift": {
+    "object": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/release/PhotoDescriptionCreator.build/QwenVisionLanguageAnalyzer.swift.o",
+    "swiftmodule": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/release/PhotoDescriptionCreator.build/QwenVisionLanguageAnalyzer~partial.swiftmodule",
+    "swift-dependencies": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/release/PhotoDescriptionCreator.build/QwenVisionLanguageAnalyzer.swiftdeps",
+    "diagnostics": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/release/PhotoDescriptionCreator.build/QwenVisionLanguageAnalyzer.dia"
+  },
+  "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/Sources/PhotoDescriptionCreator/Services/Analysis/VideoFrameSampler.swift": {
+    "object": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/release/PhotoDescriptionCreator.build/VideoFrameSampler.swift.o",
+    "swiftmodule": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/release/PhotoDescriptionCreator.build/VideoFrameSampler~partial.swiftmodule",
+    "swift-dependencies": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/release/PhotoDescriptionCreator.build/VideoFrameSampler.swiftdeps",
+    "diagnostics": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/release/PhotoDescriptionCreator.build/VideoFrameSampler.dia"
+  },
+  "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/Sources/PhotoDescriptionCreator/Services/AppleScript/PhotosAppleScriptClient.swift": {
+    "object": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/release/PhotoDescriptionCreator.build/PhotosAppleScriptClient.swift.o",
+    "swiftmodule": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/release/PhotoDescriptionCreator.build/PhotosAppleScriptClient~partial.swiftmodule",
+    "swift-dependencies": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/release/PhotoDescriptionCreator.build/PhotosAppleScriptClient.swiftdeps",
+    "diagnostics": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/release/PhotoDescriptionCreator.build/PhotosAppleScriptClient.dia"
+  },
+  "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/Sources/PhotoDescriptionCreator/Services/Capabilities/CapabilityProbe.swift": {
+    "object": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/release/PhotoDescriptionCreator.build/CapabilityProbe.swift.o",
+    "swiftmodule": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/release/PhotoDescriptionCreator.build/CapabilityProbe~partial.swiftmodule",
+    "swift-dependencies": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/release/PhotoDescriptionCreator.build/CapabilityProbe.swiftdeps",
+    "diagnostics": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/release/PhotoDescriptionCreator.build/CapabilityProbe.dia"
+  },
+  "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/Sources/PhotoDescriptionCreator/Services/Capabilities/OllamaManager.swift": {
+    "object": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/release/PhotoDescriptionCreator.build/OllamaManager.swift.o",
+    "swiftmodule": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/release/PhotoDescriptionCreator.build/OllamaManager~partial.swiftmodule",
+    "swift-dependencies": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/release/PhotoDescriptionCreator.build/OllamaManager.swiftdeps",
+    "diagnostics": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/release/PhotoDescriptionCreator.build/OllamaManager.dia"
+  },
+  "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/Sources/PhotoDescriptionCreator/Services/Orchestration/RunCoordinator.swift": {
+    "object": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/release/PhotoDescriptionCreator.build/RunCoordinator.swift.o",
+    "swiftmodule": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/release/PhotoDescriptionCreator.build/RunCoordinator~partial.swiftmodule",
+    "swift-dependencies": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/release/PhotoDescriptionCreator.build/RunCoordinator.swiftdeps",
+    "diagnostics": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/release/PhotoDescriptionCreator.build/RunCoordinator.dia"
+  },
+  "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/Sources/PhotoDescriptionCreator/Services/Orchestration/RunResumeStore.swift": {
+    "object": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/release/PhotoDescriptionCreator.build/RunResumeStore.swift.o",
+    "swiftmodule": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/release/PhotoDescriptionCreator.build/RunResumeStore~partial.swiftmodule",
+    "swift-dependencies": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/release/PhotoDescriptionCreator.build/RunResumeStore.swiftdeps",
+    "diagnostics": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/release/PhotoDescriptionCreator.build/RunResumeStore.dia"
+  },
+  "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/Sources/PhotoDescriptionCreator/UI/ConflictPromptView.swift": {
+    "object": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/release/PhotoDescriptionCreator.build/ConflictPromptView.swift.o",
+    "swiftmodule": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/release/PhotoDescriptionCreator.build/ConflictPromptView~partial.swiftmodule",
+    "swift-dependencies": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/release/PhotoDescriptionCreator.build/ConflictPromptView.swiftdeps",
+    "diagnostics": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/release/PhotoDescriptionCreator.build/ConflictPromptView.dia"
+  },
+  "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/Sources/PhotoDescriptionCreator/UI/ImmersivePreviewView.swift": {
+    "object": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/release/PhotoDescriptionCreator.build/ImmersivePreviewView.swift.o",
+    "swiftmodule": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/release/PhotoDescriptionCreator.build/ImmersivePreviewView~partial.swiftmodule",
+    "swift-dependencies": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/release/PhotoDescriptionCreator.build/ImmersivePreviewView.swiftdeps",
+    "diagnostics": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/release/PhotoDescriptionCreator.build/ImmersivePreviewView.dia"
+  },
+  "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/Sources/PhotoDescriptionCreator/UI/MainView.swift": {
+    "object": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/release/PhotoDescriptionCreator.build/MainView.swift.o",
+    "swiftmodule": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/release/PhotoDescriptionCreator.build/MainView~partial.swiftmodule",
+    "swift-dependencies": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/release/PhotoDescriptionCreator.build/MainView.swiftdeps",
+    "diagnostics": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/release/PhotoDescriptionCreator.build/MainView.dia"
+  },
+  "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/Sources/PhotoDescriptionCreator/UI/ProgressView.swift": {
+    "object": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/release/PhotoDescriptionCreator.build/ProgressView.swift.o",
+    "swiftmodule": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/release/PhotoDescriptionCreator.build/ProgressView~partial.swiftmodule",
+    "swift-dependencies": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/release/PhotoDescriptionCreator.build/ProgressView.swiftdeps",
+    "diagnostics": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/release/PhotoDescriptionCreator.build/ProgressView.dia"
+  },
+  "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/Sources/PhotoDescriptionCreator/UI/RunSetupView.swift": {
+    "object": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/release/PhotoDescriptionCreator.build/RunSetupView.swift.o",
+    "swiftmodule": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/release/PhotoDescriptionCreator.build/RunSetupView~partial.swiftmodule",
+    "swift-dependencies": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/release/PhotoDescriptionCreator.build/RunSetupView.swiftdeps",
+    "diagnostics": "/Users/jkfisher/Resilio Sync/Family Documents/Codex/PhotoDescriptionCreator/.build/arm64-apple-macosx/release/PhotoDescriptionCreator.build/RunSetupView.dia"
+  }
+}
