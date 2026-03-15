@@ -1,10 +1,10 @@
 # Photo Description Creator
 
-Current version/build: 2.1 (1)
+Current version/build: 2.2 (1)
 Current description logic version: 2.4.0
 
 Current overall status:
-This is the new forward baseline as of March 14, 2026. We are treating this as the restart point for future work after earlier rollback history became unreliable.
+Version 2.2 is the current known-good release as of March 15, 2026. We are treating this as the forward baseline for future work after earlier rollback history became unreliable.
 
 What is working now:
 - Local photo and video analysis through Ollama with the `qwen2.5vl:7b` model.
@@ -56,4 +56,4 @@ Recommended next priorities:
 - Add a small, repeatable smoke-test workflow for known-good verification before future anchors.
 
 Most recent durable known-good anchor:
-- `known-good/20260314-v2-1-baseline`
+- `known-good/20260315-v2-2`
