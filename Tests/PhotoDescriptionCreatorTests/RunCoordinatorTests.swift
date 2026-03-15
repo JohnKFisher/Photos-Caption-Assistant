@@ -1036,6 +1036,47 @@ final class RunCoordinatorTests: XCTestCase {
         XCTAssertLessThan(secondWriteStart!, firstPreviewEnd!)
     }
 
+    func testWritesStartBeforeEntireAnalysisWindowFinishes() async {
+        let assets = makeAssets(count: 3)
+        let metadata = Dictionary(uniqueKeysWithValues: assets.map { asset in
+            (asset.id, ExistingMetadataState(caption: nil, keywords: [], ownershipTag: nil, isExternal: false))
+        })
+        let timeline = TimelineRecorder()
+        let writer = MockPhotosWriter(
+            assets: assets,
+            metadataByID: metadata,
+            timelineRecorder: timeline
+        )
+        let analyzerState = ContentionAwareAnalyzerState(
+            result: GeneratedMetadata(caption: "caption", keywords: ["k1"]),
+            baseDelayNanoseconds: 180_000_000,
+            concurrentPenaltyNanoseconds: 0,
+            timelineRecorder: timeline
+        )
+        let coordinator = RunCoordinator(
+            photosWriter: writer,
+            analyzer: ContentionAwareAnalyzer(state: analyzerState),
+            analysisConcurrency: 1,
+            prepareAheadLimit: 1,
+            writeBatchSize: 16
+        )
+
+        let summary = await coordinator.run(
+            options: defaultRunOptions(),
+            capabilities: defaultCapabilities(),
+            callbacks: RunCallbacks()
+        )
+
+        let firstWriteStart = await timeline.timestamp(for: "write-start:asset-0")
+        let lastAnalyzeEnd = await timeline.timestamp(for: "analyze-end:asset-2")
+
+        XCTAssertEqual(summary.progress.changed, 3)
+        XCTAssertEqual(summary.progress.failed, 0)
+        XCTAssertNotNil(firstWriteStart)
+        XCTAssertNotNil(lastAnalyzeEnd)
+        XCTAssertLessThan(firstWriteStart!, lastAnalyzeEnd!)
+    }
+
     func testSingleAnalysisWithPrepareAheadBeatsDualAnalysisUnderContention() async {
         let dualAnalysis = await runSyntheticContentionScenario(
             analysisConcurrency: 2,

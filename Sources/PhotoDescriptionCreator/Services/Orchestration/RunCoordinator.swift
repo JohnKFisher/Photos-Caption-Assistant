@@ -272,6 +272,40 @@ public final class RunCoordinator {
         }
     }
 
+    private actor AnalysisResultChannel {
+        private var buffer: [(Int, AnalysisJobResult)] = []
+        private var waiters: [CheckedContinuation<(Int, AnalysisJobResult)?, Never>] = []
+        private var finished = false
+
+        func send(_ result: (Int, AnalysisJobResult)) {
+            if let waiter = waiters.first {
+                waiters.removeFirst()
+                waiter.resume(returning: result)
+            } else {
+                buffer.append(result)
+            }
+        }
+
+        func finish() {
+            finished = true
+            let pendingWaiters = waiters
+            waiters.removeAll(keepingCapacity: false)
+            pendingWaiters.forEach { $0.resume(returning: nil) }
+        }
+
+        func receive() async -> (Int, AnalysisJobResult)? {
+            if !buffer.isEmpty {
+                return buffer.removeFirst()
+            }
+            if finished {
+                return nil
+            }
+            return await withCheckedContinuation { continuation in
+                waiters.append(continuation)
+            }
+        }
+    }
+
     private static let enumerationPageSize = 250
     private static let processingBatchSize = 250
     private static let metadataPrefetchWindowSize = 32
@@ -662,14 +696,17 @@ public final class RunCoordinator {
             }
         }
 
-        func runAnalysisJobs(for assets: [MediaAsset]) async -> [AnalysisJobResult] {
-            guard !assets.isEmpty else { return [] }
+        func runAnalysisJobs(
+            for assets: [MediaAsset],
+            onOrderedResult: @escaping (AnalysisJobResult) async -> Void
+        ) async {
+            guard !assets.isEmpty else { return }
             let writer = photosWriter
             let analysisEngine = analyzer
             let pipelineDepth = max(1, analysisConcurrency + prepareAheadLimit)
             let preparedInputs = PreparedInputChannel()
+            let analyzedResults = AnalysisResultChannel()
 
-            var orderedResults = Array<AnalysisJobResult?>(repeating: nil, count: assets.count)
             let producerTask = Task(priority: .userInitiated) {
                 await Self.producePreparedInputs(
                     from: assets,
@@ -681,33 +718,40 @@ public final class RunCoordinator {
                 )
             }
 
-            await withTaskGroup(of: [(Int, AnalysisJobResult)].self) { group in
-                for _ in 0..<analysisConcurrency {
-                    group.addTask(priority: .userInitiated) {
-                        var workerResults: [(Int, AnalysisJobResult)] = []
-                        while let prepared = await preparedInputs.receive() {
-                            let analyzed = await Self.analyzePreparedInput(
-                                prepared,
-                                analyzer: analysisEngine,
-                                preparedAnalyzer: preparedAnalyzer,
-                                timingRecorder: timingRecorder
-                            )
-                            workerResults.append(analyzed)
+            let analysisTask = Task(priority: .userInitiated) {
+                await withTaskGroup(of: Void.self) { group in
+                    for _ in 0..<analysisConcurrency {
+                        group.addTask(priority: .userInitiated) {
+                            while let prepared = await preparedInputs.receive() {
+                                let analyzed = await Self.analyzePreparedInput(
+                                    prepared,
+                                    analyzer: analysisEngine,
+                                    preparedAnalyzer: preparedAnalyzer,
+                                    timingRecorder: timingRecorder
+                                )
+                                await analyzedResults.send(analyzed)
+                            }
                         }
-                        return workerResults
                     }
                 }
+                await analyzedResults.finish()
+            }
 
-                for await workerResults in group {
-                    for (index, result) in workerResults {
-                        orderedResults[index] = result
+            var bufferedResults: [Int: AnalysisJobResult] = [:]
+            var nextIndexToEmit = 0
+            while let (index, result) = await analyzedResults.receive() {
+                bufferedResults[index] = result
+                while let readyResult = bufferedResults.removeValue(forKey: nextIndexToEmit) {
+                    await onOrderedResult(readyResult)
+                    nextIndexToEmit += 1
+                    if nextIndexToEmit >= assets.count {
+                        break
                     }
                 }
             }
 
             _ = await producerTask.result
-
-            return orderedResults.compactMap { $0 }
+            _ = await analysisTask.result
         }
 
         func processAssets(_ assets: ArraySlice<MediaAsset>) async {
@@ -795,15 +839,41 @@ public final class RunCoordinator {
 
                 guard !assetsToAnalyze.isEmpty else { return }
 
-                let analysisResults = await runAnalysisJobs(for: assetsToAnalyze)
                 var pendingWrites: [PendingWrite] = []
-                pendingWrites.reserveCapacity(analysisResults.count)
+                pendingWrites.reserveCapacity(analysisConcurrency + prepareAheadLimit + 1)
 
-                for result in analysisResults {
+                func nextWriteChunkSize(for readyCount: Int) -> Int {
+                    let untilCheckpoint: Int = {
+                        let remainder = progress.changed % checkpointInterval
+                        return remainder == 0 ? checkpointInterval : (checkpointInterval - remainder)
+                    }()
+                    let untilRefresh = max(1, nextPhotosRefreshPromptAtChanged - progress.changed)
+                    let untilMemory = max(1, nextPhotosMemoryCheckAtChanged - progress.changed)
+                    let safeChunkSize = max(1, min(writeBatchSize, untilCheckpoint, untilRefresh, untilMemory))
+                    return max(1, min(readyCount, safeChunkSize))
+                }
+
+                func flushPendingWrites() async {
+                    while !pendingWrites.isEmpty && !isCancelled {
+                        let chunkSize = nextWriteChunkSize(for: pendingWrites.count)
+                        let chunk = Array(pendingWrites.prefix(chunkSize))
+                        pendingWrites.removeFirst(chunkSize)
+                        await writeChunk(chunk)
+                    }
+                }
+
+                await runAnalysisJobs(for: assetsToAnalyze) { result in
                     if let generated = result.generated,
                        let inputURL = result.inputURL
                     {
-                        pendingWrites.append(PendingWrite(asset: result.asset, inputURL: inputURL, generated: generated))
+                        pendingWrites.append(
+                            PendingWrite(
+                                asset: result.asset,
+                                inputURL: inputURL,
+                                generated: generated
+                            )
+                        )
+                        await flushPendingWrites()
                     } else {
                         if let inputURL = result.inputURL {
                             Self.cleanupTemporaryInput(at: inputURL)
@@ -816,22 +886,6 @@ public final class RunCoordinator {
                         callbacks.onProgress(progress)
                         markAssetProcessed(result.asset.id)
                     }
-                }
-
-                var start = pendingWrites.startIndex
-                while start < pendingWrites.endIndex && !isCancelled {
-                    let untilCheckpoint: Int = {
-                        let remainder = progress.changed % checkpointInterval
-                        return remainder == 0 ? checkpointInterval : (checkpointInterval - remainder)
-                    }()
-                    let untilRefresh = max(1, nextPhotosRefreshPromptAtChanged - progress.changed)
-                    let untilMemory = max(1, nextPhotosMemoryCheckAtChanged - progress.changed)
-                    let safeChunkSize = max(1, min(writeBatchSize, untilCheckpoint, untilRefresh, untilMemory))
-
-                    let end = min(start + safeChunkSize, pendingWrites.endIndex)
-                    let chunk = Array(pendingWrites[start..<end])
-                    await writeChunk(chunk)
-                    start = end
                 }
             }
 
