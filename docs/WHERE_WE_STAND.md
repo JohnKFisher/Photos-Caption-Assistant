@@ -1,6 +1,7 @@
 # Photo Description Creator
 
 Current version/build: 2.1 (1)
+Current description logic version: 2.4.0
 
 Current overall status:
 This is the new forward baseline as of March 14, 2026. We are treating this as the restart point for future work after earlier rollback history became unreliable.
@@ -13,7 +14,7 @@ What is working now:
 - Batched metadata reads and batched metadata writes in the current source tree.
 - Resilient enumerate-page retry behavior for large fast-order runs.
 - Safety prompts for checkpoints, long ordered runs, and high Photos memory usage.
-- Future builds from this source baseline now use the V3 prompt family.
+- Future builds from this source baseline now embed the current prompt files and use prompt logic 2.4.0.
 - Video analysis now selects three ordered key frames from a larger candidate set using time coverage plus lightweight visual-difference scoring.
 
 What is partially implemented:

@@ -4,22 +4,24 @@ import XCTest
 @testable import PhotoDescriptionCreator
 
 final class QwenVisionLanguageAnalyzerTests: XCTestCase {
-    func testPhotoPromptUsesV3Template() {
-        let prompt = QwenVisionLanguageAnalyzer.photoPromptV3
+    func testPhotoPromptMatchesCurrentPromptFile() throws {
+        let prompt = QwenVisionLanguageAnalyzer.photoPrompt
+        let promptFile = try loadPromptFile(named: "photoprompt.txt")
 
+        XCTAssertEqual(prompt, promptFile)
         XCTAssertTrue(prompt.hasPrefix("You are generating Apple Photos metadata for one photo."))
-        XCTAssertTrue(prompt.contains("Use a present participle phrase with no auxiliary verbs"))
-        XCTAssertTrue(prompt.contains("Before output, verify:"))
-        XCTAssertFalse(prompt.contains("Return ONLY strict JSON"))
+        XCTAssertTrue(prompt.contains("Return exactly one JSON object and nothing else."))
+        XCTAssertTrue(prompt.contains("Use exactly these two keys and no others"))
     }
 
-    func testVideoPromptUsesV3Template() {
-        let prompt = QwenVisionLanguageAnalyzer.videoPromptV3
+    func testVideoPromptMatchesCurrentPromptFile() throws {
+        let prompt = QwenVisionLanguageAnalyzer.videoPrompt
+        let promptFile = try loadPromptFile(named: "videoprompt.txt")
 
+        XCTAssertEqual(prompt, promptFile)
         XCTAssertTrue(prompt.hasPrefix("You are generating Apple Photos metadata for one video."))
-        XCTAssertTrue(prompt.contains("The provided images are key frames from the same video in time order."))
-        XCTAssertTrue(prompt.contains("Describe motion/action, not just a single frame snapshot."))
-        XCTAssertFalse(prompt.contains("Return ONLY strict JSON"))
+        XCTAssertTrue(prompt.contains("The provided images are key frames from the same video in chronological order."))
+        XCTAssertTrue(prompt.contains("Describe the primary visible action or event across the sequence"))
     }
 
     func testVideoKeyFrameSelectionKeepsChronologicalCoverageAcrossThirds() {
@@ -96,5 +98,13 @@ final class QwenVisionLanguageAnalyzerTests: XCTestCase {
             fatalError("Failed to render test image.")
         }
         return image
+    }
+
+    private func loadPromptFile(named filename: String) throws -> String {
+        var url = URL(fileURLWithPath: #filePath)
+        url.deleteLastPathComponent()
+        url.deleteLastPathComponent()
+        url.deleteLastPathComponent()
+        return try String(contentsOf: url.appendingPathComponent("Prompts/\(filename)"), encoding: .utf8)
     }
 }
