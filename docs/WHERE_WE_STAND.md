@@ -14,6 +14,7 @@ What is working now:
 - Resilient enumerate-page retry behavior for large fast-order runs.
 - Safety prompts for checkpoints, long ordered runs, and high Photos memory usage.
 - Future builds from this source baseline now use the V3 prompt family.
+- Video analysis now selects three ordered key frames from a larger candidate set using time coverage plus lightweight visual-difference scoring.
 
 What is partially implemented:
 - Long-run resilience is improved, but still depends on AppleScript and Photos staying responsive.
@@ -28,6 +29,7 @@ What is not implemented yet:
 Known limitations and trust warnings:
 - The app depends on Apple Photos automation and local Ollama availability.
 - Prompt quality and throughput can vary with model readiness and local machine performance.
+- Video-analysis throughput may vary modestly with clip format because key-frame selection now evaluates a larger candidate set before sending frames to the model.
 - The internal metadata ownership logic version in code is currently separate from the app marketing version.
 - This repo started a fresh baseline on March 14, 2026; earlier rollback points should be treated cautiously.
 

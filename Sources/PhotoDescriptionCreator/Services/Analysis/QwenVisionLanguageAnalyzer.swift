@@ -15,6 +15,9 @@ public struct QwenVisionLanguageAnalyzer: Analyzer {
         "temperature": 0.2,
         "num_predict": 128
     ]
+    static let videoKeyFrameCount = 3
+    static let videoCandidateProgresses = VideoFrameSampler.evenlySpacedProgresses(count: 9)
+    static let videoTargetProgresses = [0.2, 0.5, 0.8]
 
     // Keep V3 prompts in source so packaged builds do not depend on loose workspace files.
     static let photoPromptV3 = """
@@ -171,9 +174,12 @@ public struct QwenVisionLanguageAnalyzer: Analyzer {
             imageData = [try jpegData(from: mediaURL)]
             prompt = Self.photoPromptV3
         case .video:
-            let frames = try await frameSampler.sampleFrames(from: mediaURL, count: 5)
-            let keyFrames = Array(frames.prefix(3))
-            imageData = try keyFrames.map(jpegData(from:))
+            let candidateFrames = try await frameSampler.sampledFrames(
+                from: mediaURL,
+                progresses: Self.videoCandidateProgresses
+            )
+            let keyFrames = Self.selectVideoKeyFrames(from: candidateFrames)
+            imageData = try keyFrames.map { try jpegData(from: $0.image) }
             prompt = Self.videoPromptV3
         }
 
@@ -306,6 +312,160 @@ public struct QwenVisionLanguageAnalyzer: Analyzer {
         }
         guard start <= end else { return nil }
         return String(text[start...end])
+    }
+
+    static func selectVideoKeyFrames(from candidates: [SampledVideoFrame]) -> [SampledVideoFrame] {
+        let orderedCandidates = candidates.sorted { lhs, rhs in
+            if lhs.actualProgress != rhs.actualProgress {
+                return lhs.actualProgress < rhs.actualProgress
+            }
+            return lhs.requestedProgress < rhs.requestedProgress
+        }
+
+        guard !orderedCandidates.isEmpty else { return [] }
+        guard orderedCandidates.count > videoKeyFrameCount else {
+            return Array(orderedCandidates.prefix(videoKeyFrameCount))
+        }
+
+        let signatures = orderedCandidates.map { makeLumaSignature(for: $0.image) }
+        let boundaries = bucketBoundaries(for: videoTargetProgresses)
+        var selectedIndices: [Int] = []
+        var usedIndices = Set<Int>()
+
+        for (targetBucketIndex, targetProgress) in videoTargetProgresses.enumerated() {
+            let bucketCandidates = orderedCandidates.indices.filter { index in
+                !usedIndices.contains(index) &&
+                bucketIndex(for: orderedCandidates[index].actualProgress, boundaries: boundaries) == targetBucketIndex
+            }
+
+            let candidateIndices = bucketCandidates.isEmpty
+                ? orderedCandidates.indices.filter { !usedIndices.contains($0) }
+                : bucketCandidates
+
+            guard let bestIndex = bestFrameIndex(
+                among: Array(candidateIndices),
+                orderedCandidates: orderedCandidates,
+                signatures: signatures,
+                targetProgress: targetProgress
+            ) else {
+                continue
+            }
+
+            selectedIndices.append(bestIndex)
+            usedIndices.insert(bestIndex)
+        }
+
+        return selectedIndices
+            .sorted { orderedCandidates[$0].actualProgress < orderedCandidates[$1].actualProgress }
+            .map { orderedCandidates[$0] }
+    }
+
+    private static func bucketBoundaries(for targetProgresses: [Double]) -> [Double] {
+        zip(targetProgresses, targetProgresses.dropFirst()).map { ($0 + $1) / 2.0 }
+    }
+
+    private static func bucketIndex(for progress: Double, boundaries: [Double]) -> Int {
+        boundaries.firstIndex(where: { progress < $0 }) ?? boundaries.count
+    }
+
+    private static func bestFrameIndex(
+        among candidateIndices: [Int],
+        orderedCandidates: [SampledVideoFrame],
+        signatures: [[UInt8]?],
+        targetProgress: Double
+    ) -> Int? {
+        candidateIndices.max { lhs, rhs in
+            let lhsScore = selectionScore(
+                for: lhs,
+                orderedCandidates: orderedCandidates,
+                signatures: signatures,
+                targetProgress: targetProgress
+            )
+            let rhsScore = selectionScore(
+                for: rhs,
+                orderedCandidates: orderedCandidates,
+                signatures: signatures,
+                targetProgress: targetProgress
+            )
+
+            if lhsScore != rhsScore {
+                return lhsScore < rhsScore
+            }
+
+            let lhsDistance = abs(orderedCandidates[lhs].actualProgress - targetProgress)
+            let rhsDistance = abs(orderedCandidates[rhs].actualProgress - targetProgress)
+            if lhsDistance != rhsDistance {
+                return lhsDistance > rhsDistance
+            }
+
+            return orderedCandidates[lhs].actualProgress > orderedCandidates[rhs].actualProgress
+        }
+    }
+
+    private static func selectionScore(
+        for index: Int,
+        orderedCandidates: [SampledVideoFrame],
+        signatures: [[UInt8]?],
+        targetProgress: Double
+    ) -> Double {
+        let novelty = noveltyScore(for: index, signatures: signatures)
+        let anchorDistance = abs(orderedCandidates[index].actualProgress - targetProgress)
+        let anchorScore = 1 - min(1, anchorDistance / 0.25)
+        return (novelty * 0.7) + (anchorScore * 0.3)
+    }
+
+    private static func noveltyScore(for index: Int, signatures: [[UInt8]?]) -> Double {
+        guard let signature = signatures[index] else { return 0 }
+
+        var differences: [Double] = []
+        if index > 0, let previous = signatures[index - 1] {
+            differences.append(signatureDifference(signature, previous))
+        }
+        if index + 1 < signatures.count, let next = signatures[index + 1] {
+            differences.append(signatureDifference(signature, next))
+        }
+
+        guard !differences.isEmpty else { return 0 }
+        if differences.count == 1 {
+            return differences[0]
+        }
+        return differences.min() ?? 0
+    }
+
+    private static func makeLumaSignature(for image: CGImage, size: Int = 16) -> [UInt8]? {
+        let clampedSize = max(4, size)
+        var pixels = [UInt8](repeating: 0, count: clampedSize * clampedSize)
+        let didRender = pixels.withUnsafeMutableBytes { buffer -> Bool in
+            guard let baseAddress = buffer.baseAddress,
+                  let context = CGContext(
+                    data: baseAddress,
+                    width: clampedSize,
+                    height: clampedSize,
+                    bitsPerComponent: 8,
+                    bytesPerRow: clampedSize,
+                    space: CGColorSpaceCreateDeviceGray(),
+                    bitmapInfo: CGImageAlphaInfo.none.rawValue
+                  )
+            else {
+                return false
+            }
+
+            context.interpolationQuality = .low
+            context.draw(image, in: CGRect(x: 0, y: 0, width: clampedSize, height: clampedSize))
+            return true
+        }
+
+        return didRender ? pixels : nil
+    }
+
+    private static func signatureDifference(_ lhs: [UInt8], _ rhs: [UInt8]) -> Double {
+        let count = min(lhs.count, rhs.count)
+        guard count > 0 else { return 0 }
+
+        let totalDifference = zip(lhs.prefix(count), rhs.prefix(count)).reduce(0.0) { partialResult, pair in
+            partialResult + abs(Double(pair.0) - Double(pair.1))
+        }
+        return totalDifference / (Double(count) * 255.0)
     }
 
     private func jpegData(from imageURL: URL) throws -> Data {
