@@ -1,0 +1,8 @@
+.DS_Store
+
+/.build/
+/.cache-home/
+/.clang-module-cache/
+/.swiftpm/
+/dist/
+/Known Good/
