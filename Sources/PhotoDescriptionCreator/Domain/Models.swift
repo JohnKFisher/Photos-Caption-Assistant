@@ -44,7 +44,7 @@ public struct LogicVersion: Sendable, Equatable, Codable, Comparable {
         return lhs.patch < rhs.patch
     }
 
-    public static let current = LogicVersion(major: 2, minor: 5, patch: 0)
+    public static let current = LogicVersion(major: 3, minor: 0, patch: 0)
 }
 
 public struct OwnershipTag: Sendable, Equatable, Codable {
@@ -227,12 +227,18 @@ public protocol PhotosWriter: Sendable {
     func enumerate(scope: ScopeSource, dateRange: CaptureDateRange?) async throws -> [MediaAsset]
     func readMetadata(id: String) async throws -> ExistingMetadataState
     func writeMetadata(id: String, caption: String, keywords: [String]) async throws
-    func exportAssetToTemporaryURL(id: String) async throws -> URL
+    func exportAssetToTemporaryURL(id: String, kind: MediaKind) async throws -> URL
     func isPhotosAppRunning() async -> Bool
 }
 
 public protocol PhotosProcessMonitoring: Sendable {
     func photosResidentMemoryBytes() async -> UInt64?
+}
+
+public protocol PhotosLifecycleControlling: Sendable {
+    func quitPhotosAppGracefully() async -> Bool
+    func launchPhotosApp() async throws
+    func waitForPhotosReady(timeoutSeconds: TimeInterval) async -> Bool
 }
 
 public protocol PhotoPreviewSource: Sendable {

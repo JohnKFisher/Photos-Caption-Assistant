@@ -20,6 +20,7 @@ public struct RunSafetyPausePrompt: Sendable, Equatable {
 public struct RunCallbacks {
     public var onProgress: (RunProgress) -> Void
     public var onPreparationProgress: (Int, Int) -> Void
+    public var onStatusChanged: (String?) -> Void
     public var onItemCompleted: (CompletedItemPreview) -> Void
     public var onPendingIDsUpdated: ([String]) -> Void
     public var onError: (String) -> Void
@@ -30,6 +31,7 @@ public struct RunCallbacks {
     public init(
         onProgress: @escaping (RunProgress) -> Void = { _ in },
         onPreparationProgress: @escaping (Int, Int) -> Void = { _, _ in },
+        onStatusChanged: @escaping (String?) -> Void = { _ in },
         onItemCompleted: @escaping (CompletedItemPreview) -> Void = { _ in },
         onPendingIDsUpdated: @escaping ([String]) -> Void = { _ in },
         onError: @escaping (String) -> Void = { _ in },
@@ -39,6 +41,7 @@ public struct RunCallbacks {
     ) {
         self.onProgress = onProgress
         self.onPreparationProgress = onPreparationProgress
+        self.onStatusChanged = onStatusChanged
         self.onItemCompleted = onItemCompleted
         self.onPendingIDsUpdated = onPendingIDsUpdated
         self.onError = onError
@@ -320,10 +323,11 @@ public final class RunCoordinator {
     private let videoFrameSampler: VideoFrameSampler
     private let previewRenderer: any PreviewRendering
     private let logicVersion: LogicVersion
-    private let checkpointInterval: Int
-    private let photosRefreshPromptInterval: Int
+    private let photosRestartInterval: Int
     private let photosMemoryCheckInterval: Int
     private let photosMemoryWarningBytes: UInt64
+    private let photosRestartCooldownSeconds: TimeInterval
+    private let photosRestartLaunchTimeoutSeconds: TimeInterval
     private let analysisConcurrency: Int
     private let prepareAheadLimit: Int
     private let writeBatchSize: Int
@@ -335,10 +339,12 @@ public final class RunCoordinator {
         analyzer: Analyzer,
         videoFrameSampler: VideoFrameSampler = VideoFrameSampler(),
         logicVersion: LogicVersion = .current,
-        checkpointInterval: Int = 1000,
+        checkpointInterval: Int = 500,
         photosRefreshPromptInterval: Int = 500,
         photosMemoryCheckInterval: Int = 40,
         photosMemoryWarningBytes: UInt64 = 20 * 1024 * 1024 * 1024,
+        photosRestartCooldownSeconds: TimeInterval = 60,
+        photosRestartLaunchTimeoutSeconds: TimeInterval = 30,
         analysisConcurrency: Int = 1,
         prepareAheadLimit: Int = 1,
         writeBatchSize: Int = 16
@@ -352,6 +358,8 @@ public final class RunCoordinator {
             photosRefreshPromptInterval: photosRefreshPromptInterval,
             photosMemoryCheckInterval: photosMemoryCheckInterval,
             photosMemoryWarningBytes: photosMemoryWarningBytes,
+            photosRestartCooldownSeconds: photosRestartCooldownSeconds,
+            photosRestartLaunchTimeoutSeconds: photosRestartLaunchTimeoutSeconds,
             analysisConcurrency: analysisConcurrency,
             prepareAheadLimit: prepareAheadLimit,
             writeBatchSize: writeBatchSize,
@@ -364,10 +372,12 @@ public final class RunCoordinator {
         analyzer: Analyzer,
         videoFrameSampler: VideoFrameSampler = VideoFrameSampler(),
         logicVersion: LogicVersion = .current,
-        checkpointInterval: Int = 1000,
+        checkpointInterval: Int = 500,
         photosRefreshPromptInterval: Int = 500,
         photosMemoryCheckInterval: Int = 40,
         photosMemoryWarningBytes: UInt64 = 20 * 1024 * 1024 * 1024,
+        photosRestartCooldownSeconds: TimeInterval = 60,
+        photosRestartLaunchTimeoutSeconds: TimeInterval = 30,
         analysisConcurrency: Int = 1,
         prepareAheadLimit: Int = 1,
         writeBatchSize: Int = 16,
@@ -378,10 +388,11 @@ public final class RunCoordinator {
         self.videoFrameSampler = videoFrameSampler
         self.previewRenderer = previewRenderer
         self.logicVersion = logicVersion
-        self.checkpointInterval = max(1, checkpointInterval)
-        self.photosRefreshPromptInterval = max(1, photosRefreshPromptInterval)
+        self.photosRestartInterval = max(1, checkpointInterval)
         self.photosMemoryCheckInterval = max(1, photosMemoryCheckInterval)
         self.photosMemoryWarningBytes = max(1, photosMemoryWarningBytes)
+        self.photosRestartCooldownSeconds = max(0, photosRestartCooldownSeconds)
+        self.photosRestartLaunchTimeoutSeconds = max(1, photosRestartLaunchTimeoutSeconds)
         self.analysisConcurrency = max(1, analysisConcurrency)
         self.prepareAheadLimit = max(0, prepareAheadLimit)
         self.writeBatchSize = max(1, writeBatchSize)
@@ -428,8 +439,9 @@ public final class RunCoordinator {
         var progress = RunProgress()
         var errors: [String] = []
         var failedAssets: [MediaAsset] = []
-        var nextPhotosRefreshPromptAtChanged = photosRefreshPromptInterval
+        var nextPhotosRestartAtChanged = photosRestartInterval
         var nextPhotosMemoryCheckAtChanged = photosMemoryCheckInterval
+        var photosRestartRequested = false
 
         var queuedAssetIDs: [String] = []
         var processedAssetIDs = Set<String>()
@@ -437,6 +449,7 @@ public final class RunCoordinator {
         var processedSincePendingUpdate = 0
 
         let targetEngine: EngineTier = .qwen25vl7b
+        let lifecycleController = photosWriter as? PhotosLifecycleControlling
 
         func snapshotPendingIDs() -> [String] {
             while queueCursor < queuedAssetIDs.count && processedAssetIDs.contains(queuedAssetIDs[queueCursor]) {
@@ -472,6 +485,7 @@ public final class RunCoordinator {
         callbacks.onPendingIDsUpdated([])
         defer {
             emitPendingIDs(force: true)
+            callbacks.onStatusChanged(nil)
         }
 
         func recordError(_ message: String) {
@@ -517,30 +531,109 @@ public final class RunCoordinator {
             return false
         }
 
-        func handlePostChangePromptsIfNeeded() async {
-            if progress.changed > 0 && progress.changed.isMultiple(of: checkpointInterval) {
-                let shouldContinue = await callbacks.confirmContinueAfterCheckpoint(progress.changed)
-                if !shouldContinue {
-                    isCancelled = true
+        func requestPhotosRestartIfNeeded() {
+            guard !photosRestartRequested else { return }
+            photosRestartRequested = true
+            callbacks.onStatusChanged("Pausing for Photos restart")
+        }
+
+        func waitForRestartCooldown() async -> Bool {
+            let deadline = Date().addingTimeInterval(photosRestartCooldownSeconds)
+            while true {
+                if isCancelled {
+                    return false
                 }
+
+                let remaining = deadline.timeIntervalSinceNow
+                if remaining <= 0 {
+                    return true
+                }
+
+                let delaySeconds = min(0.5, remaining)
+                let delayNanoseconds = UInt64((delaySeconds * 1_000_000_000).rounded())
+                try? await Task.sleep(nanoseconds: max(1, delayNanoseconds))
+            }
+        }
+
+        func relaunchPhotosAfterCancellationIfNeeded(_ lifecycleController: PhotosLifecycleControlling?) async {
+            guard let lifecycleController else { return }
+            try? await lifecycleController.launchPhotosApp()
+        }
+
+        func performRequestedPhotosRestartIfNeeded() async -> Bool {
+            guard photosRestartRequested else {
+                return false
             }
 
-            if !isCancelled, progress.changed >= nextPhotosRefreshPromptAtChanged {
-                let prompt = RunSafetyPausePrompt(
-                    title: "Refresh Photos Before Continuing?",
-                    message: "\(progress.changed) items have been changed. To reduce memory pressure, close and reopen Photos now, then click Continue.",
-                    confirmLabel: "Continue",
-                    cancelLabel: "Stop"
-                )
-                let shouldContinue = await callbacks.confirmSafetyPause(prompt)
-                if !shouldContinue {
-                    isCancelled = true
-                } else if !(await verifyPhotosStillRunning()) {
-                    isCancelled = true
+            photosRestartRequested = false
+
+            guard let lifecycleController else {
+                callbacks.onStatusChanged(nil)
+                recordError("Automatic Photos restart is unavailable for this Photos client.")
+                return false
+            }
+
+            guard !isCancelled else {
+                callbacks.onStatusChanged(nil)
+                return false
+            }
+
+            callbacks.onStatusChanged("Pausing for Photos restart")
+            let didQuitPhotos = await lifecycleController.quitPhotosAppGracefully()
+            guard didQuitPhotos else {
+                callbacks.onStatusChanged(nil)
+                recordError("Photos restart was skipped because Photos did not quit cleanly.")
+                return false
+            }
+
+            callbacks.onStatusChanged("Waiting 60s before relaunch")
+            let completedCooldown = await waitForRestartCooldown()
+            guard completedCooldown else {
+                callbacks.onStatusChanged(nil)
+                await relaunchPhotosAfterCancellationIfNeeded(lifecycleController)
+                return false
+            }
+
+            do {
+                try await lifecycleController.launchPhotosApp()
+            } catch {
+                callbacks.onStatusChanged(nil)
+                recordError("Photos restart failed while relaunching: \(error.localizedDescription)")
+                isCancelled = true
+                return false
+            }
+
+            guard !isCancelled else {
+                callbacks.onStatusChanged(nil)
+                return false
+            }
+
+            callbacks.onStatusChanged("Waiting for Photos to become ready")
+            let photosReady = await lifecycleController.waitForPhotosReady(
+                timeoutSeconds: photosRestartLaunchTimeoutSeconds
+            )
+            callbacks.onStatusChanged(nil)
+
+            guard photosReady else {
+                if isCancelled {
+                    return false
                 }
+                recordError(
+                    "Photos did not become automation-ready within \(Int(photosRestartLaunchTimeoutSeconds.rounded()))s after relaunch."
+                )
+                isCancelled = true
+                return false
+            }
+
+            return true
+        }
+
+        func handlePostChangeMaintenanceIfNeeded() async {
+            if !isCancelled, progress.changed >= nextPhotosRestartAtChanged {
+                requestPhotosRestartIfNeeded()
                 repeat {
-                    nextPhotosRefreshPromptAtChanged += photosRefreshPromptInterval
-                } while nextPhotosRefreshPromptAtChanged <= progress.changed
+                    nextPhotosRestartAtChanged += photosRestartInterval
+                } while nextPhotosRestartAtChanged <= progress.changed
             }
 
             if !isCancelled, progress.changed >= nextPhotosMemoryCheckAtChanged {
@@ -549,24 +642,7 @@ public final class RunCoordinator {
                    let photosMemoryBytes = await monitor.photosResidentMemoryBytes(),
                    photosMemoryBytes >= photosMemoryWarningBytes
                 {
-                    let currentGiB = Double(photosMemoryBytes) / Double(1024 * 1024 * 1024)
-                    let thresholdGiB = Double(photosMemoryWarningBytes) / Double(1024 * 1024 * 1024)
-                    let prompt = RunSafetyPausePrompt(
-                        title: "Photos Memory Is High",
-                        message: String(
-                            format: "Photos is using about %.1f GB (threshold %.1f GB). Close and reopen Photos now, then click Continue.",
-                            currentGiB,
-                            thresholdGiB
-                        ),
-                        confirmLabel: "Continue",
-                        cancelLabel: "Stop"
-                    )
-                    let shouldContinue = await callbacks.confirmSafetyPause(prompt)
-                    if !shouldContinue {
-                        isCancelled = true
-                    } else if !(await verifyPhotosStillRunning()) {
-                        isCancelled = true
-                    }
+                    requestPhotosRestartIfNeeded()
                 }
             }
         }
@@ -677,12 +753,12 @@ public final class RunCoordinator {
                 )
 
                 if writeResult.success {
-                    progress.processed += 1
-                    progress.changed += 1
-                    callbacks.onProgress(progress)
-                    markAssetProcessed(write.asset.id)
-                    await enqueuePreview(for: write)
-                    await handlePostChangePromptsIfNeeded()
+                        progress.processed += 1
+                        progress.changed += 1
+                        callbacks.onProgress(progress)
+                        markAssetProcessed(write.asset.id)
+                        await enqueuePreview(for: write)
+                        await handlePostChangeMaintenanceIfNeeded()
                 } else {
                     progress.processed += 1
                     progress.failed += 1
@@ -843,13 +919,9 @@ public final class RunCoordinator {
                 pendingWrites.reserveCapacity(analysisConcurrency + prepareAheadLimit + 1)
 
                 func nextWriteChunkSize(for readyCount: Int) -> Int {
-                    let untilCheckpoint: Int = {
-                        let remainder = progress.changed % checkpointInterval
-                        return remainder == 0 ? checkpointInterval : (checkpointInterval - remainder)
-                    }()
-                    let untilRefresh = max(1, nextPhotosRefreshPromptAtChanged - progress.changed)
+                    let untilRestart = max(1, nextPhotosRestartAtChanged - progress.changed)
                     let untilMemory = max(1, nextPhotosMemoryCheckAtChanged - progress.changed)
-                    let safeChunkSize = max(1, min(writeBatchSize, untilCheckpoint, untilRefresh, untilMemory))
+                    let safeChunkSize = max(1, min(writeBatchSize, untilRestart, untilMemory))
                     return max(1, min(readyCount, safeChunkSize))
                 }
 
@@ -918,13 +990,22 @@ public final class RunCoordinator {
                     prefetchedMetadata: currentPrefetchedMetadata
                 )
 
+                let nextPrefetchedMetadata = await nextPrefetchTask?.value ?? [:]
+
+                if isCancelled {
+                    break
+                }
+
+                let didRestartPhotos = await performRequestedPhotosRestartIfNeeded()
                 if isCancelled {
                     break
                 }
 
                 windowStart = nextWindowStart
                 currentWindowAssets = nextWindowAssets
-                currentPrefetchedMetadata = await nextPrefetchTask?.value ?? [:]
+                currentPrefetchedMetadata = didRestartPhotos
+                    ? await prefetchMetadata(for: currentWindowAssets)
+                    : nextPrefetchedMetadata
             }
         }
 
@@ -1310,7 +1391,7 @@ public final class RunCoordinator {
             return previewURL
         }
 
-        return try await photosWriter.exportAssetToTemporaryURL(id: asset.id)
+        return try await photosWriter.exportAssetToTemporaryURL(id: asset.id, kind: asset.kind)
     }
 
     private nonisolated static func measureStage<T>(

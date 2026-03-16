@@ -45,6 +45,45 @@ enum AppAlert: Identifiable {
 
 @MainActor
 final class AppViewModel: ObservableObject {
+    private struct ImmersivePreviewQueue {
+        private var storage: [CompletedItemPreview] = []
+        private var headIndex = 0
+
+        var count: Int {
+            storage.count - headIndex
+        }
+
+        var isEmpty: Bool {
+            count == 0
+        }
+
+        mutating func append(_ preview: CompletedItemPreview) {
+            storage.append(preview)
+        }
+
+        mutating func popFirst() -> CompletedItemPreview? {
+            guard headIndex < storage.count else { return nil }
+            let preview = storage[headIndex]
+            headIndex += 1
+
+            if headIndex >= 32 && headIndex * 2 >= storage.count {
+                storage.removeFirst(headIndex)
+                headIndex = 0
+            }
+
+            return preview
+        }
+
+        mutating func removeAll() {
+            storage.removeAll(keepingCapacity: true)
+            headIndex = 0
+        }
+    }
+
+    private static let immersiveBasePreviewDisplaySeconds: TimeInterval = 0.85
+    private static let immersiveMinimumPreviewDisplaySeconds: TimeInterval = 0.10
+    private static let immersiveMaximumLagSeconds: TimeInterval = 8.0
+
     @Published var capabilities = AppCapabilities(
         photosAutomationAvailable: false,
         qwenModelAvailable: false,
@@ -68,9 +107,10 @@ final class AppViewModel: ObservableObject {
     @Published var isPreparingModel = false
     @Published var progress = RunProgress()
     @Published var performance = RunPerformanceStats()
-    @Published var orderedRunPreparationStatus: String?
+    @Published var runStatusMessage: String?
     @Published var lastSummary: RunSummary?
     @Published var lastCompletedItemPreview: CompletedItemPreview?
+    @Published var immersiveDisplayedItemPreview: CompletedItemPreview?
     @Published var recentRunErrors: [String] = []
     @Published var isImmersivePreviewPresented = false
     @Published var ollamaStatusMessage = "Checking Qwen 2.5VL 7B availability..."
@@ -90,6 +130,12 @@ final class AppViewModel: ObservableObject {
     private var lastPersistedPendingCount: Int?
     private var persistedRunOptionsForResume: PersistedRunOptions?
     private var persistedRunState: PersistedRunState?
+    private var preparationStatusMessage: String?
+    private var automaticRestartStatusMessage: String?
+    private var hasShownStartupAutomationAlert = false
+    private var queuedImmersivePreviews = ImmersivePreviewQueue()
+    private var immersivePreviewTask: Task<Void, Never>?
+    private var immersiveLastPreviewPresentedAt: Date?
 
     private let photosClient = PhotosAppleScriptClient()
     private let ollamaManager = OllamaManager()
@@ -102,6 +148,15 @@ final class AppViewModel: ObservableObject {
 
     func loadInitialData() async {
         capabilities = await capabilityProbe.probe()
+        if capabilities.photosAutomationAvailable {
+            hasShownStartupAutomationAlert = false
+        } else if !hasShownStartupAutomationAlert {
+            hasShownStartupAutomationAlert = true
+            showMessage(
+                title: "Automation Permission Needed",
+                message: "Photos automation is not available yet. Grant Apple Events permission now so caption updates and automatic Photos restarts can run unattended later."
+            )
+        }
         ollamaStatusMessage = capabilities.qwenModelAvailable
             ? "Qwen 2.5VL 7B is ready."
             : "Qwen 2.5VL 7B not ready. The app will start/install it when you run."
@@ -217,9 +272,11 @@ final class AppViewModel: ObservableObject {
         isRunning = true
         progress = RunProgress()
         performance = RunPerformanceStats()
-        orderedRunPreparationStatus = nil
+        setPreparationStatus(nil)
+        setAutomaticRestartStatus(nil)
         lastSummary = nil
         lastCompletedItemPreview = nil
+        resetImmersivePreviewState()
         recentRunErrors = []
         lastRunOptions = options
         lastFailedAssetIDs = []
@@ -246,7 +303,7 @@ final class AppViewModel: ObservableObject {
                     )
                     self.refreshPerformance()
                     if updated.processed > 0 {
-                        self.orderedRunPreparationStatus = nil
+                        self.setPreparationStatus(nil)
                     }
                 }
             },
@@ -254,12 +311,17 @@ final class AppViewModel: ObservableObject {
                 guard total > 0 else { return }
                 Task { @MainActor in
                     guard let self, self.isRunning else { return }
-                    self.orderedRunPreparationStatus = "Preparing ordered run (\(enumerated)/\(total) enumerated)"
+                    self.setPreparationStatus("Preparing ordered run (\(enumerated)/\(total) enumerated)")
+                }
+            },
+            onStatusChanged: { [weak self] status in
+                Task { @MainActor in
+                    self?.setAutomaticRestartStatus(status)
                 }
             },
             onItemCompleted: { [weak self] preview in
                 Task { @MainActor in
-                    self?.lastCompletedItemPreview = preview
+                    self?.handleCompletedItemPreview(preview)
                 }
             },
             onPendingIDsUpdated: { [weak self] pendingIDs in
@@ -286,15 +348,6 @@ final class AppViewModel: ObservableObject {
                 guard let self else { return false }
                 return await self.requestConflictDecision(asset: asset, existing: existing)
             },
-            confirmContinueAfterCheckpoint: { [weak self] changed in
-                guard let self else { return false }
-                return await self.requestConfirmation(
-                    title: "Continue Run?",
-                    message: "\(changed) items have been changed. Continue for the next batch?",
-                    confirmLabel: "Continue",
-                    cancelLabel: "Stop"
-                )
-            },
             confirmSafetyPause: { [weak self] prompt in
                 guard let self else { return false }
                 return await self.requestConfirmation(
@@ -314,7 +367,8 @@ final class AppViewModel: ObservableObject {
         refreshPerformance()
         isRunning = false
         runStartedAt = nil
-        orderedRunPreparationStatus = nil
+        setPreparationStatus(nil)
+        setAutomaticRestartStatus(nil)
         lastSummary = summary
         lastFailedAssetIDs = summary.failedAssets.map(\.id)
 
@@ -349,7 +403,102 @@ final class AppViewModel: ObservableObject {
     }
 
     func openImmersivePreview() {
+        immersiveDisplayedItemPreview = lastCompletedItemPreview
+        queuedImmersivePreviews.removeAll()
+        immersiveLastPreviewPresentedAt = immersiveDisplayedItemPreview == nil ? nil : Date()
         isImmersivePreviewPresented = true
+    }
+
+    func handleImmersivePresentationChange(_ isPresented: Bool) {
+        if isPresented {
+            scheduleImmersivePreviewAdvanceIfNeeded()
+        } else {
+            immersivePreviewTask?.cancel()
+            immersivePreviewTask = nil
+            queuedImmersivePreviews.removeAll()
+        }
+    }
+
+    private func handleCompletedItemPreview(_ preview: CompletedItemPreview) {
+        lastCompletedItemPreview = preview
+
+        guard isImmersivePreviewPresented else {
+            immersiveDisplayedItemPreview = preview
+            immersiveLastPreviewPresentedAt = Date()
+            return
+        }
+
+        if immersiveDisplayedItemPreview == nil {
+            immersiveDisplayedItemPreview = preview
+            immersiveLastPreviewPresentedAt = Date()
+            return
+        }
+
+        queuedImmersivePreviews.append(preview)
+        scheduleImmersivePreviewAdvanceIfNeeded()
+    }
+
+    private func immersivePreviewDisplaySeconds() -> TimeInterval {
+        let queueCount = max(1, queuedImmersivePreviews.count)
+        let catchUpDuration = Self.immersiveMaximumLagSeconds / Double(queueCount)
+        return max(
+            Self.immersiveMinimumPreviewDisplaySeconds,
+            min(Self.immersiveBasePreviewDisplaySeconds, catchUpDuration)
+        )
+    }
+
+    private func scheduleImmersivePreviewAdvanceIfNeeded() {
+        guard isImmersivePreviewPresented else { return }
+        guard immersivePreviewTask == nil else { return }
+
+        immersivePreviewTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+
+            while self.isImmersivePreviewPresented, !self.queuedImmersivePreviews.isEmpty {
+                let now = Date()
+                let targetDelay = self.immersivePreviewDisplaySeconds()
+                let elapsed = self.immersiveLastPreviewPresentedAt.map { now.timeIntervalSince($0) }
+                    ?? targetDelay
+                let remainingDelay = max(0, targetDelay - elapsed)
+
+                if remainingDelay > 0 {
+                    try? await Task.sleep(nanoseconds: UInt64(remainingDelay * 1_000_000_000))
+                    guard !Task.isCancelled else { break }
+                }
+
+                guard self.isImmersivePreviewPresented else { break }
+                guard let nextPreview = self.queuedImmersivePreviews.popFirst() else { break }
+                self.immersiveDisplayedItemPreview = nextPreview
+                self.immersiveLastPreviewPresentedAt = Date()
+            }
+
+            self.immersivePreviewTask = nil
+            if self.isImmersivePreviewPresented, !self.queuedImmersivePreviews.isEmpty {
+                self.scheduleImmersivePreviewAdvanceIfNeeded()
+            }
+        }
+    }
+
+    private func resetImmersivePreviewState() {
+        immersivePreviewTask?.cancel()
+        immersivePreviewTask = nil
+        immersiveDisplayedItemPreview = nil
+        queuedImmersivePreviews.removeAll()
+        immersiveLastPreviewPresentedAt = nil
+    }
+
+    private func setPreparationStatus(_ message: String?) {
+        preparationStatusMessage = message
+        refreshRunStatusMessage()
+    }
+
+    private func setAutomaticRestartStatus(_ message: String?) {
+        automaticRestartStatusMessage = message
+        refreshRunStatusMessage()
+    }
+
+    private func refreshRunStatusMessage() {
+        runStatusMessage = automaticRestartStatusMessage ?? preparationStatusMessage
     }
 
     private func startFastTraversalTotalCountTaskIfNeeded(options: RunOptions) {
@@ -596,7 +745,7 @@ struct MainView: View {
                     progress: viewModel.progress,
                     performance: viewModel.performance,
                     isRunning: viewModel.isRunning,
-                    preparationStatus: viewModel.orderedRunPreparationStatus,
+                    statusMessage: viewModel.runStatusMessage,
                     summary: viewModel.lastSummary,
                     liveErrors: viewModel.recentRunErrors,
                     lastCompletedItemPreview: viewModel.lastCompletedItemPreview,
@@ -658,7 +807,7 @@ struct MainView: View {
 
             if viewModel.isImmersivePreviewPresented {
                 ImmersivePreviewView(
-                    preview: viewModel.lastCompletedItemPreview,
+                    preview: viewModel.immersiveDisplayedItemPreview,
                     progress: viewModel.progress,
                     performance: viewModel.performance,
                     isRunning: viewModel.isRunning,
@@ -672,6 +821,7 @@ struct MainView: View {
             await viewModel.loadInitialData()
         }
         .onChange(of: viewModel.isImmersivePreviewPresented) { _, isPresented in
+            viewModel.handleImmersivePresentationChange(isPresented)
             handleImmersivePresentationChange(isPresented)
         }
         .sheet(item: $viewModel.pendingConflictPrompt) { prompt in

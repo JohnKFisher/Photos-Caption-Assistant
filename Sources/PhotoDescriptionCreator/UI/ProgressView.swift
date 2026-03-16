@@ -6,7 +6,7 @@ struct ProcessingProgressView: View {
     let progress: RunProgress
     let performance: RunPerformanceStats
     let isRunning: Bool
-    let preparationStatus: String?
+    let statusMessage: String?
     let summary: RunSummary?
     let liveErrors: [String]
     let lastCompletedItemPreview: CompletedItemPreview?
@@ -41,11 +41,11 @@ struct ProcessingProgressView: View {
             }
 
             if isRunning {
-                if let preparationStatus {
+                if let statusMessage {
                     HStack(spacing: 8) {
                         SwiftUI.ProgressView()
                             .controlSize(.small)
-                        Text(preparationStatus)
+                        Text(statusMessage)
                     }
                     .font(.footnote)
                     .foregroundStyle(.secondary)

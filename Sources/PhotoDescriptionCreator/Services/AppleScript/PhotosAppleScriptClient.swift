@@ -3,7 +3,7 @@ import Darwin
 import Foundation
 import Photos
 
-public actor PhotosAppleScriptClient: PhotosWriter, PhotosProcessMonitoring, PhotoPreviewSource, IncrementalPhotosWriter, BatchMetadataPhotosWriter, BatchWritePhotosWriter {
+public actor PhotosAppleScriptClient: PhotosWriter, PhotosProcessMonitoring, PhotosLifecycleControlling, PhotoPreviewSource, IncrementalPhotosWriter, BatchMetadataPhotosWriter, BatchWritePhotosWriter {
     private enum ScriptTimeout {
         static let enumerateLibrary: TimeInterval = 900
         static let enumerateNarrowScope: TimeInterval = 180
@@ -14,7 +14,8 @@ public actor PhotosAppleScriptClient: PhotosWriter, PhotosProcessMonitoring, Pho
         static let readMetadataBatchBase: TimeInterval = 20
         static let writeMetadata: TimeInterval = 45
         static let writeMetadataBatchBase: TimeInterval = 25
-        static let exportAsset: TimeInterval = 120
+        static let exportPhotoAsset: TimeInterval = 120
+        static let exportVideoAsset: TimeInterval = 300
         static let capabilityProbe: TimeInterval = 15
         static let listAlbums: TimeInterval = 120
         static let memoryProbe: TimeInterval = 5
@@ -24,6 +25,12 @@ public actor PhotosAppleScriptClient: PhotosWriter, PhotosProcessMonitoring, Pho
         static let writeMetadataBatchMaxItems = 24
         static let writeMetadataBatchMaxArgumentBytes = 36_000
         static let maximumCommandArgumentBytes = 64_000
+    }
+
+    private enum PhotosLifecycle {
+        static let appBundleIdentifier = "com.apple.Photos"
+        static let quitTimeoutSeconds: TimeInterval = 15
+        static let pollIntervalSeconds: TimeInterval = 0.5
     }
 
     private let fileManager: FileManager
@@ -615,7 +622,7 @@ public actor PhotosAppleScriptClient: PhotosWriter, PhotosProcessMonitoring, Pho
         )
     }
 
-    public func exportAssetToTemporaryURL(id: String) async throws -> URL {
+    public func exportAssetToTemporaryURL(id: String, kind: MediaKind) async throws -> URL {
         let exportRoot = fileManager.temporaryDirectory
             .appendingPathComponent("PhotoDescriptionCreatorExports", isDirectory: true)
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -640,7 +647,7 @@ public actor PhotosAppleScriptClient: PhotosWriter, PhotosProcessMonitoring, Pho
         _ = try runAppleScript(
             script,
             arguments: [exportRoot.path, id],
-            timeoutSeconds: ScriptTimeout.exportAsset,
+            timeoutSeconds: Self.exportAssetTimeout(for: kind),
             operationName: "export asset"
         )
 
@@ -681,12 +688,72 @@ public actor PhotosAppleScriptClient: PhotosWriter, PhotosProcessMonitoring, Pho
     }
 
     public func isPhotosAppRunning() async -> Bool {
-        !NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.Photos").isEmpty
+        !NSRunningApplication.runningApplications(withBundleIdentifier: PhotosLifecycle.appBundleIdentifier).isEmpty
+    }
+
+    public func quitPhotosAppGracefully() async -> Bool {
+        guard await isPhotosAppRunning() else {
+            return true
+        }
+
+        let script = """
+        tell application "Photos"
+            quit
+        end tell
+        """
+
+        do {
+            _ = try runAppleScript(
+                script,
+                timeoutSeconds: ScriptTimeout.capabilityProbe,
+                operationName: "quit Photos"
+            )
+        } catch {
+            return false
+        }
+
+        return await Self.waitForCondition(
+            timeoutSeconds: PhotosLifecycle.quitTimeoutSeconds,
+            pollIntervalSeconds: PhotosLifecycle.pollIntervalSeconds
+        ) {
+            !(await self.isPhotosAppRunning())
+        }
+    }
+
+    public func launchPhotosApp() async throws {
+        let appURL = try await MainActor.run { () throws -> URL in
+            if let resolvedURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: PhotosLifecycle.appBundleIdentifier) {
+                return resolvedURL
+            }
+            throw PhotosAppleScriptError.scriptFailed(message: "Photos.app could not be located for relaunch.")
+        }
+
+        try await Self.awaitLaunch { completion in
+            Task { @MainActor in
+                let configuration = NSWorkspace.OpenConfiguration()
+                configuration.activates = false
+                NSWorkspace.shared.openApplication(at: appURL, configuration: configuration) { _, error in
+                    completion(error)
+                }
+            }
+        }
+    }
+
+    public func waitForPhotosReady(timeoutSeconds: TimeInterval) async -> Bool {
+        await Self.waitForCondition(
+            timeoutSeconds: timeoutSeconds,
+            pollIntervalSeconds: PhotosLifecycle.pollIntervalSeconds
+        ) {
+            guard await self.isPhotosAppRunning() else {
+                return false
+            }
+            return await self.verifyAutomationAccess()
+        }
     }
 
     public func photosResidentMemoryBytes() async -> UInt64? {
         guard
-            let photosApp = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.Photos").first
+            let photosApp = NSRunningApplication.runningApplications(withBundleIdentifier: PhotosLifecycle.appBundleIdentifier).first
         else {
             return nil
         }
@@ -729,6 +796,51 @@ public actor PhotosAppleScriptClient: PhotosWriter, PhotosProcessMonitoring, Pho
             return true
         } catch {
             return false
+        }
+    }
+
+    static func awaitLaunch(
+        using launcher: @escaping (@escaping @Sendable (Error?) -> Void) -> Void
+    ) async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            launcher { error in
+                if let error {
+                    continuation.resume(throwing: error)
+                } else {
+                    continuation.resume(returning: ())
+                }
+            }
+        }
+    }
+
+    static func waitForCondition(
+        timeoutSeconds: TimeInterval,
+        pollIntervalSeconds: TimeInterval = 0.5,
+        sleep: @escaping @Sendable (UInt64) async -> Void = { nanoseconds in
+            try? await Task.sleep(nanoseconds: nanoseconds)
+        },
+        condition: @escaping @Sendable () async -> Bool
+    ) async -> Bool {
+        let clampedTimeout = max(0, timeoutSeconds)
+        let deadline = Date().addingTimeInterval(clampedTimeout)
+        let clampedPollInterval = max(0.01, pollIntervalSeconds)
+
+        while true {
+            if Task.isCancelled {
+                return false
+            }
+            if await condition() {
+                return true
+            }
+
+            let remaining = deadline.timeIntervalSinceNow
+            if remaining <= 0 {
+                return false
+            }
+
+            let delaySeconds = min(clampedPollInterval, remaining)
+            let delayNanoseconds = UInt64((delaySeconds * 1_000_000_000).rounded())
+            await sleep(max(1, delayNanoseconds))
         }
     }
 
@@ -917,6 +1029,15 @@ public actor PhotosAppleScriptClient: PhotosWriter, PhotosProcessMonitoring, Pho
         }
 
         return isDegraded ? .wait : .returnNil
+    }
+
+    static func exportAssetTimeout(for kind: MediaKind) -> TimeInterval {
+        switch kind {
+        case .photo:
+            ScriptTimeout.exportPhotoAsset
+        case .video:
+            ScriptTimeout.exportVideoAsset
+        }
     }
 
     private func requestImage(

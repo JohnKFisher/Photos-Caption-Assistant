@@ -4,98 +4,8 @@ import XCTest
 
 @MainActor
 final class RunCoordinatorTests: XCTestCase {
-    func testCheckpointPromptFiresAt250Intervals() async {
-        let assets = makeAssets(count: 760)
-        let metadata = Dictionary(uniqueKeysWithValues: assets.map { asset in
-            (asset.id, ExistingMetadataState(caption: nil, keywords: [], ownershipTag: nil, isExternal: false))
-        })
-
-        let writer = MockPhotosWriter(assets: assets, metadataByID: metadata)
-        let coordinator = RunCoordinator(
-            photosWriter: writer,
-            analyzer: MockAnalyzer(result: GeneratedMetadata(caption: "caption", keywords: ["k1"])),
-            checkpointInterval: 250
-        )
-
-        let recorder = PromptRecorder()
-
-        let summary = await coordinator.run(
-            options: RunOptions(
-                source: .library,
-                optionalCaptureDateRange: nil,
-                overwriteAppOwnedSameOrNewer: false
-            ),
-            capabilities: AppCapabilities(
-                photosAutomationAvailable: true,
-                qwenModelAvailable: true,
-                pickerCapability: .supported
-            ),
-            callbacks: RunCallbacks(
-                onProgress: { _ in },
-                confirmExternalOverwrite: { _, _ in
-                    XCTFail("No external prompt expected")
-                    return false
-                },
-                confirmContinueAfterCheckpoint: { changed in
-                    await recorder.recordCheckpoint(changed)
-                    return true
-                }
-            )
-        )
-
-        let checkpoints = await recorder.checkpointsValue()
-        XCTAssertEqual(checkpoints, [250, 500, 750])
-        XCTAssertEqual(summary.progress.changed, 760)
-        XCTAssertEqual(summary.progress.failed, 0)
-        XCTAssertEqual(summary.progress.skipped, 0)
-    }
-
-    func testPhotosRefreshPromptFiresAtConfiguredInterval() async {
+    func testAutomaticPhotosRestartFiresAtConfiguredIntervalWithoutManualPrompts() async {
         let assets = makeAssets(count: 620)
-        let metadata = Dictionary(uniqueKeysWithValues: assets.map { asset in
-            (asset.id, ExistingMetadataState(caption: nil, keywords: [], ownershipTag: nil, isExternal: false))
-        })
-
-        let writer = MockPhotosWriter(assets: assets, metadataByID: metadata)
-        let coordinator = RunCoordinator(
-            photosWriter: writer,
-            analyzer: MockAnalyzer(result: GeneratedMetadata(caption: "caption", keywords: ["k1"])),
-            checkpointInterval: 1000,
-            photosRefreshPromptInterval: 300,
-            photosMemoryCheckInterval: 10_000
-        )
-
-        let recorder = PromptRecorder()
-        let summary = await coordinator.run(
-            options: RunOptions(
-                source: .library,
-                optionalCaptureDateRange: nil,
-                overwriteAppOwnedSameOrNewer: false
-            ),
-            capabilities: AppCapabilities(
-                photosAutomationAvailable: true,
-                qwenModelAvailable: true,
-                pickerCapability: .supported
-            ),
-            callbacks: RunCallbacks(
-                onProgress: { _ in },
-                confirmExternalOverwrite: { _, _ in false },
-                confirmContinueAfterCheckpoint: { _ in true },
-                confirmSafetyPause: { prompt in
-                    await recorder.recordSafetyPrompt(prompt)
-                    return true
-                }
-            )
-        )
-
-        let safetyTitles = await recorder.safetyPromptTitlesValue()
-        XCTAssertEqual(safetyTitles, ["Refresh Photos Before Continuing?", "Refresh Photos Before Continuing?"])
-        XCTAssertEqual(summary.progress.changed, 620)
-        XCTAssertEqual(summary.progress.failed, 0)
-    }
-
-    func testHighPhotosMemoryPromptCanStopRun() async {
-        let assets = makeAssets(count: 12)
         let metadata = Dictionary(uniqueKeysWithValues: assets.map { asset in
             (asset.id, ExistingMetadataState(caption: nil, keywords: [], ownershipTag: nil, isExternal: false))
         })
@@ -103,15 +13,93 @@ final class RunCoordinatorTests: XCTestCase {
         let writer = MockPhotosWriter(
             assets: assets,
             metadataByID: metadata,
-            photosResidentMemoryBytes: 25 * 1024 * 1024 * 1024
+            quitResults: [true],
+            waitForReadyResults: [true]
+        )
+        let coordinator = RunCoordinator(
+            photosWriter: writer,
+            analyzer: MockAnalyzer(result: GeneratedMetadata(caption: "caption", keywords: ["k1"])),
+            checkpointInterval: 500,
+            photosMemoryCheckInterval: 10_000,
+            photosRestartCooldownSeconds: 0,
+            photosRestartLaunchTimeoutSeconds: 1
+        )
+
+        let recorder = PromptRecorder()
+        let statusRecorder = StatusRecorder()
+
+        let summary = await coordinator.run(
+            options: RunOptions(
+                source: .library,
+                optionalCaptureDateRange: nil,
+                overwriteAppOwnedSameOrNewer: false
+            ),
+            capabilities: AppCapabilities(
+                photosAutomationAvailable: true,
+                qwenModelAvailable: true,
+                pickerCapability: .supported
+            ),
+            callbacks: RunCallbacks(
+                onProgress: { _ in },
+                onStatusChanged: { status in
+                    statusRecorder.record(status: status)
+                },
+                confirmExternalOverwrite: { _, _ in
+                    XCTFail("No external prompt expected")
+                    return false
+                },
+                confirmContinueAfterCheckpoint: { changed in
+                    await recorder.recordCheckpoint(changed)
+                    return true
+                },
+                confirmSafetyPause: { prompt in
+                    await recorder.recordSafetyPrompt(prompt)
+                    return true
+                }
+            )
+        )
+
+        let checkpoints = await recorder.checkpointsValue()
+        let safetyTitles = await recorder.safetyPromptTitlesValue()
+        let statuses = statusRecorder.values()
+        let quitCount = await writer.quitRequestCountValue()
+        let launchCount = await writer.launchRequestCountValue()
+        let readinessWaitCount = await writer.waitForReadyCallCountValue()
+
+        XCTAssertEqual(checkpoints, [])
+        XCTAssertEqual(safetyTitles, [])
+        XCTAssertEqual(quitCount, 1)
+        XCTAssertEqual(launchCount, 1)
+        XCTAssertEqual(readinessWaitCount, 1)
+        XCTAssertTrue(statuses.contains("Pausing for Photos restart"))
+        XCTAssertTrue(statuses.contains("Waiting 60s before relaunch"))
+        XCTAssertTrue(statuses.contains("Waiting for Photos to become ready"))
+        XCTAssertEqual(summary.progress.changed, 620)
+        XCTAssertEqual(summary.progress.failed, 0)
+        XCTAssertEqual(summary.progress.skipped, 0)
+    }
+
+    func testHighPhotosMemoryTriggersAutomaticRestartWithoutPrompt() async {
+        let assets = makeAssets(count: 3)
+        let metadata = Dictionary(uniqueKeysWithValues: assets.map { asset in
+            (asset.id, ExistingMetadataState(caption: nil, keywords: [], ownershipTag: nil, isExternal: false))
+        })
+
+        let writer = MockPhotosWriter(
+            assets: assets,
+            metadataByID: metadata,
+            photosResidentMemoryBytes: 25 * 1024 * 1024 * 1024,
+            quitResults: [true],
+            waitForReadyResults: [true]
         )
         let coordinator = RunCoordinator(
             photosWriter: writer,
             analyzer: MockAnalyzer(result: GeneratedMetadata(caption: "caption", keywords: ["k1"])),
             checkpointInterval: 1000,
-            photosRefreshPromptInterval: 1000,
             photosMemoryCheckInterval: 1,
-            photosMemoryWarningBytes: 1024
+            photosMemoryWarningBytes: 1024,
+            photosRestartCooldownSeconds: 0,
+            photosRestartLaunchTimeoutSeconds: 1
         )
 
         let recorder = PromptRecorder()
@@ -129,18 +117,164 @@ final class RunCoordinatorTests: XCTestCase {
             callbacks: RunCallbacks(
                 onProgress: { _ in },
                 confirmExternalOverwrite: { _, _ in false },
-                confirmContinueAfterCheckpoint: { _ in true },
                 confirmSafetyPause: { prompt in
                     await recorder.recordSafetyPrompt(prompt)
-                    return false
+                    return true
                 }
             )
         )
 
         let safetyTitles = await recorder.safetyPromptTitlesValue()
-        XCTAssertEqual(safetyTitles, ["Photos Memory Is High"])
-        XCTAssertEqual(summary.progress.changed, 1)
-        XCTAssertEqual(summary.progress.processed, 1)
+        let quitCount = await writer.quitRequestCountValue()
+        let launchCount = await writer.launchRequestCountValue()
+        let readinessWaitCount = await writer.waitForReadyCallCountValue()
+        XCTAssertEqual(safetyTitles, [])
+        XCTAssertEqual(quitCount, 1)
+        XCTAssertEqual(launchCount, 1)
+        XCTAssertEqual(readinessWaitCount, 1)
+        XCTAssertEqual(summary.progress.changed, 3)
+        XCTAssertEqual(summary.progress.failed, 0)
+    }
+
+    func testFailedQuitSkipsRestartOnceAndContinuesRun() async {
+        let assets = makeAssets(count: 520)
+        let metadata = Dictionary(uniqueKeysWithValues: assets.map { asset in
+            (asset.id, ExistingMetadataState(caption: nil, keywords: [], ownershipTag: nil, isExternal: false))
+        })
+
+        let writer = MockPhotosWriter(
+            assets: assets,
+            metadataByID: metadata,
+            quitResults: [false]
+        )
+        let coordinator = RunCoordinator(
+            photosWriter: writer,
+            analyzer: MockAnalyzer(result: GeneratedMetadata(caption: "caption", keywords: ["k1"])),
+            checkpointInterval: 500,
+            photosMemoryCheckInterval: 10_000,
+            photosRestartCooldownSeconds: 0,
+            photosRestartLaunchTimeoutSeconds: 1
+        )
+
+        let summary = await coordinator.run(
+            options: RunOptions(
+                source: .library,
+                optionalCaptureDateRange: nil,
+                overwriteAppOwnedSameOrNewer: false
+            ),
+            capabilities: AppCapabilities(
+                photosAutomationAvailable: true,
+                qwenModelAvailable: true,
+                pickerCapability: .supported
+            ),
+            callbacks: RunCallbacks(
+                onProgress: { _ in },
+                confirmExternalOverwrite: { _, _ in false }
+            )
+        )
+
+        let quitCount = await writer.quitRequestCountValue()
+        let launchCount = await writer.launchRequestCountValue()
+        XCTAssertEqual(quitCount, 1)
+        XCTAssertEqual(launchCount, 0)
+        XCTAssertEqual(summary.progress.changed, 520)
+        XCTAssertTrue(summary.errors.contains(where: { $0.contains("did not quit cleanly") }))
+    }
+
+    func testPhotosReadyTimeoutStopsRunBeforeNextWindow() async {
+        let assets = makeAssets(count: 40)
+        let metadata = Dictionary(uniqueKeysWithValues: assets.map { asset in
+            (asset.id, ExistingMetadataState(caption: nil, keywords: [], ownershipTag: nil, isExternal: false))
+        })
+
+        let writer = MockPhotosWriter(
+            assets: assets,
+            metadataByID: metadata,
+            quitResults: [true],
+            waitForReadyResults: [false]
+        )
+        let coordinator = RunCoordinator(
+            photosWriter: writer,
+            analyzer: MockAnalyzer(result: GeneratedMetadata(caption: "caption", keywords: ["k1"])),
+            checkpointInterval: 10,
+            photosMemoryCheckInterval: 10_000,
+            photosRestartCooldownSeconds: 0,
+            photosRestartLaunchTimeoutSeconds: 1
+        )
+
+        let summary = await coordinator.run(
+            options: RunOptions(
+                source: .library,
+                optionalCaptureDateRange: nil,
+                overwriteAppOwnedSameOrNewer: false
+            ),
+            capabilities: AppCapabilities(
+                photosAutomationAvailable: true,
+                qwenModelAvailable: true,
+                pickerCapability: .supported
+            ),
+            callbacks: RunCallbacks(
+                onProgress: { _ in },
+                confirmExternalOverwrite: { _, _ in false }
+            )
+        )
+
+        let launchCount = await writer.launchRequestCountValue()
+        let readinessWaitCount = await writer.waitForReadyCallCountValue()
+        XCTAssertEqual(launchCount, 1)
+        XCTAssertEqual(readinessWaitCount, 1)
+        XCTAssertEqual(summary.progress.changed, 32)
+        XCTAssertTrue(summary.errors.contains(where: { $0.contains("automation-ready") }))
+    }
+
+    func testCancelDuringRestartCooldownRelaunchesPhotosBeforeStopping() async {
+        let assets = makeAssets(count: 40)
+        let metadata = Dictionary(uniqueKeysWithValues: assets.map { asset in
+            (asset.id, ExistingMetadataState(caption: nil, keywords: [], ownershipTag: nil, isExternal: false))
+        })
+
+        let writer = MockPhotosWriter(
+            assets: assets,
+            metadataByID: metadata,
+            quitResults: [true]
+        )
+        let coordinator = RunCoordinator(
+            photosWriter: writer,
+            analyzer: MockAnalyzer(result: GeneratedMetadata(caption: "caption", keywords: ["k1"])),
+            checkpointInterval: 10,
+            photosMemoryCheckInterval: 10_000,
+            photosRestartCooldownSeconds: 0.2,
+            photosRestartLaunchTimeoutSeconds: 1
+        )
+
+        let runTask = Task {
+            await coordinator.run(
+                options: RunOptions(
+                    source: .library,
+                    optionalCaptureDateRange: nil,
+                    overwriteAppOwnedSameOrNewer: false
+                ),
+                capabilities: AppCapabilities(
+                    photosAutomationAvailable: true,
+                    qwenModelAvailable: true,
+                    pickerCapability: .supported
+                ),
+                callbacks: RunCallbacks(
+                    onProgress: { _ in },
+                    confirmExternalOverwrite: { _, _ in false }
+                )
+            )
+        }
+
+        while await writer.quitRequestCountValue() == 0 {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        coordinator.cancel()
+
+        let summary = await runTask.value
+        let launchCount = await writer.launchRequestCountValue()
+        XCTAssertEqual(launchCount, 1)
+        XCTAssertEqual(summary.progress.changed, 32)
     }
 
     func testPhotoPreviewPathPreferredOverExport() async {
@@ -1380,9 +1514,10 @@ private actor PromptRecorder {
     func safetyPromptTitlesValue() -> [String] {
         safetyPromptTitles
     }
+
 }
 
-private actor MockPhotosWriter: PhotosWriter, PhotosProcessMonitoring, PhotoPreviewSource, BatchMetadataPhotosWriter, BatchWritePhotosWriter, IncrementalPhotosWriter {
+private actor MockPhotosWriter: PhotosWriter, PhotosProcessMonitoring, PhotosLifecycleControlling, PhotoPreviewSource, BatchMetadataPhotosWriter, BatchWritePhotosWriter, IncrementalPhotosWriter {
     private let assets: [MediaAsset]
     private let photosResidentMemoryBytesValue: UInt64?
     private let previewDataByID: [String: Data]
@@ -1390,7 +1525,12 @@ private actor MockPhotosWriter: PhotosWriter, PhotosProcessMonitoring, PhotoPrev
     private let exportDelayNanoseconds: UInt64
     private let exportDelayByID: [String: UInt64]
     private let timelineRecorder: TimelineRecorder?
+    private let quitResults: [Bool]
+    private let waitForReadyResults: [Bool]
     private var metadataByID: [String: ExistingMetadataState]
+    private var isPhotosRunning = true
+    private var quitResultIndex = 0
+    private var waitForReadyResultIndex = 0
     private(set) var writes: [String: (caption: String, keywords: [String])] = [:]
     private(set) var writeOrder: [String] = []
     private(set) var previewRequests: [String] = []
@@ -1401,6 +1541,9 @@ private actor MockPhotosWriter: PhotosWriter, PhotosProcessMonitoring, PhotoPrev
     private(set) var enumeratePageCallCount = 0
     private(set) var firstWriteAfterEnumeratePageCount: Int?
     private(set) var countCallCount = 0
+    private(set) var quitRequestCount = 0
+    private(set) var launchRequestCount = 0
+    private(set) var waitForReadyCallCount = 0
 
     init(
         assets: [MediaAsset],
@@ -1410,6 +1553,8 @@ private actor MockPhotosWriter: PhotosWriter, PhotosProcessMonitoring, PhotoPrev
         enumerateTimeoutWhenLimitExceeds: Int? = nil,
         exportDelayNanoseconds: UInt64 = 0,
         exportDelayByID: [String: UInt64] = [:],
+        quitResults: [Bool] = [],
+        waitForReadyResults: [Bool] = [],
         timelineRecorder: TimelineRecorder? = nil
     ) {
         self.assets = assets
@@ -1419,6 +1564,8 @@ private actor MockPhotosWriter: PhotosWriter, PhotosProcessMonitoring, PhotoPrev
         self.enumerateTimeoutWhenLimitExceeds = enumerateTimeoutWhenLimitExceeds
         self.exportDelayNanoseconds = exportDelayNanoseconds
         self.exportDelayByID = exportDelayByID
+        self.quitResults = quitResults
+        self.waitForReadyResults = waitForReadyResults
         self.timelineRecorder = timelineRecorder
     }
 
@@ -1509,7 +1656,7 @@ private actor MockPhotosWriter: PhotosWriter, PhotosProcessMonitoring, PhotoPrev
         return results
     }
 
-    func exportAssetToTemporaryURL(id: String) async throws -> URL {
+    func exportAssetToTemporaryURL(id: String, kind _: MediaKind) async throws -> URL {
         exportRequests.append(id)
         await timelineRecorder?.record("export-start:\(id)")
         let delayNanoseconds = exportDelayByID[id] ?? exportDelayNanoseconds
@@ -1543,7 +1690,35 @@ private actor MockPhotosWriter: PhotosWriter, PhotosProcessMonitoring, PhotoPrev
     }
 
     func isPhotosAppRunning() async -> Bool {
-        true
+        isPhotosRunning
+    }
+
+    func quitPhotosAppGracefully() async -> Bool {
+        quitRequestCount += 1
+        let result = quitResults.indices.contains(quitResultIndex) ? quitResults[quitResultIndex] : true
+        if quitResultIndex < quitResults.count {
+            quitResultIndex += 1
+        }
+        if result {
+            isPhotosRunning = false
+        }
+        return result
+    }
+
+    func launchPhotosApp() async throws {
+        launchRequestCount += 1
+        isPhotosRunning = true
+    }
+
+    func waitForPhotosReady(timeoutSeconds _: TimeInterval) async -> Bool {
+        waitForReadyCallCount += 1
+        let result = waitForReadyResults.indices.contains(waitForReadyResultIndex)
+            ? waitForReadyResults[waitForReadyResultIndex]
+            : true
+        if waitForReadyResultIndex < waitForReadyResults.count {
+            waitForReadyResultIndex += 1
+        }
+        return result
     }
 
     func photosResidentMemoryBytes() async -> UInt64? {
@@ -1585,6 +1760,18 @@ private actor MockPhotosWriter: PhotosWriter, PhotosProcessMonitoring, PhotoPrev
     func countCallCountValue() async -> Int {
         countCallCount
     }
+
+    func quitRequestCountValue() async -> Int {
+        quitRequestCount
+    }
+
+    func launchRequestCountValue() async -> Int {
+        launchRequestCount
+    }
+
+    func waitForReadyCallCountValue() async -> Int {
+        waitForReadyCallCount
+    }
 }
 
 private struct MockAnalyzer: Analyzer {
@@ -1610,6 +1797,24 @@ private struct ConditionalFailAnalyzer: Analyzer {
             throw NSError(domain: "test", code: 1, userInfo: [NSLocalizedDescriptionKey: "intentional failure"])
         }
         return successResult
+    }
+}
+
+private final class StatusRecorder {
+    private let lock = NSLock()
+    private var messages: [String] = []
+
+    func record(status: String?) {
+        guard let status else { return }
+        lock.lock()
+        messages.append(status)
+        lock.unlock()
+    }
+
+    func values() -> [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return messages
     }
 }
 

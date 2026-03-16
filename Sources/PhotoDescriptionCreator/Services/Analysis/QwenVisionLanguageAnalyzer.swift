@@ -2,6 +2,40 @@ import AppKit
 import CoreGraphics
 import Foundation
 
+private enum PromptCatalog {
+    static let photoPrompt = loadRequiredPrompt(named: "photoprompt.txt")
+    static let videoPrompt = loadRequiredPrompt(named: "videoprompt.txt")
+
+    private static func loadRequiredPrompt(named filename: String) -> String {
+        for url in candidateURLs(for: filename) {
+            if let prompt = try? String(contentsOf: url, encoding: .utf8) {
+                return prompt
+            }
+        }
+
+        let searchedPaths = candidateURLs(for: filename)
+            .map(\.path)
+            .joined(separator: "\n - ")
+        fatalError("Missing prompt file '\(filename)'. Searched:\n - \(searchedPaths)")
+    }
+
+    private static func candidateURLs(for filename: String) -> [URL] {
+        var candidates: [URL] = []
+
+        if let resourceURL = Bundle.main.resourceURL {
+            candidates.append(resourceURL.appendingPathComponent("Prompts/\(filename)"))
+        }
+
+        var repoRootURL = URL(fileURLWithPath: #filePath)
+        for _ in 0..<5 {
+            repoRootURL.deleteLastPathComponent()
+        }
+        candidates.append(repoRootURL.appendingPathComponent("Prompts/\(filename)"))
+
+        return candidates
+    }
+}
+
 public struct QwenVisionLanguageAnalyzer: PreparedInputAnalyzer {
     private let frameSampler: VideoFrameSampler
     private let endpointURL: URL
@@ -18,184 +52,8 @@ public struct QwenVisionLanguageAnalyzer: PreparedInputAnalyzer {
     static let videoKeyFrameCount = 3
     static let videoCandidateProgresses = VideoFrameSampler.evenlySpacedProgresses(count: 9)
     static let videoTargetProgresses = [0.2, 0.5, 0.8]
-
-    // Keep the current prompt logic in source so packaged builds do not depend on loose workspace files.
-    static let photoPrompt = """
-    You are generating Apple Photos metadata for one photo.
-
-
-    Return exactly one JSON object and nothing else.
-    The response must start with { and end with }.
-    Use exactly these two keys and no others:
-    {"caption":"<caption>","keywords":["k1","k2","k3"]}
-
-    Rules:
-
-    Caption
-    - Caption must be a short factual fragment, 3–20 words, plain language, with no ending punctuation.
-    - Prefer a present participle phrase for visible actions, e.g., "two girls biking in a park". If the scene is static or action is unclear, use a short factual noun phrase instead.
-    - Do not use auxiliary verbs such as is, are, or was.
-    - Do not use commas, semicolons, colons, em dashes, quotation marks, or parentheses.
-    - Do not end the caption with punctuation.
-    - Prefer this order when it fits naturally: count or article + subject or role + action or state + setting + up to two distinctive visible details. Do not force this structure if a simpler factual caption is better.
-    - Describe only what is clearly visible. Do not guess names, relationships, identity, intent, mood, or backstory. If uncertain, choose the broader visible term.
-    - If the image is a screenshot, start the caption with "screenshot showing" and include keyword "screenshot".
-    - If the image is mainly a document or whiteboard, start with "document page showing" or "whiteboard showing" and include the matching keyword.
-    - If the photo mainly shows a TV monitor or phone screen, start with "screen showing".
-    - If the photo mainly shows a drawing or painting, start with "drawing showing" or "painting showing".
-    - If 1 person, use the most-specific clearly visible category that is visually unambiguous (for example girl, boy, man, woman, baby, bride). If that specificity is uncertain, use person.
-    - If 2–5 people, use a visible count plus the clearest accurate category, for example "two men" or "four people".
-    - If 6 or more people, use "group" or "crowd" unless a more useful broad label is obvious.
-    - If ages or categories are mixed or uncertain, use "people".
-    - Do not describe attractiveness, personality, emotion, or other subjective traits unless directly and plainly visible from expression or action.
-    - Do not infer: health status, disability, pregnancy, religion, ethnicity, nationality, sexuality, political affiliation.
-    - Do not read quote or transcribe license plates, addresses, emails, phone numbers, or other personal contact details. You may still describe the object generically, such as car, sign, or building.
-    - Include a character brand team or franchise name only when it is clearly visible from readable text logos or unmistakable imagery.
-    - Only include specific terms like Star Trek or Mickey Mouse when clearly visible from logos, readable text, or unmistakable imagery.
-    - Name a specific location building landmark or business only when confidence is high from clear signage readable text or unmistakable visual cues. Otherwise use a broader place term.
-    - Use role-based nouns such as bride groom graduate firefighter police officer or soldier only when visually unambiguous from clothing uniform props or setting. Otherwise use generic terms such as person man woman boy girl baby group.
-    - If uncertain between a specific label and a broader label, choose the broader label.
-    - Include up to two distinctive visible details that improve search, prioritizing unusual objects and distinctive clothing accessories or colors. Prefer details that help distinguish this image from similar ones. If needed to stay within 20 words, drop less important setting words before dropping strong distinctive details.
-    - When clearly visible, include useful event cues such as birthday graduation wedding concert or soccer, and include specific animal or vehicle types when clear.
-
-
-    Keywords
-    - Keywords must contain 6 to 12 unique lowercase search-friendly items
-    - Each keyword may contain only lowercase letters numbers and spaces. Remove punctuation rather than replacing it with symbols.
-    - Do not include numeric counts as keywords (counts belong in the caption).
-    - Keywords should usually be 1 to 3 words, but 4 words are allowed for strong searchable names or place phrases.
-    - Use singular nouns when that still sounds natural and search-friendly.
-    - Include specific differentiators such as character names distinctive objects or recognizable places only when clearly visible.
-    - Prefer specific searchable nouns when evidence is clear. If confidence is not high, use broader terms.
-    - When a role noun is used in the caption, include it as a keyword (e.g., bride, soldier, wedding).
-    - When visible, try to cover several of these keyword types:
-    	- subject
-    	- action
-    	- setting
-    	- notable object
-    	- time, lighting, or weather
-    	- one or two distinctive details
-    	- normalized public text when clearly readable
-    - If a category is not evident (e.g., no clear action), replace it with another strong, visible noun (object/scene/text).
-    - Do not invent actions; if no clear action, use an object/scene keyword instead of an action keyword
-    - Do not include generic filler words like: photo, image, picture, thing, stuff.
-    - Do not include reserved/internal tags or prefixes (for example __pdc*_).
-
-    Output
-    - Output exactly one JSON object. Do not output markdown code fences, prose, labels, notes, or extra keys. The response must be parseable by a strict JSON parser.
-    - Before finalizing, verify all of the following:
-    	- response starts with { and ends with }
-    	- exactly two keys: "caption" and "keywords"
-    	- caption is a string
-    	- keywords is an array of strings
-    	- no trailing commas
-    	- caption is 3 to 20 words
-    	- caption has no ending punctuation
-    	- keywords contains 6 to 12 unique lowercase items
-    	- each keyword uses only letters numbers and spaces
-    - If you cannot confidently produce all fields, still output valid JSON using the broadest accurate caption and keywords rather than any explanatory text.
-    - If your first draft would not be valid JSON, silently correct it and output only the corrected JSON.
-
-    Example output:
-    {"caption":"two girls wearing green scout vests smiling on playground equipment at dusk","keywords":["girl","scout","playground","smile","outdoor","dusk","park","swing"]}
-
-    Final instruction:
-    Output exactly one JSON object and nothing else.
-    Do not output markdown.
-    Do not output explanations.
-    Do not output code fences.
-    The response must be valid strict JSON parseable by a standard JSON parser.
-    """
-
-    static let videoPrompt = """
-    You are generating Apple Photos metadata for one video.
-    The provided images are key frames from the same video in chronological order.
-
-    Return exactly one JSON object and nothing else.
-    The response must start with { and end with }.
-    Use exactly these two keys and no others:
-    {"caption":"<caption>","keywords":["k1","k2","k3"]}
-
-    Rules:
-
-    Caption
-    - Caption must be a short factual fragment, 3–20 words, plain language, with no ending punctuation.
-    - Prefer a present participle phrase for visible actions, e.g., "two girls biking in a park". If the scene is static or action is unclear, use a short factual noun phrase instead.
-    - Do not use auxiliary verbs such as is, are, or was.
-    - Do not use commas, semicolons, colons, em dashes, quotation marks, or parentheses.
-    - Do not end the caption with punctuation.
-    - Prefer this order when it fits naturally: count or article + subject or role + action or state + setting + up to two distinctive visible details. Do not force this structure if a simpler factual caption is better.
-    - Describe only what is clearly visible. Do not guess names, relationships, identity, intent, mood, or backstory. If uncertain, choose the broader visible term.
-    - If the image is a screenshot, start the caption with "screenshot showing" and include keyword "screenshot".
-    - If the image is mainly a document or whiteboard, start with "document page showing" or "whiteboard showing" and include the matching keyword.
-    - If the photo mainly shows a TV monitor or phone screen, start with "screen showing".
-    - If the photo mainly shows a drawing or painting, start with "drawing showing" or "painting showing".
-    - If 1 person, use the most-specific clearly visible category that is visually unambiguous (for example girl, boy, man, woman, baby, bride). If that specificity is uncertain, use person.
-    - If 2–5 people, use a visible count plus the clearest accurate category, for example "two men" or "four people".
-    - If 6 or more people, use "group" or "crowd" unless a more useful broad label is obvious.
-    - If ages or categories are mixed or uncertain, use "people".
-    - Do not describe attractiveness, personality, emotion, or other subjective traits unless directly and plainly visible from expression or action.
-    - Do not infer: health status, disability, pregnancy, religion, ethnicity, nationality, sexuality, political affiliation.
-    - Do not read quote or transcribe license plates, addresses, emails, phone numbers, or other personal contact details. You may still describe the object generically, such as car, sign, or building.
-    - Include a character brand team or franchise name only when it is clearly visible from readable text logos or unmistakable imagery.
-    - Only include specific terms like Star Trek or Mickey Mouse when clearly visible from logos, readable text, or unmistakable imagery.
-    - Name a specific location building landmark or business only when confidence is high from clear signage readable text or unmistakable visual cues. Otherwise use a broader place term.
-    - Use role-based nouns such as bride groom graduate firefighter police officer or soldier only when visually unambiguous from clothing uniform props or setting. Otherwise use generic terms such as person man woman boy girl baby group.
-    - If uncertain between a specific label and a broader label, choose the broader label.
-    - Include up to two distinctive visible details that improve search, prioritizing unusual objects and distinctive clothing accessories or colors. Prefer details that help distinguish this image from similar ones. If needed to stay within 20 words, drop less important setting words before dropping strong distinctive details.
-    - When clearly visible, include useful event cues such as birthday graduation wedding concert or soccer, and include specific animal or vehicle types when clear.
-    - Describe the primary visible action or event across the sequence, not just one isolated frame. If the action changes, summarize the dominant action visible for most of the clip.
-
-
-
-    Keywords
-    - Keywords must contain 6 to 12 unique lowercase search-friendly items
-    - Each keyword may contain only lowercase letters numbers and spaces. Remove punctuation rather than replacing it with symbols.
-    - Do not include numeric counts as keywords (counts belong in the caption).
-    - Keywords should usually be 1 to 3 words, but 4 words are allowed for strong searchable names or place phrases.
-    - Use singular nouns when that still sounds natural and search-friendly.
-    - Include specific differentiators such as character names distinctive objects or recognizable places only when clearly visible.
-    - Prefer specific searchable nouns when evidence is clear. If confidence is not high, use broader terms.
-    - When a role noun is used in the caption, include it as a keyword (e.g., bride, soldier, wedding).
-    - When visible, try to cover several of these keyword types:
-    	- subject
-    	- action
-    	- setting
-    	- notable object
-    	- time, lighting, or weather
-    	- one or two distinctive details
-    	- normalized public text when clearly readable
-    - If a category is not evident (e.g., no clear action), replace it with another strong, visible noun (object/scene/text).
-    - Do not invent actions; if no clear action, use an object/scene keyword instead of an action keyword
-    - Do not include generic filler words like: photo, image, picture, thing, stuff.
-    - Do not include reserved/internal tags or prefixes (for example __pdc*_).
-    - For video keywords, prioritize recurring subjects actions and settings over brief transient details.
-
-    Output
-    - Output exactly one JSON object. Do not output markdown code fences, prose, labels, notes, or extra keys. The response must be parseable by a strict JSON parser.
-    - Before finalizing, verify all of the following:
-    	- response starts with { and ends with }
-    	- exactly two keys: "caption" and "keywords"
-    	- caption is a string
-    	- keywords is an array of strings
-    	- no trailing commas
-    	- caption is 3 to 20 words
-    	- caption has no ending punctuation
-    	- keywords contains 6 to 12 unique lowercase items
-    	- each keyword uses only letters numbers and spaces
-    - If you cannot confidently produce all fields, still output valid JSON using the broadest accurate caption and keywords rather than any explanatory text.
-    - If your first draft would not be valid JSON, silently correct it and output only the corrected JSON.
-
-    Example output:
-    {"caption":"two girls wearing green scout vests smiling on playground equipment at dusk","keywords":["girl","scout","playground","smile","outdoor","dusk","park","swing"]}
-
-    Final instruction:
-    Output exactly one JSON object and nothing else.
-    Do not output markdown.
-    Do not output explanations.
-    Do not output code fences.
-    The response must be valid strict JSON parseable by a standard JSON parser.
-    """
+    static let photoPrompt = PromptCatalog.photoPrompt
+    static let videoPrompt = PromptCatalog.videoPrompt
 
     public init(
         frameSampler: VideoFrameSampler = VideoFrameSampler(),

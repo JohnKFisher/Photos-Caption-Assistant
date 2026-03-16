@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 INFO_PLIST_SOURCE="$ROOT_DIR/Sources/PhotoDescriptionCreator/Resources/Info.plist"
+PROMPTS_SOURCE_DIR="$ROOT_DIR/Prompts"
 APP_NAME="Photo Description Creator"
 EXECUTABLE_NAME="PhotoDescriptionCreator"
 APP_BUNDLE="$ROOT_DIR/dist/$APP_NAME.app"
@@ -19,6 +20,11 @@ plist_set() {
 
 if [[ ! -f "$INFO_PLIST_SOURCE" ]]; then
   echo "Missing source Info.plist: $INFO_PLIST_SOURCE" >&2
+  exit 1
+fi
+
+if [[ ! -f "$PROMPTS_SOURCE_DIR/photoprompt.txt" || ! -f "$PROMPTS_SOURCE_DIR/videoprompt.txt" ]]; then
+  echo "Missing prompt files in: $PROMPTS_SOURCE_DIR" >&2
   exit 1
 fi
 
@@ -50,10 +56,12 @@ if [[ ! -f "$RELEASE_BINARY" ]]; then
 fi
 
 rm -rf "$APP_BUNDLE"
-mkdir -p "$APP_BUNDLE/Contents/MacOS" "$APP_BUNDLE/Contents/Resources"
+mkdir -p "$APP_BUNDLE/Contents/MacOS" "$APP_BUNDLE/Contents/Resources/Prompts"
 cp "$RELEASE_BINARY" "$APP_BUNDLE/Contents/MacOS/$EXECUTABLE_NAME"
 chmod +x "$APP_BUNDLE/Contents/MacOS/$EXECUTABLE_NAME"
 cp "$ICON_PATH" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
+cp "$PROMPTS_SOURCE_DIR/photoprompt.txt" "$APP_BUNDLE/Contents/Resources/Prompts/photoprompt.txt"
+cp "$PROMPTS_SOURCE_DIR/videoprompt.txt" "$APP_BUNDLE/Contents/Resources/Prompts/videoprompt.txt"
 
 cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

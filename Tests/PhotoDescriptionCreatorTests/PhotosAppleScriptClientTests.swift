@@ -91,4 +91,54 @@ final class PhotosAppleScriptClientTests: XCTestCase {
         XCTAssertEqual(chunks[1].map(\.id), ["two"])
         XCTAssertEqual(chunks[2].map(\.id), ["three"])
     }
+
+    func testExportAssetTimeoutUsesLongerLimitForVideos() {
+        XCTAssertEqual(PhotosAppleScriptClient.exportAssetTimeout(for: .photo), 120)
+        XCTAssertEqual(PhotosAppleScriptClient.exportAssetTimeout(for: .video), 300)
+    }
+
+    func testWaitForConditionReturnsTrueBeforeTimeout() async {
+        let result = await PhotosAppleScriptClient.waitForCondition(
+            timeoutSeconds: 0.05,
+            pollIntervalSeconds: 0.005
+        ) {
+            true
+        }
+
+        XCTAssertTrue(result)
+    }
+
+    func testWaitForConditionReturnsFalseOnTimeout() async {
+        let result = await PhotosAppleScriptClient.waitForCondition(
+            timeoutSeconds: 0.02,
+            pollIntervalSeconds: 0.005
+        ) {
+            false
+        }
+
+        XCTAssertFalse(result)
+    }
+
+    func testAwaitLaunchSucceedsWhenCompletionHasNoError() async throws {
+        try await PhotosAppleScriptClient.awaitLaunch { completion in
+            completion(nil)
+        }
+    }
+
+    func testAwaitLaunchThrowsWhenCompletionReturnsError() async {
+        enum LaunchError: Error {
+            case failed
+        }
+
+        do {
+            try await PhotosAppleScriptClient.awaitLaunch { completion in
+                completion(LaunchError.failed)
+            }
+            XCTFail("Expected launch helper to throw")
+        } catch LaunchError.failed {
+            // Expected.
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+    }
 }

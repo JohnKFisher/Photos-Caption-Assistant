@@ -1,10 +1,10 @@
 # Photo Description Creator
 
-Current version/build: 2.2 (2)
-Current description logic version: 2.5.0
+Current version/build: 2.3 (1)
+Current description logic version: 3.0.0
 
 Current overall status:
-Version 2.2 build 2 with description logic 2.5.0 is the current known-good release as of March 15, 2026. We are treating this as the forward baseline for future work after earlier rollback history became unreliable.
+Version 2.3 build 1 with description logic 3.0.0 is the current durable known-good release as of March 15, 2026.
 
 What is working now:
 - Local photo and video analysis through Ollama with the `qwen2.5vl:7b` model.
@@ -13,15 +13,16 @@ What is working now:
 - Incremental processing, pending-item tracking, and per-item completion previews.
 - Batched metadata reads and batched metadata writes in the current source tree.
 - Resilient enumerate-page retry behavior for large fast-order runs.
-- Safety prompts for checkpoints, long ordered runs, and high Photos memory usage.
-- Future builds from this source baseline now embed the current prompt files and use prompt logic 2.5.0.
+- Automatic Photos restart after every 500 changed items, plus the same restart path as a backup when Photos memory usage crosses the configured threshold.
+- Future builds from this source baseline now embed the current prompt files and use prompt logic 3.0.0.
+- Launch-time capability checks now surface denied Photos automation immediately so unattended restart runs are less likely to stall later on a hidden permission prompt.
 - Video analysis now selects three ordered key frames from a larger candidate set using time coverage plus lightweight visual-difference scoring.
 - The run pipeline now defaults to one in-flight LLM analysis with bounded prepare-ahead overlap so the next asset can be readied without competing model calls.
 - Analyzer-ready payloads are now prepared ahead of the LLM handoff when the analyzer supports it, so image encoding and video frame packaging can overlap with the current analysis.
 - Completion preview rendering is now deferred off the metadata-write critical path with a small bounded backlog.
 
 What is partially implemented:
-- Long-run resilience is improved, but still depends on AppleScript and Photos staying responsive.
+- Long-run resilience is improved, but still depends on AppleScript and Photos relaunching cleanly when the automatic restart cycle fires.
 - Prompt management exists in source text files and embedded analyzer constants, but there is no dedicated in-app prompt/version switcher.
 - Recovery from interrupted or historical rollback states is only partially addressed; repo history before this baseline should not be treated as authoritative.
 
@@ -36,6 +37,7 @@ Known limitations and trust warnings:
 - Video-analysis throughput may vary modestly with clip format because key-frame selection now evaluates a larger candidate set before sending frames to the model.
 - Metadata writes still happen after each analyzed window, so the pipeline is only partially streamed end to end even though preview generation now overlaps later writes.
 - The internal metadata ownership logic version in code is currently separate from the app marketing version.
+- The logic version major bump to 3.0.0 will cause previously app-owned 2.x metadata to be treated as older and eligible for overwrite under the usual ownership rules.
 - This repo started a fresh baseline on March 14, 2026; earlier rollback points should be treated cautiously.
 
 Setup/runtime requirements:
@@ -46,7 +48,7 @@ Setup/runtime requirements:
 - User approval for Photos library access and Apple Events automation when macOS prompts.
 
 Important operational risks:
-- Large runs can still be slow or brittle if Photos becomes unresponsive.
+- Large runs now deliberately pause for about 90 seconds per 500 changed items to reduce Photos instability, and they can still fail if Photos does not relaunch into an automation-ready state.
 - Local model inference may time out on first run or under heavy load.
 - Build artifacts are currently present in the repo history and should not be treated as source-of-truth outputs.
 
@@ -56,4 +58,4 @@ Recommended next priorities:
 - Add a small, repeatable smoke-test workflow for known-good verification before future anchors.
 
 Most recent durable known-good anchor:
-- `known-good/20260315-v2-2-logic-2-5-0`
+- `known-good/20260315-v2-3-logic-3-0-0`
