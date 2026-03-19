@@ -170,15 +170,56 @@ public struct RunPerformanceStats: Sendable, Equatable {
     }
 }
 
+public struct RunStageTiming: Sendable, Equatable, Identifiable {
+    public let stage: String
+    public let elapsedSeconds: Double
+
+    public var id: String { stage }
+
+    public init(stage: String, elapsedSeconds: Double) {
+        self.stage = stage
+        self.elapsedSeconds = max(0, elapsedSeconds)
+    }
+}
+
+public struct RunDiagnostics: Sendable, Equatable {
+    public let wallSeconds: Double
+    public let analysisConcurrency: Int
+    public let prepareAheadLimit: Int
+    public let writeBatchSize: Int
+    public let stageTimings: [RunStageTiming]
+
+    public init(
+        wallSeconds: Double,
+        analysisConcurrency: Int,
+        prepareAheadLimit: Int,
+        writeBatchSize: Int,
+        stageTimings: [RunStageTiming]
+    ) {
+        self.wallSeconds = max(0, wallSeconds)
+        self.analysisConcurrency = max(1, analysisConcurrency)
+        self.prepareAheadLimit = max(0, prepareAheadLimit)
+        self.writeBatchSize = max(1, writeBatchSize)
+        self.stageTimings = stageTimings
+    }
+}
+
 public struct RunSummary: Sendable, Equatable {
     public let progress: RunProgress
     public let errors: [String]
     public let failedAssets: [MediaAsset]
+    public let diagnostics: RunDiagnostics?
 
-    public init(progress: RunProgress, errors: [String], failedAssets: [MediaAsset] = []) {
+    public init(
+        progress: RunProgress,
+        errors: [String],
+        failedAssets: [MediaAsset] = [],
+        diagnostics: RunDiagnostics? = nil
+    ) {
         self.progress = progress
         self.errors = errors
         self.failedAssets = failedAssets
+        self.diagnostics = diagnostics
     }
 }
 

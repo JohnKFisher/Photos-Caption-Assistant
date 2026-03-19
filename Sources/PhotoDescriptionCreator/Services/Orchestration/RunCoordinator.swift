@@ -82,6 +82,27 @@ private actor RunTimingRecorder {
         return "[RunCoordinator] stage timings wall=\(Self.formatSeconds(wallSeconds))s " + entries.joined(separator: ", ")
     }
 
+    func diagnostics(
+        totalWallNanoseconds: UInt64,
+        analysisConcurrency: Int,
+        prepareAheadLimit: Int,
+        writeBatchSize: Int
+    ) -> RunDiagnostics {
+        let stageTimings = RunTimingStage.allCases.map { stage in
+            RunStageTiming(
+                stage: stage.rawValue,
+                elapsedSeconds: Double(totals[stage, default: 0]) / 1_000_000_000
+            )
+        }
+        return RunDiagnostics(
+            wallSeconds: Double(totalWallNanoseconds) / 1_000_000_000,
+            analysisConcurrency: analysisConcurrency,
+            prepareAheadLimit: prepareAheadLimit,
+            writeBatchSize: writeBatchSize,
+            stageTimings: stageTimings
+        )
+    }
+
     private static func formatSeconds(_ value: Double) -> String {
         String(format: "%.2f", value)
     }
@@ -428,13 +449,6 @@ public final class RunCoordinator {
 
         let timingRecorder = RunTimingRecorder()
         let runStartedNanoseconds = DispatchTime.now().uptimeNanoseconds
-        defer {
-            let elapsedNs = DispatchTime.now().uptimeNanoseconds - runStartedNanoseconds
-            Task {
-                let summary = await timingRecorder.summary(totalWallNanoseconds: elapsedNs)
-                print(summary)
-            }
-        }
 
         var progress = RunProgress()
         var errors: [String] = []
@@ -450,6 +464,30 @@ public final class RunCoordinator {
 
         let targetEngine: EngineTier = .qwen25vl7b
         let lifecycleController = photosWriter as? PhotosLifecycleControlling
+
+        func currentRunDiagnostics() async -> RunDiagnostics {
+            let elapsedNs = DispatchTime.now().uptimeNanoseconds - runStartedNanoseconds
+            return await timingRecorder.diagnostics(
+                totalWallNanoseconds: elapsedNs,
+                analysisConcurrency: analysisConcurrency,
+                prepareAheadLimit: prepareAheadLimit,
+                writeBatchSize: writeBatchSize
+            )
+        }
+
+        func makeSummary() async -> RunSummary {
+            let diagnostics = await currentRunDiagnostics()
+            let timingSummary = await timingRecorder.summary(
+                totalWallNanoseconds: UInt64((diagnostics.wallSeconds * 1_000_000_000).rounded())
+            )
+            print(timingSummary)
+            return RunSummary(
+                progress: progress,
+                errors: errors,
+                failedAssets: failedAssets,
+                diagnostics: diagnostics
+            )
+        }
 
         func snapshotPendingIDs() -> [String] {
             while queueCursor < queuedAssetIDs.count && processedAssetIDs.contains(queuedAssetIDs[queueCursor]) {
@@ -1114,7 +1152,7 @@ public final class RunCoordinator {
                     callbacks.onProgress(progress)
 
                     if !(await promptForSlowOrderedRunIfNeeded(totalCount: totalCount)) {
-                        return RunSummary(progress: progress, errors: errors, failedAssets: failedAssets)
+                        return await makeSummary()
                     }
 
                     callbacks.onPreparationProgress(0, totalCount)
@@ -1144,21 +1182,27 @@ public final class RunCoordinator {
                     await processAssetsInBatches(ordered)
                 }
             } catch {
-                return RunSummary(progress: .init(), errors: ["Failed to enumerate assets: \(error.localizedDescription)"])
+                errors.append("Failed to enumerate assets: \(error.localizedDescription)")
+                progress = .init()
+                failedAssets = []
+                return await makeSummary()
             }
         } else {
             if !isFastTraversal,
                let incrementalWriter = photosWriter as? IncrementalPhotosWriter,
                let totalCount = try? await incrementalWriter.count(scope: options.source),
                !(await promptForSlowOrderedRunIfNeeded(totalCount: totalCount)) {
-                return RunSummary(progress: progress, errors: errors, failedAssets: failedAssets)
+                return await makeSummary()
             }
 
             let assets: [MediaAsset]
             do {
                 assets = try await photosWriter.enumerate(scope: options.source, dateRange: options.optionalCaptureDateRange)
             } catch {
-                return RunSummary(progress: .init(), errors: ["Failed to enumerate assets: \(error.localizedDescription)"])
+                errors.append("Failed to enumerate assets: \(error.localizedDescription)")
+                progress = .init()
+                failedAssets = []
+                return await makeSummary()
             }
 
             progress.totalDiscovered = assets.count
@@ -1174,7 +1218,7 @@ public final class RunCoordinator {
         }
 
         await drainCompletedPreviewTasks(forceWaitForAll: true)
-        return RunSummary(progress: progress, errors: errors, failedAssets: failedAssets)
+        return await makeSummary()
     }
 
     private func orderedAssets(_ assets: [MediaAsset], by traversalOrder: RunTraversalOrder) -> [MediaAsset] {

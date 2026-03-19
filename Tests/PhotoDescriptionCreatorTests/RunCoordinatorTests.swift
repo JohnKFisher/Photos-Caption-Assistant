@@ -1211,6 +1211,35 @@ final class RunCoordinatorTests: XCTestCase {
         XCTAssertLessThan(firstWriteStart!, lastAnalyzeEnd!)
     }
 
+    func testRunSummaryIncludesTimingDiagnostics() async throws {
+        let assets = makeAssets(count: 2)
+        let metadata = Dictionary(uniqueKeysWithValues: assets.map { asset in
+            (asset.id, ExistingMetadataState(caption: nil, keywords: [], ownershipTag: nil, isExternal: false))
+        })
+        let coordinator = RunCoordinator(
+            photosWriter: MockPhotosWriter(assets: assets, metadataByID: metadata),
+            analyzer: MockAnalyzer(result: GeneratedMetadata(caption: "caption", keywords: ["k1"])),
+            analysisConcurrency: 1,
+            prepareAheadLimit: 1,
+            writeBatchSize: 4
+        )
+
+        let summary = await coordinator.run(
+            options: defaultRunOptions(),
+            capabilities: defaultCapabilities(),
+            callbacks: RunCallbacks()
+        )
+
+        let diagnostics = try XCTUnwrap(summary.diagnostics)
+        XCTAssertEqual(diagnostics.analysisConcurrency, 1)
+        XCTAssertEqual(diagnostics.prepareAheadLimit, 1)
+        XCTAssertEqual(diagnostics.writeBatchSize, 4)
+        XCTAssertEqual(diagnostics.stageTimings.count, 6)
+        XCTAssertGreaterThan(diagnostics.wallSeconds, 0)
+        XCTAssertTrue(diagnostics.stageTimings.contains(where: { $0.stage == "asset-acquire" }))
+        XCTAssertTrue(diagnostics.stageTimings.contains(where: { $0.stage == "write" }))
+    }
+
     func testSingleAnalysisWithPrepareAheadBeatsDualAnalysisUnderContention() async {
         let dualAnalysis = await runSyntheticContentionScenario(
             analysisConcurrency: 2,

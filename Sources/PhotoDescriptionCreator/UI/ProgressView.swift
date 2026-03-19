@@ -131,6 +131,41 @@ struct ProcessingProgressView: View {
                 .buttonStyle(.plain)
                 .disabled(onOpenImmersivePreview == nil)
             }
+
+            if let diagnostics = summary?.diagnostics {
+                Divider()
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Last Run Timings")
+                        .font(.subheadline.bold())
+
+                    Text(diagnosticsSummaryText(diagnostics))
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+
+                    let topStages = diagnostics.stageTimings
+                        .filter { $0.elapsedSeconds > 0.001 }
+                        .sorted { lhs, rhs in lhs.elapsedSeconds > rhs.elapsedSeconds }
+                        .prefix(4)
+
+                    if !topStages.isEmpty {
+                        ForEach(Array(topStages)) { stage in
+                            HStack(spacing: 8) {
+                                Text(stage.stage)
+                                    .font(.caption.monospaced())
+                                    .foregroundStyle(.secondary)
+                                    .frame(width: 120, alignment: .leading)
+                                Text(formatSeconds(stage.elapsedSeconds))
+                                    .font(.caption.monospacedDigit())
+                            }
+                        }
+
+                        Text("Stage totals can exceed wall time because prepare, analyze, write, and preview overlap.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
         }
         .padding(14)
         .background(.thinMaterial)
@@ -206,6 +241,17 @@ struct ProcessingProgressView: View {
             return "calculating"
         }
         return Self.formatDuration(seconds: etaSeconds)
+    }
+
+    private func diagnosticsSummaryText(_ diagnostics: RunDiagnostics) -> String {
+        "wall \(formatSeconds(diagnostics.wallSeconds))  |  analysis x\(diagnostics.analysisConcurrency)  |  prepare-ahead \(diagnostics.prepareAheadLimit)  |  write batch \(diagnostics.writeBatchSize)"
+    }
+
+    private func formatSeconds(_ seconds: Double) -> String {
+        if seconds >= 10 {
+            return String(format: "%.1fs", seconds)
+        }
+        return String(format: "%.2fs", seconds)
     }
 
     private static func formatDuration(seconds: Int) -> String {
