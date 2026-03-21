@@ -11,6 +11,7 @@ struct PersistedRunOptions: Codable, Equatable {
         case library
         case album
         case picker
+        case captionWorkflow
     }
 
     let sourceKind: SourceKind
@@ -36,6 +37,10 @@ struct PersistedRunOptions: Codable, Equatable {
             self.sourceKind = .picker
             self.sourceAlbumID = nil
             self.sourcePickerIDs = ids
+        case .captionWorkflow:
+            self.sourceKind = .captionWorkflow
+            self.sourceAlbumID = nil
+            self.sourcePickerIDs = nil
         }
 
         self.dateRangeStart = runOptions.optionalCaptureDateRange?.start
@@ -68,6 +73,8 @@ struct PersistedRunOptions: Codable, Equatable {
             return .library
         case .picker:
             return .picker(ids: sourcePickerIDs ?? [])
+        case .captionWorkflow:
+            return .captionWorkflow
         }
     }
 

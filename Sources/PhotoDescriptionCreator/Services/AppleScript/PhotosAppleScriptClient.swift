@@ -3,7 +3,7 @@ import Darwin
 import Foundation
 import Photos
 
-public actor PhotosAppleScriptClient: PhotosWriter, PhotosProcessMonitoring, PhotosLifecycleControlling, PhotoPreviewSource, IncrementalPhotosWriter, BatchMetadataPhotosWriter, BatchWritePhotosWriter {
+public actor PhotosAppleScriptClient: PhotosWriter, PhotosProcessMonitoring, PhotosLifecycleControlling, PhotoPreviewSource, IncrementalPhotosWriter, BatchMetadataPhotosWriter, BatchWritePhotosWriter, AlbumListingPhotosSource {
     private enum ScriptTimeout {
         static let enumerateLibrary: TimeInterval = 900
         static let enumerateNarrowScope: TimeInterval = 180
@@ -43,12 +43,20 @@ public actor PhotosAppleScriptClient: PhotosWriter, PhotosProcessMonitoring, Pho
     }
 
     public func enumerate(scope: ScopeSource, dateRange: CaptureDateRange?) async throws -> [MediaAsset] {
+        if case .captionWorkflow = scope {
+            throw PhotosAppleScriptError.scriptFailed(
+                message: "Caption Workflow must be resolved stage-by-stage by RunCoordinator before direct enumeration."
+            )
+        }
+
         let script = makeEnumerationScript(scope: scope)
         let timeout: TimeInterval
         switch scope {
         case .library:
             timeout = ScriptTimeout.enumerateLibrary
         case .album, .picker:
+            timeout = ScriptTimeout.enumerateNarrowScope
+        case .captionWorkflow:
             timeout = ScriptTimeout.enumerateNarrowScope
         }
         let output = try runAppleScript(
@@ -67,6 +75,12 @@ public actor PhotosAppleScriptClient: PhotosWriter, PhotosProcessMonitoring, Pho
     }
 
     public func count(scope: ScopeSource) async throws -> Int {
+        if case .captionWorkflow = scope {
+            throw PhotosAppleScriptError.scriptFailed(
+                message: "Caption Workflow must be resolved stage-by-stage by RunCoordinator before direct counting."
+            )
+        }
+
         let assignment = makeScopeTargetItemsAssignment(scope: scope)
         let script = """
         \(baseIdentifierHelperAppleScript)
@@ -83,6 +97,8 @@ public actor PhotosAppleScriptClient: PhotosWriter, PhotosProcessMonitoring, Pho
             timeout = ScriptTimeout.countLibrary
         case .album, .picker:
             timeout = ScriptTimeout.countNarrowScope
+        case .captionWorkflow:
+            timeout = ScriptTimeout.countNarrowScope
         }
 
         let output = try runAppleScript(
@@ -94,6 +110,12 @@ public actor PhotosAppleScriptClient: PhotosWriter, PhotosProcessMonitoring, Pho
     }
 
     public func enumerate(scope: ScopeSource, offset: Int, limit: Int) async throws -> [MediaAsset] {
+        if case .captionWorkflow = scope {
+            throw PhotosAppleScriptError.scriptFailed(
+                message: "Caption Workflow must be resolved stage-by-stage by RunCoordinator before paged enumeration."
+            )
+        }
+
         let assignment = makeScopeTargetItemsAssignment(scope: scope)
         let script = """
         \(baseIdentifierHelperAppleScript)
@@ -1168,6 +1190,8 @@ public actor PhotosAppleScriptClient: PhotosWriter, PhotosProcessMonitoring, Pho
                 end if
             end repeat
             """
+        case .captionWorkflow:
+            return "set targetItems to {}"
         }
     }
 

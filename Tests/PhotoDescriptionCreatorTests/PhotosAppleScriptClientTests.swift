@@ -141,4 +141,26 @@ final class PhotosAppleScriptClientTests: XCTestCase {
             XCTFail("Unexpected error: \(error)")
         }
     }
+
+    func testCountRejectsCaptionWorkflowDirectResolution() async {
+        let client = PhotosAppleScriptClient()
+
+        do {
+            _ = try await client.count(scope: .captionWorkflow)
+            XCTFail("Expected direct caption-workflow count to fail")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("Caption Workflow"))
+        }
+    }
+
+    func testEnumerateRejectsCaptionWorkflowDirectResolution() async {
+        let client = PhotosAppleScriptClient()
+
+        do {
+            _ = try await client.enumerate(scope: .captionWorkflow, dateRange: nil)
+            XCTFail("Expected direct caption-workflow enumerate to fail")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("Caption Workflow"))
+        }
+    }
 }
