@@ -1,15 +1,16 @@
 # Photo Description Creator
 
-Current version/build: 2.3 (1)
+Current version/build: 2.4 (1)
 Current description logic version: 3.0.0
 
 Current overall status:
-Version 2.3 build 1 with description logic 3.0.0 is the current durable known-good release as of March 15, 2026.
+The current source tree builds as version 2.4 build 1 with description logic 3.0.0. The most recent durable known-good release is version 2.4 build 1 from March 21, 2026.
 
 What is working now:
 - Local photo and video analysis through Ollama with the `qwen2.5vl:7b` model.
 - Apple Photos metadata reads and writes, including captions, keywords, and app ownership tags.
 - Library, album, and picker-based runs with overwrite policy checks.
+- A `Caption Workflow` source mode that refreshes and snapshots these smart albums one stage at a time: `0 - Priority Captioning`, then `1 - No Caption - New Photos`, then `2 - No Caption - All`, then `3 - Older Caption Logic`.
 - Incremental processing, pending-item tracking, and per-item completion previews.
 - Batched metadata reads and batched metadata writes in the current source tree.
 - Resilient enumerate-page retry behavior for large fast-order runs.
@@ -20,6 +21,8 @@ What is working now:
 - The run pipeline now defaults to one in-flight LLM analysis with bounded prepare-ahead overlap so the next asset can be readied without competing model calls.
 - Analyzer-ready payloads are now prepared ahead of the LLM handoff when the analyzer supports it, so image encoding and video frame packaging can overlap with the current analysis.
 - Completion preview rendering is now deferred off the metadata-write critical path with a small bounded backlog.
+- The immersive preview now shows the same run counters as the main progress view, includes source context for each completed item, and uses backlog-aware `30s / 10s / sampled` display timing without slowing the processing pipeline.
+- The cancel button now switches to `Canceling` after a cancel request is acknowledged while the current stage drains safely.
 
 What is partially implemented:
 - Long-run resilience is improved, but still depends on AppleScript and Photos relaunching cleanly when the automatic restart cycle fires.
@@ -34,6 +37,8 @@ What is not implemented yet:
 Known limitations and trust warnings:
 - The app depends on Apple Photos automation and local Ollama availability.
 - Prompt quality and throughput can vary with model readiness and local machine performance.
+- The `Caption Workflow` source deliberately reloads and snapshots each configured smart album before processing that stage, so it is safer for overlapping smart albums but can start slower than the normal fast library/album modes.
+- If the immersive preview backlog grows past 60 queued items, it samples the queue to stay reasonably current instead of showing every completed image in strict order.
 - Video-analysis throughput may vary modestly with clip format because key-frame selection now evaluates a larger candidate set before sending frames to the model.
 - Metadata writes still happen after each analyzed window, so the pipeline is only partially streamed end to end even though preview generation now overlaps later writes.
 - The internal metadata ownership logic version in code is currently separate from the app marketing version.
@@ -58,4 +63,4 @@ Recommended next priorities:
 - Add a small, repeatable smoke-test workflow for known-good verification before future anchors.
 
 Most recent durable known-good anchor:
-- `known-good/20260315-v2-3-logic-3-0-0`
+- `known-good/20260321-v2-4-immersive-caption-workflow`

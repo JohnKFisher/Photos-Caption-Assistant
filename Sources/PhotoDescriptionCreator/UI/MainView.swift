@@ -43,6 +43,47 @@ enum AppAlert: Identifiable {
     }
 }
 
+enum ImmersivePreviewPolicy {
+    static let regularDisplaySeconds: TimeInterval = 30
+    static let catchUpDisplaySeconds: TimeInterval = 10
+    static let catchUpThreshold = 20
+    static let emergencySamplingThreshold = 60
+    static let sampledRetainedPreviewCount = 30
+
+    static func displaySeconds(for backlogCount: Int) -> TimeInterval {
+        backlogCount > catchUpThreshold
+            ? catchUpDisplaySeconds
+            : regularDisplaySeconds
+    }
+
+    static func retainedIndices(
+        for backlogCount: Int,
+        targetRetainedCount: Int = sampledRetainedPreviewCount
+    ) -> [Int] {
+        guard backlogCount > 0 else { return [] }
+        guard backlogCount > targetRetainedCount, targetRetainedCount > 1 else {
+            return Array(0..<backlogCount)
+        }
+
+        let lastIndex = backlogCount - 1
+        var retained = Set<Int>()
+        retained.reserveCapacity(targetRetainedCount)
+
+        for position in 0..<targetRetainedCount {
+            let rawIndex = Double(position) * Double(lastIndex) / Double(targetRetainedCount - 1)
+            retained.insert(min(lastIndex, max(0, Int(rawIndex.rounded()))))
+        }
+
+        if retained.count < targetRetainedCount {
+            for index in 0...lastIndex where retained.count < targetRetainedCount {
+                retained.insert(index)
+            }
+        }
+
+        return retained.sorted()
+    }
+}
+
 @MainActor
 final class AppViewModel: ObservableObject {
     private struct ImmersivePreviewQueue {
@@ -55,6 +96,15 @@ final class AppViewModel: ObservableObject {
 
         var isEmpty: Bool {
             count == 0
+        }
+
+        var previews: [CompletedItemPreview] {
+            guard headIndex < storage.count else { return [] }
+            return Array(storage[headIndex...])
+        }
+
+        var previewFileURLs: [URL] {
+            previews.compactMap(\.previewFileURL)
         }
 
         mutating func append(_ preview: CompletedItemPreview) {
@@ -74,15 +124,44 @@ final class AppViewModel: ObservableObject {
             return preview
         }
 
+        @discardableResult
+        mutating func sampleDown(toRetainedCount retainedCount: Int) -> [CompletedItemPreview] {
+            let activePreviews = previews
+            let retainedIndices = Set(
+                ImmersivePreviewPolicy.retainedIndices(
+                    for: activePreviews.count,
+                    targetRetainedCount: retainedCount
+                )
+            )
+            guard retainedIndices.count < activePreviews.count else {
+                return []
+            }
+
+            var kept: [CompletedItemPreview] = []
+            var dropped: [CompletedItemPreview] = []
+            kept.reserveCapacity(retainedIndices.count)
+            dropped.reserveCapacity(activePreviews.count - retainedIndices.count)
+
+            for (index, preview) in activePreviews.enumerated() {
+                if retainedIndices.contains(index) {
+                    kept.append(preview)
+                } else {
+                    dropped.append(preview)
+                }
+            }
+
+            storage = kept
+            headIndex = 0
+            return dropped
+        }
+
         mutating func removeAll() {
             storage.removeAll(keepingCapacity: true)
             headIndex = 0
         }
     }
 
-    private static let immersiveBasePreviewDisplaySeconds: TimeInterval = 0.85
-    private static let immersiveMinimumPreviewDisplaySeconds: TimeInterval = 0.10
-    private static let immersiveMaximumLagSeconds: TimeInterval = 8.0
+    private static let previewDirectoryName = "PhotoDescriptionCreatorLastCompleted"
 
     @Published var capabilities = AppCapabilities(
         photosAutomationAvailable: false,
@@ -104,6 +183,7 @@ final class AppViewModel: ObservableObject {
     @Published var alwaysOverwriteExternalMetadata = true
 
     @Published var isRunning = false
+    @Published var isCancelRequested = false
     @Published var isPreparingModel = false
     @Published var progress = RunProgress()
     @Published var performance = RunPerformanceStats()
@@ -136,6 +216,7 @@ final class AppViewModel: ObservableObject {
     private var queuedImmersivePreviews = ImmersivePreviewQueue()
     private var immersivePreviewTask: Task<Void, Never>?
     private var immersiveLastPreviewPresentedAt: Date?
+    private var retainedPreviewFileURLs: Set<URL> = []
 
     private let photosClient = PhotosAppleScriptClient()
     private let ollamaManager = OllamaManager()
@@ -270,6 +351,7 @@ final class AppViewModel: ObservableObject {
         persistedRunOptionsForResume = persistedOptions
 
         isRunning = true
+        isCancelRequested = false
         progress = RunProgress()
         performance = RunPerformanceStats()
         setPreparationStatus(nil)
@@ -366,11 +448,13 @@ final class AppViewModel: ObservableObject {
         performanceTickTask = nil
         refreshPerformance()
         isRunning = false
+        isCancelRequested = false
         runStartedAt = nil
         setPreparationStatus(nil)
         setAutomaticRestartStatus(nil)
         lastSummary = summary
         lastFailedAssetIDs = summary.failedAssets.map(\.id)
+        synchronizeRetainedPreviewFiles()
 
         await finalizePersistedRunState()
 
@@ -383,6 +467,9 @@ final class AppViewModel: ObservableObject {
     }
 
     func cancelRun() {
+        guard isRunning else { return }
+        guard !isCancelRequested else { return }
+        isCancelRequested = true
         coordinator.cancel()
     }
 
@@ -406,6 +493,7 @@ final class AppViewModel: ObservableObject {
         immersiveDisplayedItemPreview = lastCompletedItemPreview
         queuedImmersivePreviews.removeAll()
         immersiveLastPreviewPresentedAt = immersiveDisplayedItemPreview == nil ? nil : Date()
+        synchronizeRetainedPreviewFiles()
         isImmersivePreviewPresented = true
     }
 
@@ -416,6 +504,9 @@ final class AppViewModel: ObservableObject {
             immersivePreviewTask?.cancel()
             immersivePreviewTask = nil
             queuedImmersivePreviews.removeAll()
+            immersiveDisplayedItemPreview = nil
+            immersiveLastPreviewPresentedAt = nil
+            synchronizeRetainedPreviewFiles()
         }
     }
 
@@ -423,53 +514,61 @@ final class AppViewModel: ObservableObject {
         lastCompletedItemPreview = preview
 
         guard isImmersivePreviewPresented else {
-            immersiveDisplayedItemPreview = preview
-            immersiveLastPreviewPresentedAt = Date()
+            immersiveDisplayedItemPreview = nil
+            immersiveLastPreviewPresentedAt = nil
+            synchronizeRetainedPreviewFiles()
             return
         }
 
         if immersiveDisplayedItemPreview == nil {
             immersiveDisplayedItemPreview = preview
             immersiveLastPreviewPresentedAt = Date()
+            synchronizeRetainedPreviewFiles()
             return
         }
 
         queuedImmersivePreviews.append(preview)
+        if queuedImmersivePreviews.count > ImmersivePreviewPolicy.emergencySamplingThreshold {
+            queuedImmersivePreviews.sampleDown(
+                toRetainedCount: ImmersivePreviewPolicy.sampledRetainedPreviewCount
+            )
+        }
+        synchronizeRetainedPreviewFiles()
         scheduleImmersivePreviewAdvanceIfNeeded()
-    }
-
-    private func immersivePreviewDisplaySeconds() -> TimeInterval {
-        let queueCount = max(1, queuedImmersivePreviews.count)
-        let catchUpDuration = Self.immersiveMaximumLagSeconds / Double(queueCount)
-        return max(
-            Self.immersiveMinimumPreviewDisplaySeconds,
-            min(Self.immersiveBasePreviewDisplaySeconds, catchUpDuration)
-        )
     }
 
     private func scheduleImmersivePreviewAdvanceIfNeeded() {
         guard isImmersivePreviewPresented else { return }
         guard immersivePreviewTask == nil else { return }
+        guard !queuedImmersivePreviews.isEmpty else { return }
 
         immersivePreviewTask = Task { @MainActor [weak self] in
             guard let self else { return }
 
             while self.isImmersivePreviewPresented, !self.queuedImmersivePreviews.isEmpty {
-                let now = Date()
-                let targetDelay = self.immersivePreviewDisplaySeconds()
-                let elapsed = self.immersiveLastPreviewPresentedAt.map { now.timeIntervalSince($0) }
-                    ?? targetDelay
-                let remainingDelay = max(0, targetDelay - elapsed)
+                while self.isImmersivePreviewPresented, !self.queuedImmersivePreviews.isEmpty {
+                    let now = Date()
+                    let targetDelay = ImmersivePreviewPolicy.displaySeconds(
+                        for: self.queuedImmersivePreviews.count
+                    )
+                    let elapsed = self.immersiveLastPreviewPresentedAt.map { now.timeIntervalSince($0) }
+                        ?? targetDelay
+                    let remainingDelay = max(0, targetDelay - elapsed)
+                    guard remainingDelay > 0 else { break }
 
-                if remainingDelay > 0 {
-                    try? await Task.sleep(nanoseconds: UInt64(remainingDelay * 1_000_000_000))
-                    guard !Task.isCancelled else { break }
+                    let sleepDuration = min(remainingDelay, 1)
+                    try? await Task.sleep(nanoseconds: UInt64(sleepDuration * 1_000_000_000))
+                    guard !Task.isCancelled else {
+                        self.immersivePreviewTask = nil
+                        return
+                    }
                 }
 
                 guard self.isImmersivePreviewPresented else { break }
                 guard let nextPreview = self.queuedImmersivePreviews.popFirst() else { break }
                 self.immersiveDisplayedItemPreview = nextPreview
                 self.immersiveLastPreviewPresentedAt = Date()
+                self.synchronizeRetainedPreviewFiles()
             }
 
             self.immersivePreviewTask = nil
@@ -485,6 +584,33 @@ final class AppViewModel: ObservableObject {
         immersiveDisplayedItemPreview = nil
         queuedImmersivePreviews.removeAll()
         immersiveLastPreviewPresentedAt = nil
+        synchronizeRetainedPreviewFiles()
+    }
+
+    private func synchronizeRetainedPreviewFiles() {
+        let activePreviewFileURLs = Set(currentPreviewFileURLs())
+        let stalePreviewFileURLs = retainedPreviewFileURLs.subtracting(activePreviewFileURLs)
+        stalePreviewFileURLs.forEach(Self.cleanupPreviewFile)
+        retainedPreviewFileURLs = activePreviewFileURLs
+    }
+
+    private func currentPreviewFileURLs() -> [URL] {
+        var urls = Set<URL>()
+        if let fileURL = lastCompletedItemPreview?.previewFileURL {
+            urls.insert(fileURL)
+        }
+        if let fileURL = immersiveDisplayedItemPreview?.previewFileURL {
+            urls.insert(fileURL)
+        }
+        queuedImmersivePreviews.previewFileURLs.forEach { urls.insert($0) }
+        return Array(urls)
+    }
+
+    private static func cleanupPreviewFile(at fileURL: URL) {
+        guard fileURL.deletingLastPathComponent().lastPathComponent == previewDirectoryName else {
+            return
+        }
+        try? FileManager.default.removeItem(at: fileURL)
     }
 
     private func setPreparationStatus(_ message: String?) {
@@ -504,6 +630,7 @@ final class AppViewModel: ObservableObject {
     private func startFastTraversalTotalCountTaskIfNeeded(options: RunOptions) {
         guard options.traversalOrder == .photosOrderFast else { return }
         guard options.optionalCaptureDateRange == nil else { return }
+        guard options.source != .captionWorkflow else { return }
 
         fastTraversalTotalCountTask = Task { [weak self] in
             // Let page-1 processing begin first so count work doesn't delay startup.
@@ -634,6 +761,8 @@ final class AppViewModel: ObservableObject {
                 return nil
             }
             source = .picker(ids: pickerIDs)
+        case .captionWorkflow:
+            source = .captionWorkflow
         }
 
         let dateRange: CaptureDateRange? = useDateFilter
@@ -764,10 +893,11 @@ struct MainView: View {
                     Spacer()
 
                     if viewModel.isRunning {
-                        Button("Cancel Run") {
+                        Button(viewModel.isCancelRequested ? "Canceling" : "Cancel Run") {
                             viewModel.cancelRun()
                         }
                         .buttonStyle(.bordered)
+                        .disabled(viewModel.isCancelRequested)
                     } else {
                         if viewModel.canResumeSavedRun {
                             Button("Resume Previous Run (\(viewModel.resumablePendingCount) pending)") {

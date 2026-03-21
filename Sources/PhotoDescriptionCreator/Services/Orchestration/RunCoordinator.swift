@@ -60,6 +60,28 @@ private enum RunTimingStage: String, CaseIterable, Hashable, Sendable {
     case preview = "preview"
 }
 
+private enum CaptionWorkflowRunError: LocalizedError {
+    case albumListingUnavailable
+    case missingAlbum(String)
+    case duplicateAlbum(String, Int)
+    case noEligibleItems(filtered: Bool)
+
+    var errorDescription: String? {
+        switch self {
+        case .albumListingUnavailable:
+            return "Caption Workflow requires a Photos client that can list user albums."
+        case let .missingAlbum(name):
+            return "Caption Workflow could not find the smart album named \"\(name)\"."
+        case let .duplicateAlbum(name, count):
+            return "Caption Workflow found \(count) albums named \"\(name)\". Rename duplicates so the run can resolve the correct smart album."
+        case let .noEligibleItems(filtered):
+            let scopeText = filtered ? " after the current capture-date filter" : ""
+            let albumNames = CaptionWorkflowAlbumStage.allCases.map(\.rawValue).joined(separator: "\", \"")
+            return "Caption Workflow found no eligible items\(scopeText) in \"\(albumNames)\"."
+        }
+    }
+}
+
 private actor RunTimingRecorder {
     private var totals: [RunTimingStage: UInt64] = [:]
 
@@ -114,7 +136,6 @@ protocol PreviewRendering: Sendable {
 
 actor DefaultPreviewRenderer: PreviewRendering {
     private let videoFrameSampler: VideoFrameSampler
-    private var lastPreviewFileURL: URL?
 
     init(videoFrameSampler: VideoFrameSampler) {
         self.videoFrameSampler = videoFrameSampler
@@ -127,9 +148,6 @@ actor DefaultPreviewRenderer: PreviewRendering {
 
         do {
             try fileManager.createDirectory(at: previewRoot, withIntermediateDirectories: true)
-            if let lastPreviewFileURL {
-                try? fileManager.removeItem(at: lastPreviewFileURL)
-            }
 
             if kind == .video,
                let extractedFrameDestination = await persistVideoPreviewFrame(
@@ -137,7 +155,6 @@ actor DefaultPreviewRenderer: PreviewRendering {
                    previewRoot: previewRoot
                )
             {
-                lastPreviewFileURL = extractedFrameDestination
                 return extractedFrameDestination
             }
 
@@ -150,7 +167,6 @@ actor DefaultPreviewRenderer: PreviewRendering {
             let destination = previewRoot.appendingPathComponent(filename)
 
             try fileManager.copyItem(at: inputURL, to: destination)
-            lastPreviewFileURL = destination
             return destination
         } catch {
             return nil
@@ -258,6 +274,7 @@ public final class RunCoordinator {
 
     private struct PendingWrite: Sendable {
         let asset: MediaAsset
+        let sourceContext: String
         let inputURL: URL
         let generated: GeneratedMetadata
     }
@@ -464,6 +481,8 @@ public final class RunCoordinator {
 
         let targetEngine: EngineTier = .qwen25vl7b
         let lifecycleController = photosWriter as? PhotosLifecycleControlling
+        let albumListingSource = photosWriter as? AlbumListingPhotosSource
+        var cachedAlbumNamesByID: [String: String] = [:]
 
         func currentRunDiagnostics() async -> RunDiagnostics {
             let elapsedNs = DispatchTime.now().uptimeNanoseconds - runStartedNanoseconds
@@ -698,6 +717,38 @@ public final class RunCoordinator {
             }
         }
 
+        func completeRun() async -> RunSummary {
+            await drainCompletedPreviewTasks(forceWaitForAll: true)
+            return await makeSummary()
+        }
+
+        func resolveSourceContext(for source: ScopeSource) async -> String {
+            switch source {
+            case .library:
+                return "Whole Library"
+            case let .picker(ids):
+                return ids.isEmpty ? "Photos Picker" : "Photos Picker"
+            case let .album(id):
+                if let cachedName = cachedAlbumNamesByID[id] {
+                    return cachedName
+                }
+                guard let albumListingSource else {
+                    return "Selected Album"
+                }
+                if let albumName = try? await albumListingSource
+                    .listUserAlbums()
+                    .first(where: { $0.id == id })?
+                    .name
+                {
+                    cachedAlbumNamesByID[id] = albumName
+                    return albumName
+                }
+                return "Selected Album"
+            case .captionWorkflow:
+                return "Caption Workflow"
+            }
+        }
+
         func enqueuePreview(for write: PendingWrite) async {
             await drainCompletedPreviewTasks()
             let priorTask = pendingPreviewTasks.last
@@ -720,6 +771,7 @@ public final class RunCoordinator {
                 callbacks.onItemCompleted(
                     CompletedItemPreview(
                         filename: write.asset.filename,
+                        sourceContext: write.sourceContext,
                         kind: write.asset.kind,
                         previewFileURL: previewFileURL,
                         caption: write.generated.caption,
@@ -868,7 +920,10 @@ public final class RunCoordinator {
             _ = await analysisTask.result
         }
 
-        func processAssets(_ assets: ArraySlice<MediaAsset>) async {
+        func processAssets(
+            _ assets: ArraySlice<MediaAsset>,
+            sourceContext: String
+        ) async {
             guard !assets.isEmpty else { return }
             let assetArray = Array(assets)
             let batchReader = photosWriter as? BatchMetadataPhotosWriter
@@ -979,6 +1034,7 @@ public final class RunCoordinator {
                         pendingWrites.append(
                             PendingWrite(
                                 asset: result.asset,
+                                sourceContext: sourceContext,
                                 inputURL: inputURL,
                                 generated: generated
                             )
@@ -1047,7 +1103,10 @@ public final class RunCoordinator {
             }
         }
 
-        func processAssetsInBatches(_ assets: [MediaAsset]) async {
+        func processAssetsInBatches(
+            _ assets: [MediaAsset],
+            sourceContext: String
+        ) async {
             guard !assets.isEmpty else { return }
 
             var start = assets.startIndex
@@ -1057,7 +1116,10 @@ public final class RunCoordinator {
                     offsetBy: Self.processingBatchSize,
                     limitedBy: assets.endIndex
                 ) ?? assets.endIndex
-                await processAssets(assets[start..<end])
+                await processAssets(
+                    assets[start..<end],
+                    sourceContext: sourceContext
+                )
                 start = end
             }
         }
@@ -1078,6 +1140,136 @@ public final class RunCoordinator {
                 return false
             }
             return await verifyPhotosStillRunning()
+        }
+
+        func resolveCaptionWorkflowAlbum(
+            for stage: CaptionWorkflowAlbumStage,
+            from albums: [AlbumSummary]
+        ) throws -> AlbumSummary {
+            let matches = albums.filter { $0.name == stage.rawValue }
+            guard !matches.isEmpty else {
+                throw CaptionWorkflowRunError.missingAlbum(stage.rawValue)
+            }
+            guard matches.count == 1 else {
+                throw CaptionWorkflowRunError.duplicateAlbum(stage.rawValue, matches.count)
+            }
+            return matches[0]
+        }
+
+        func captionWorkflowSkipStatus(
+            stage: CaptionWorkflowAlbumStage,
+            filtered: Bool
+        ) -> String {
+            let suffix = filtered ? " after the capture-date filter" : ""
+            return "Caption Workflow: \"\(stage.rawValue)\" has no eligible items\(suffix)."
+        }
+
+        func captionWorkflowProcessingStatus(
+            stage: CaptionWorkflowAlbumStage,
+            itemCount: Int,
+            skippedStages: [CaptionWorkflowAlbumStage]
+        ) -> String {
+            let prefix: String
+            if skippedStages.isEmpty {
+                prefix = "Caption Workflow: processing"
+            } else {
+                let skippedNames = skippedStages.map { "\"\($0.rawValue)\"" }.joined(separator: ", ")
+                prefix = "Caption Workflow: \(skippedNames) had no eligible items, now processing"
+            }
+            return "\(prefix) \"\(stage.rawValue)\" (\(itemCount) items)."
+        }
+
+        func runCaptionWorkflow() async -> RunSummary {
+            guard albumListingSource != nil else {
+                errors.append(CaptionWorkflowRunError.albumListingUnavailable.localizedDescription)
+                return await completeRun()
+            }
+
+            let isFastTraversal = options.traversalOrder == .photosOrderFast
+            let filtered = options.optionalCaptureDateRange != nil
+            var skippedStages: [CaptionWorkflowAlbumStage] = []
+            var foundEligibleAssets = false
+
+            for stage in CaptionWorkflowAlbumStage.allCases {
+                guard !isCancelled else {
+                    return await completeRun()
+                }
+
+                callbacks.onStatusChanged("Caption Workflow: refreshing \"\(stage.rawValue)\".")
+
+                let albums: [AlbumSummary]
+                do {
+                    albums = try await albumListingSource!.listUserAlbums()
+                } catch {
+                    errors.append("Caption Workflow failed while refreshing albums: \(error.localizedDescription)")
+                    return await completeRun()
+                }
+
+                let album: AlbumSummary
+                do {
+                    album = try resolveCaptionWorkflowAlbum(for: stage, from: albums)
+                } catch {
+                    errors.append(error.localizedDescription)
+                    return await completeRun()
+                }
+
+                let snapshot: [MediaAsset]
+                do {
+                    snapshot = try await photosWriter.enumerate(
+                        scope: .album(id: album.id),
+                        dateRange: options.optionalCaptureDateRange
+                    )
+                } catch {
+                    errors.append("Caption Workflow failed while loading \"\(stage.rawValue)\": \(error.localizedDescription)")
+                    return await completeRun()
+                }
+
+                let remainingAssets = snapshot.filter { !processedAssetIDs.contains($0.id) }
+                guard !remainingAssets.isEmpty else {
+                    callbacks.onStatusChanged(
+                        captionWorkflowSkipStatus(
+                            stage: stage,
+                            filtered: filtered
+                        )
+                    )
+                    skippedStages.append(stage)
+                    continue
+                }
+
+                foundEligibleAssets = true
+                progress.totalDiscovered += remainingAssets.count
+                callbacks.onProgress(progress)
+
+                if !isFastTraversal,
+                   !(await promptForSlowOrderedRunIfNeeded(totalCount: remainingAssets.count)) {
+                    return await completeRun()
+                }
+
+                callbacks.onStatusChanged(
+                    captionWorkflowProcessingStatus(
+                        stage: stage,
+                        itemCount: remainingAssets.count,
+                        skippedStages: skippedStages
+                    )
+                )
+
+                let orderedAssets = isFastTraversal
+                    ? remainingAssets
+                    : self.orderedAssets(remainingAssets, by: options.traversalOrder)
+                appendPendingAssets(orderedAssets)
+                await processAssetsInBatches(
+                    orderedAssets,
+                    sourceContext: stage.rawValue
+                )
+            }
+
+            if !foundEligibleAssets, !isCancelled {
+                errors.append(
+                    CaptionWorkflowRunError.noEligibleItems(filtered: filtered).localizedDescription
+                )
+            }
+
+            return await completeRun()
         }
 
         func isEnumeratePageTimeout(_ error: Error) -> Bool {
@@ -1123,6 +1315,12 @@ public final class RunCoordinator {
             )
         }
 
+        if options.source == .captionWorkflow {
+            return await runCaptionWorkflow()
+        }
+
+        let defaultSourceContext = await resolveSourceContext(for: options.source)
+
         let isFastTraversal = options.traversalOrder == .photosOrderFast
 
         if options.optionalCaptureDateRange == nil,
@@ -1144,7 +1342,10 @@ public final class RunCoordinator {
                         progress.totalDiscovered += batch.count
                         callbacks.onProgress(progress)
                         appendPendingAssets(batch)
-                        await processAssets(batch[batch.startIndex..<batch.endIndex])
+                        await processAssets(
+                            batch[batch.startIndex..<batch.endIndex],
+                            sourceContext: defaultSourceContext
+                        )
                     }
                 } else {
                     let totalCount = try await incrementalWriter.count(scope: options.source)
@@ -1179,7 +1380,10 @@ public final class RunCoordinator {
                     callbacks.onProgress(progress)
                     let ordered = orderedAssets(allAssets, by: options.traversalOrder)
                     appendPendingAssets(ordered)
-                    await processAssetsInBatches(ordered)
+                    await processAssetsInBatches(
+                        ordered,
+                        sourceContext: defaultSourceContext
+                    )
                 }
             } catch {
                 errors.append("Failed to enumerate assets: \(error.localizedDescription)")
@@ -1209,16 +1413,21 @@ public final class RunCoordinator {
             callbacks.onProgress(progress)
             if isFastTraversal {
                 appendPendingAssets(assets)
-                await processAssetsInBatches(assets)
+                await processAssetsInBatches(
+                    assets,
+                    sourceContext: defaultSourceContext
+                )
             } else {
                 let ordered = orderedAssets(assets, by: options.traversalOrder)
                 appendPendingAssets(ordered)
-                await processAssetsInBatches(ordered)
+                await processAssetsInBatches(
+                    ordered,
+                    sourceContext: defaultSourceContext
+                )
             }
         }
 
-        await drainCompletedPreviewTasks(forceWaitForAll: true)
-        return await makeSummary()
+        return await completeRun()
     }
 
     private func orderedAssets(_ assets: [MediaAsset], by traversalOrder: RunTraversalOrder) -> [MediaAsset] {

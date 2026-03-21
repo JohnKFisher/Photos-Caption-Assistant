@@ -4,6 +4,14 @@ public enum ScopeSource: Sendable, Equatable {
     case library
     case album(id: String)
     case picker(ids: [String])
+    case captionWorkflow
+}
+
+public enum CaptionWorkflowAlbumStage: String, CaseIterable, Sendable {
+    case priorityCaptioning = "0 - Priority Captioning"
+    case noCaptionNewPhotos = "1 - No Caption - New Photos"
+    case noCaptionAll = "2 - No Caption - All"
+    case olderCaptionLogic = "3 - Older Caption Logic"
 }
 
 public struct CaptureDateRange: Sendable, Equatable {
@@ -225,6 +233,7 @@ public struct RunSummary: Sendable, Equatable {
 
 public struct CompletedItemPreview: Sendable, Equatable {
     public let filename: String
+    public let sourceContext: String
     public let kind: MediaKind
     public let previewFileURL: URL?
     public let caption: String
@@ -232,12 +241,14 @@ public struct CompletedItemPreview: Sendable, Equatable {
 
     public init(
         filename: String,
+        sourceContext: String,
         kind: MediaKind,
         previewFileURL: URL?,
         caption: String,
         keywords: [String]
     ) {
         self.filename = filename
+        self.sourceContext = sourceContext
         self.kind = kind
         self.previewFileURL = previewFileURL
         self.caption = caption
@@ -270,6 +281,10 @@ public protocol PhotosWriter: Sendable {
     func writeMetadata(id: String, caption: String, keywords: [String]) async throws
     func exportAssetToTemporaryURL(id: String, kind: MediaKind) async throws -> URL
     func isPhotosAppRunning() async -> Bool
+}
+
+public protocol AlbumListingPhotosSource: Sendable {
+    func listUserAlbums() async throws -> [AlbumSummary]
 }
 
 public protocol PhotosProcessMonitoring: Sendable {

@@ -143,12 +143,16 @@ struct ImmersivePreviewView: View {
                     .foregroundStyle(.white)
                 Text("Start a run and this view will update live as items complete.")
                     .font(.title3)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Color.white.opacity(0.74))
                 if isRunning || progress.processed > 0 {
-                    HStack(spacing: 12) {
-                        pacePill(title: "Rate", value: rateText)
-                        pacePill(title: "Elapsed", value: Self.formatDuration(seconds: performance.elapsedSeconds))
-                        pacePill(title: "ETA", value: etaText)
+                    VStack(alignment: .leading, spacing: 12) {
+                        progressStatsGrid
+
+                        HStack(spacing: 12) {
+                            pacePill(title: "Rate", value: rateText)
+                            pacePill(title: "Elapsed", value: Self.formatDuration(seconds: performance.elapsedSeconds))
+                            pacePill(title: "ETA", value: etaText)
+                        }
                     }
                     .padding(.top, 8)
                 }
@@ -162,15 +166,23 @@ struct ImmersivePreviewView: View {
             VStack(alignment: .leading, spacing: 20) {
                 Text(preview.filename)
                     .font(.title3.weight(.semibold))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(.white)
                     .lineLimit(1)
                     .truncationMode(.middle)
 
+                detailField(title: "Source", value: preview.sourceContext)
+
                 if isRunning || progress.processed > 0 {
                     VStack(alignment: .leading, spacing: 10) {
+                        Text("Run Progress")
+                            .font(.headline.smallCaps())
+                            .foregroundStyle(Color.white.opacity(0.7))
+
+                        progressStatsGrid
+
                         Text("Run Pace")
                             .font(.headline.smallCaps())
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(Color.white.opacity(0.7))
 
                         HStack(spacing: 12) {
                             pacePill(title: "Rate", value: rateText)
@@ -183,7 +195,7 @@ struct ImmersivePreviewView: View {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("Caption")
                         .font(.headline.smallCaps())
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Color.white.opacity(0.7))
                     Text(preview.caption.isEmpty ? "(empty caption)" : preview.caption)
                         .font(.system(size: metrics.captionFontSize, weight: .bold, design: .rounded))
                         .foregroundStyle(.white)
@@ -193,7 +205,7 @@ struct ImmersivePreviewView: View {
                 VStack(alignment: .leading, spacing: 12) {
                     Text("Keywords")
                         .font(.headline.smallCaps())
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Color.white.opacity(0.7))
                     keywordGrid(preview.keywords, textColumnWidth: metrics.textColumnWidth)
                 }
             }
@@ -251,12 +263,52 @@ struct ImmersivePreviewView: View {
         .shadow(color: .black.opacity(0.35), radius: 26, y: 14)
     }
 
+    private func detailField(title: String, value: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.headline.smallCaps())
+                .foregroundStyle(Color.white.opacity(0.7))
+            Text(value.isEmpty ? "(not available)" : value)
+                .font(.body.weight(.medium))
+                .foregroundStyle(.white)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var progressStatsGrid: some View {
+        let columns = [GridItem(.adaptive(minimum: 118), spacing: 10)]
+
+        return LazyVGrid(columns: columns, alignment: .leading, spacing: 10) {
+            progressStat(title: "Discovered", value: progress.totalDiscovered)
+            progressStat(title: "Processed", value: progress.processed)
+            progressStat(title: "Changed", value: progress.changed)
+            progressStat(title: "Skipped", value: progress.skipped)
+            progressStat(title: "Failed", value: progress.failed)
+        }
+    }
+
+    private func progressStat(title: String, value: Int) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.caption)
+                .foregroundStyle(Color.white.opacity(0.68))
+            Text("\(value)")
+                .font(.title3.monospacedDigit().weight(.semibold))
+                .foregroundStyle(.white)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.white.opacity(0.1))
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
     @ViewBuilder
     private func keywordGrid(_ keywords: [String], textColumnWidth: CGFloat) -> some View {
         if keywords.isEmpty {
             Text("(none)")
                 .font(.title2)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Color.white.opacity(0.74))
         } else {
             let minimumChipWidth = max(96, min(150, textColumnWidth * 0.34))
             LazyVGrid(
@@ -267,6 +319,7 @@ struct ImmersivePreviewView: View {
                 ForEach(keywords, id: \.self) { keyword in
                     Text(keyword)
                         .font(.title3.weight(.semibold))
+                        .foregroundStyle(.white)
                         .padding(.horizontal, 14)
                         .padding(.vertical, 9)
                         .background(Color.white.opacity(0.14))
@@ -292,7 +345,7 @@ struct ImmersivePreviewView: View {
         VStack(alignment: .leading, spacing: 3) {
             Text(title)
                 .font(.caption)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Color.white.opacity(0.68))
             Text(value)
                 .font(.subheadline.monospacedDigit().weight(.semibold))
                 .foregroundStyle(.white)

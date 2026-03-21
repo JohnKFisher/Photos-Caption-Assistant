@@ -5,6 +5,7 @@ enum SourceSelection: String, CaseIterable, Identifiable {
     case library
     case album
     case picker
+    case captionWorkflow
 
     var id: String { rawValue }
 
@@ -16,6 +17,8 @@ enum SourceSelection: String, CaseIterable, Identifiable {
             return "Album"
         case .picker:
             return "Photos Picker"
+        case .captionWorkflow:
+            return "Caption Workflow"
         }
     }
 }
@@ -96,6 +99,20 @@ struct RunSetupView: View {
                     } else {
                         Text(pickerUnsupportedReason ?? "Picker mode is unavailable on this setup.")
                             .foregroundStyle(.secondary)
+                    }
+                }
+
+                if sourceSelection == .captionWorkflow {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Processes these smart albums in order and reloads Photos before each stage:")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+
+                        ForEach(CaptionWorkflowAlbumStage.allCases, id: \.rawValue) { stage in
+                            Text(stage.rawValue)
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        }
                     }
                 }
             }

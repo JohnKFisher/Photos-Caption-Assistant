@@ -112,6 +112,15 @@ struct ProcessingProgressView: View {
                                     .font(.subheadline)
                                     .lineLimit(1)
 
+                                if !preview.sourceContext.isEmpty {
+                                    Text("Source")
+                                        .font(.caption.bold())
+                                    Text(preview.sourceContext)
+                                        .font(.footnote)
+                                        .foregroundStyle(.secondary)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+
                                 Text("Caption")
                                     .font(.caption.bold())
                                 Text(preview.caption)

@@ -406,6 +406,145 @@ final class RunCoordinatorTests: XCTestCase {
         XCTAssertEqual(exportRequests, [asset.id])
     }
 
+    func testCompletedPreviewUsesLibrarySourceContext() async {
+        let asset = MediaAsset(id: "asset-library", filename: "IMG_library.jpg", captureDate: Date(), kind: .photo)
+        let metadata = [
+            asset.id: ExistingMetadataState(caption: nil, keywords: [], ownershipTag: nil, isExternal: false)
+        ]
+
+        let writer = MockPhotosWriter(assets: [asset], metadataByID: metadata)
+        let coordinator = RunCoordinator(
+            photosWriter: writer,
+            analyzer: MockAnalyzer(result: GeneratedMetadata(caption: "caption", keywords: ["k1"]))
+        )
+        let previewRecorder = PreviewRecorder()
+
+        _ = await coordinator.run(
+            options: RunOptions(
+                source: .library,
+                optionalCaptureDateRange: nil,
+                overwriteAppOwnedSameOrNewer: false
+            ),
+            capabilities: defaultCapabilities(),
+            callbacks: RunCallbacks(
+                onItemCompleted: { preview in
+                    previewRecorder.record(preview: preview)
+                }
+            )
+        )
+
+        XCTAssertEqual(previewRecorder.firstValue()?.sourceContext, "Whole Library")
+    }
+
+    func testCompletedPreviewUsesAlbumSourceContext() async {
+        let asset = MediaAsset(id: "asset-album", filename: "IMG_album.jpg", captureDate: Date(), kind: .photo)
+        let metadata = [
+            asset.id: ExistingMetadataState(caption: nil, keywords: [], ownershipTag: nil, isExternal: false)
+        ]
+        let album = AlbumSummary(id: "album-1", name: "Family Favorites", itemCount: 1)
+
+        let writer = MockPhotosWriter(
+            assets: [asset],
+            metadataByID: metadata,
+            listedAlbums: [album],
+            albumAssetIDsByID: [album.id: [asset.id]]
+        )
+        let coordinator = RunCoordinator(
+            photosWriter: writer,
+            analyzer: MockAnalyzer(result: GeneratedMetadata(caption: "caption", keywords: ["k1"]))
+        )
+        let previewRecorder = PreviewRecorder()
+
+        _ = await coordinator.run(
+            options: RunOptions(
+                source: .album(id: album.id),
+                optionalCaptureDateRange: nil,
+                overwriteAppOwnedSameOrNewer: false
+            ),
+            capabilities: defaultCapabilities(),
+            callbacks: RunCallbacks(
+                onItemCompleted: { preview in
+                    previewRecorder.record(preview: preview)
+                }
+            )
+        )
+
+        XCTAssertEqual(previewRecorder.firstValue()?.sourceContext, album.name)
+    }
+
+    func testCompletedPreviewUsesPickerSourceContext() async {
+        let asset = MediaAsset(id: "asset-picker", filename: "IMG_picker.jpg", captureDate: Date(), kind: .photo)
+        let metadata = [
+            asset.id: ExistingMetadataState(caption: nil, keywords: [], ownershipTag: nil, isExternal: false)
+        ]
+
+        let writer = MockPhotosWriter(assets: [asset], metadataByID: metadata)
+        let coordinator = RunCoordinator(
+            photosWriter: writer,
+            analyzer: MockAnalyzer(result: GeneratedMetadata(caption: "caption", keywords: ["k1"]))
+        )
+        let previewRecorder = PreviewRecorder()
+
+        _ = await coordinator.run(
+            options: RunOptions(
+                source: .picker(ids: [asset.id]),
+                optionalCaptureDateRange: nil,
+                overwriteAppOwnedSameOrNewer: false
+            ),
+            capabilities: defaultCapabilities(),
+            callbacks: RunCallbacks(
+                onItemCompleted: { preview in
+                    previewRecorder.record(preview: preview)
+                }
+            )
+        )
+
+        XCTAssertEqual(previewRecorder.firstValue()?.sourceContext, "Photos Picker")
+    }
+
+    func testCompletedPreviewUsesCaptionWorkflowStageSourceContext() async {
+        let asset = MediaAsset(id: "asset-workflow", filename: "IMG_workflow.jpg", captureDate: Date(), kind: .photo)
+        let metadata = [
+            asset.id: ExistingMetadataState(caption: nil, keywords: [], ownershipTag: nil, isExternal: false)
+        ]
+
+        let writer = MockPhotosWriter(
+            assets: [asset],
+            metadataByID: metadata,
+            listedAlbums: makeCaptionWorkflowAlbums(),
+            albumAssetIDsByID: [
+                "cw-0": [asset.id],
+                "cw-1": [],
+                "cw-2": [],
+                "cw-3": []
+            ]
+        )
+        let coordinator = RunCoordinator(
+            photosWriter: writer,
+            analyzer: MockAnalyzer(result: GeneratedMetadata(caption: "caption", keywords: ["k1"]))
+        )
+        let previewRecorder = PreviewRecorder()
+
+        _ = await coordinator.run(
+            options: RunOptions(
+                source: .captionWorkflow,
+                optionalCaptureDateRange: nil,
+                overwriteAppOwnedSameOrNewer: false
+            ),
+            capabilities: defaultCapabilities(),
+            callbacks: RunCallbacks(
+                onItemCompleted: { preview in
+                    previewRecorder.record(preview: preview)
+                }
+            )
+        )
+
+        XCTAssertEqual(
+            previewRecorder.firstValue()?.sourceContext,
+            CaptionWorkflowAlbumStage.priorityCaptioning.rawValue
+        )
+    }
+
     func testExternalConflictPromptIsPerPhoto() async {
         let assets = makeAssets(count: 2)
         let metadata = [
@@ -1240,6 +1379,277 @@ final class RunCoordinatorTests: XCTestCase {
         XCTAssertTrue(diagnostics.stageTimings.contains(where: { $0.stage == "write" }))
     }
 
+    func testCaptionWorkflowRefreshesLaterStageAfterEarlierWrites() async {
+        let assets = makeAssets(count: 1)
+        let metadata = Dictionary(uniqueKeysWithValues: assets.map { asset in
+            (asset.id, ExistingMetadataState(caption: nil, keywords: [], ownershipTag: nil, isExternal: false))
+        })
+        let albums = makeCaptionWorkflowAlbums()
+        let statusRecorder = StatusRecorder()
+        let writer = MockPhotosWriter(
+            assets: assets,
+            metadataByID: metadata,
+            listedAlbums: albums,
+            albumAssetIDsByID: [
+                "cw-0": [assets[0].id],
+                "cw-1": [assets[0].id],
+                "cw-2": [],
+                "cw-3": []
+            ],
+            removeWrittenAssetsFromAllAlbums: true
+        )
+        let coordinator = RunCoordinator(
+            photosWriter: writer,
+            analyzer: MockAnalyzer(result: GeneratedMetadata(caption: "caption", keywords: ["k1"]))
+        )
+
+        let summary = await coordinator.run(
+            options: RunOptions(
+                source: .captionWorkflow,
+                optionalCaptureDateRange: nil,
+                overwriteAppOwnedSameOrNewer: false
+            ),
+            capabilities: defaultCapabilities(),
+            callbacks: RunCallbacks(
+                onStatusChanged: { status in
+                    statusRecorder.record(status: status)
+                }
+            )
+        )
+
+        let writeOrder = await writer.writeOrderValue()
+        let listAlbumsCount = await writer.listUserAlbumsCallCountValue()
+        let statuses = statusRecorder.values()
+
+        XCTAssertEqual(summary.progress.changed, 1)
+        XCTAssertEqual(summary.progress.failed, 0)
+        XCTAssertEqual(writeOrder, [assets[0].id])
+        XCTAssertEqual(listAlbumsCount, 4)
+        XCTAssertTrue(statuses.contains(where: { $0.contains("0 - Priority Captioning") }))
+        XCTAssertTrue(statuses.contains(where: { $0.contains("1 - No Caption - New Photos") && $0.contains("no eligible items") }))
+    }
+
+    func testCaptionWorkflowFallsBackToSecondStageWhenFirstIsEmpty() async {
+        let assets = makeAssets(count: 1)
+        let metadata = Dictionary(uniqueKeysWithValues: assets.map { asset in
+            (asset.id, ExistingMetadataState(caption: nil, keywords: [], ownershipTag: nil, isExternal: false))
+        })
+        let writer = MockPhotosWriter(
+            assets: assets,
+            metadataByID: metadata,
+            listedAlbums: makeCaptionWorkflowAlbums(),
+            albumAssetIDsByID: [
+                "cw-0": [],
+                "cw-1": [assets[0].id],
+                "cw-2": [],
+                "cw-3": []
+            ]
+        )
+        let coordinator = RunCoordinator(
+            photosWriter: writer,
+            analyzer: MockAnalyzer(result: GeneratedMetadata(caption: "caption", keywords: ["k1"]))
+        )
+
+        let summary = await coordinator.run(
+            options: RunOptions(
+                source: .captionWorkflow,
+                optionalCaptureDateRange: nil,
+                overwriteAppOwnedSameOrNewer: false
+            ),
+            capabilities: defaultCapabilities(),
+            callbacks: RunCallbacks()
+        )
+
+        let writeOrder = await writer.writeOrderValue()
+        XCTAssertEqual(summary.progress.changed, 1)
+        XCTAssertEqual(summary.progress.failed, 0)
+        XCTAssertEqual(writeOrder, [assets[0].id])
+    }
+
+    func testCaptionWorkflowFallsBackToThirdStageWhenFirstTwoAreEmpty() async {
+        let assets = makeAssets(count: 1)
+        let metadata = Dictionary(uniqueKeysWithValues: assets.map { asset in
+            (asset.id, ExistingMetadataState(caption: nil, keywords: [], ownershipTag: nil, isExternal: false))
+        })
+        let writer = MockPhotosWriter(
+            assets: assets,
+            metadataByID: metadata,
+            listedAlbums: makeCaptionWorkflowAlbums(),
+            albumAssetIDsByID: [
+                "cw-0": [],
+                "cw-1": [],
+                "cw-2": [assets[0].id],
+                "cw-3": []
+            ]
+        )
+        let coordinator = RunCoordinator(
+            photosWriter: writer,
+            analyzer: MockAnalyzer(result: GeneratedMetadata(caption: "caption", keywords: ["k1"]))
+        )
+
+        let summary = await coordinator.run(
+            options: RunOptions(
+                source: .captionWorkflow,
+                optionalCaptureDateRange: nil,
+                overwriteAppOwnedSameOrNewer: false
+            ),
+            capabilities: defaultCapabilities(),
+            callbacks: RunCallbacks()
+        )
+
+        let writeOrder = await writer.writeOrderValue()
+        XCTAssertEqual(summary.progress.changed, 1)
+        XCTAssertEqual(summary.progress.failed, 0)
+        XCTAssertEqual(writeOrder, [assets[0].id])
+    }
+
+    func testCaptionWorkflowStopsWhenAllStagesAreEmpty() async {
+        let writer = MockPhotosWriter(
+            assets: [],
+            metadataByID: [:],
+            listedAlbums: makeCaptionWorkflowAlbums(),
+            albumAssetIDsByID: [
+                "cw-0": [],
+                "cw-1": [],
+                "cw-2": [],
+                "cw-3": []
+            ]
+        )
+        let coordinator = RunCoordinator(
+            photosWriter: writer,
+            analyzer: MockAnalyzer(result: GeneratedMetadata(caption: "caption", keywords: ["k1"]))
+        )
+
+        let summary = await coordinator.run(
+            options: RunOptions(
+                source: .captionWorkflow,
+                optionalCaptureDateRange: nil,
+                overwriteAppOwnedSameOrNewer: false
+            ),
+            capabilities: defaultCapabilities(),
+            callbacks: RunCallbacks()
+        )
+
+        XCTAssertEqual(summary.progress.processed, 0)
+        XCTAssertEqual(summary.progress.changed, 0)
+        XCTAssertTrue(summary.errors.contains(where: { $0.contains("no eligible items") }))
+    }
+
+    func testCaptionWorkflowFailsWhenConfiguredAlbumIsMissing() async {
+        let listedAlbums = [
+            AlbumSummary(id: "cw-1", name: CaptionWorkflowAlbumStage.noCaptionNewPhotos.rawValue, itemCount: 0),
+            AlbumSummary(id: "cw-2", name: CaptionWorkflowAlbumStage.noCaptionAll.rawValue, itemCount: 0),
+            AlbumSummary(id: "cw-3", name: CaptionWorkflowAlbumStage.olderCaptionLogic.rawValue, itemCount: 0)
+        ]
+        let writer = MockPhotosWriter(
+            assets: [],
+            metadataByID: [:],
+            listedAlbums: listedAlbums,
+            albumAssetIDsByID: [
+                "cw-1": [],
+                "cw-2": [],
+                "cw-3": []
+            ]
+        )
+        let coordinator = RunCoordinator(
+            photosWriter: writer,
+            analyzer: MockAnalyzer(result: GeneratedMetadata(caption: "caption", keywords: ["k1"]))
+        )
+
+        let summary = await coordinator.run(
+            options: RunOptions(
+                source: .captionWorkflow,
+                optionalCaptureDateRange: nil,
+                overwriteAppOwnedSameOrNewer: false
+            ),
+            capabilities: defaultCapabilities(),
+            callbacks: RunCallbacks()
+        )
+
+        XCTAssertEqual(summary.progress.changed, 0)
+        XCTAssertTrue(summary.errors.contains(where: { $0.contains(CaptionWorkflowAlbumStage.priorityCaptioning.rawValue) }))
+    }
+
+    func testCaptionWorkflowFailsWhenConfiguredAlbumIsDuplicated() async {
+        let listedAlbums = [
+            AlbumSummary(id: "cw-0a", name: CaptionWorkflowAlbumStage.priorityCaptioning.rawValue, itemCount: 0),
+            AlbumSummary(id: "cw-0b", name: CaptionWorkflowAlbumStage.priorityCaptioning.rawValue, itemCount: 0),
+            AlbumSummary(id: "cw-1", name: CaptionWorkflowAlbumStage.noCaptionNewPhotos.rawValue, itemCount: 0),
+            AlbumSummary(id: "cw-2", name: CaptionWorkflowAlbumStage.noCaptionAll.rawValue, itemCount: 0),
+            AlbumSummary(id: "cw-3", name: CaptionWorkflowAlbumStage.olderCaptionLogic.rawValue, itemCount: 0)
+        ]
+        let writer = MockPhotosWriter(
+            assets: [],
+            metadataByID: [:],
+            listedAlbums: listedAlbums,
+            albumAssetIDsByID: [
+                "cw-0a": [],
+                "cw-0b": [],
+                "cw-1": [],
+                "cw-2": [],
+                "cw-3": []
+            ]
+        )
+        let coordinator = RunCoordinator(
+            photosWriter: writer,
+            analyzer: MockAnalyzer(result: GeneratedMetadata(caption: "caption", keywords: ["k1"]))
+        )
+
+        let summary = await coordinator.run(
+            options: RunOptions(
+                source: .captionWorkflow,
+                optionalCaptureDateRange: nil,
+                overwriteAppOwnedSameOrNewer: false
+            ),
+            capabilities: defaultCapabilities(),
+            callbacks: RunCallbacks()
+        )
+
+        XCTAssertEqual(summary.progress.changed, 0)
+        XCTAssertTrue(summary.errors.contains(where: { $0.contains("Rename duplicates") }))
+    }
+
+    func testCaptionWorkflowFastOrderUsesSnapshotsNotPagedEnumeration() async {
+        let assets = makeAssets(count: 1)
+        let metadata = Dictionary(uniqueKeysWithValues: assets.map { asset in
+            (asset.id, ExistingMetadataState(caption: nil, keywords: [], ownershipTag: nil, isExternal: false))
+        })
+        let writer = MockPhotosWriter(
+            assets: assets,
+            metadataByID: metadata,
+            listedAlbums: makeCaptionWorkflowAlbums(),
+            albumAssetIDsByID: [
+                "cw-0": [assets[0].id],
+                "cw-1": [],
+                "cw-2": [],
+                "cw-3": []
+            ]
+        )
+        let coordinator = RunCoordinator(
+            photosWriter: writer,
+            analyzer: MockAnalyzer(result: GeneratedMetadata(caption: "caption", keywords: ["k1"]))
+        )
+
+        let summary = await coordinator.run(
+            options: RunOptions(
+                source: .captionWorkflow,
+                optionalCaptureDateRange: nil,
+                traversalOrder: .photosOrderFast,
+                overwriteAppOwnedSameOrNewer: false
+            ),
+            capabilities: defaultCapabilities(),
+            callbacks: RunCallbacks()
+        )
+
+        let enumeratePageCount = await writer.enumeratePageCallCountValue()
+        let countCallCount = await writer.countCallCountValue()
+
+        XCTAssertEqual(summary.progress.changed, 1)
+        XCTAssertEqual(summary.progress.failed, 0)
+        XCTAssertEqual(enumeratePageCount, 0)
+        XCTAssertEqual(countCallCount, 0)
+    }
+
     func testSingleAnalysisWithPrepareAheadBeatsDualAnalysisUnderContention() async {
         let dualAnalysis = await runSyntheticContentionScenario(
             analysisConcurrency: 2,
@@ -1336,6 +1746,15 @@ final class RunCoordinatorTests: XCTestCase {
                 kind: .photo
             )
         }
+    }
+
+    private func makeCaptionWorkflowAlbums() -> [AlbumSummary] {
+        [
+            AlbumSummary(id: "cw-0", name: CaptionWorkflowAlbumStage.priorityCaptioning.rawValue, itemCount: 0),
+            AlbumSummary(id: "cw-1", name: CaptionWorkflowAlbumStage.noCaptionNewPhotos.rawValue, itemCount: 0),
+            AlbumSummary(id: "cw-2", name: CaptionWorkflowAlbumStage.noCaptionAll.rawValue, itemCount: 0),
+            AlbumSummary(id: "cw-3", name: CaptionWorkflowAlbumStage.olderCaptionLogic.rawValue, itemCount: 0)
+        ]
     }
 }
 
@@ -1546,7 +1965,7 @@ private actor PromptRecorder {
 
 }
 
-private actor MockPhotosWriter: PhotosWriter, PhotosProcessMonitoring, PhotosLifecycleControlling, PhotoPreviewSource, BatchMetadataPhotosWriter, BatchWritePhotosWriter, IncrementalPhotosWriter {
+private actor MockPhotosWriter: PhotosWriter, PhotosProcessMonitoring, PhotosLifecycleControlling, PhotoPreviewSource, BatchMetadataPhotosWriter, BatchWritePhotosWriter, IncrementalPhotosWriter, AlbumListingPhotosSource {
     private let assets: [MediaAsset]
     private let photosResidentMemoryBytesValue: UInt64?
     private let previewDataByID: [String: Data]
@@ -1556,7 +1975,10 @@ private actor MockPhotosWriter: PhotosWriter, PhotosProcessMonitoring, PhotosLif
     private let timelineRecorder: TimelineRecorder?
     private let quitResults: [Bool]
     private let waitForReadyResults: [Bool]
+    private let listedAlbums: [AlbumSummary]
+    private let removeWrittenAssetsFromAllAlbums: Bool
     private var metadataByID: [String: ExistingMetadataState]
+    private var albumAssetIDsByID: [String: [String]]
     private var isPhotosRunning = true
     private var quitResultIndex = 0
     private var waitForReadyResultIndex = 0
@@ -1573,6 +1995,7 @@ private actor MockPhotosWriter: PhotosWriter, PhotosProcessMonitoring, PhotosLif
     private(set) var quitRequestCount = 0
     private(set) var launchRequestCount = 0
     private(set) var waitForReadyCallCount = 0
+    private(set) var listUserAlbumsCallCount = 0
 
     init(
         assets: [MediaAsset],
@@ -1584,6 +2007,9 @@ private actor MockPhotosWriter: PhotosWriter, PhotosProcessMonitoring, PhotosLif
         exportDelayByID: [String: UInt64] = [:],
         quitResults: [Bool] = [],
         waitForReadyResults: [Bool] = [],
+        listedAlbums: [AlbumSummary] = [],
+        albumAssetIDsByID: [String: [String]] = [:],
+        removeWrittenAssetsFromAllAlbums: Bool = false,
         timelineRecorder: TimelineRecorder? = nil
     ) {
         self.assets = assets
@@ -1595,7 +2021,36 @@ private actor MockPhotosWriter: PhotosWriter, PhotosProcessMonitoring, PhotosLif
         self.exportDelayByID = exportDelayByID
         self.quitResults = quitResults
         self.waitForReadyResults = waitForReadyResults
+        self.listedAlbums = listedAlbums
+        self.albumAssetIDsByID = albumAssetIDsByID
+        self.removeWrittenAssetsFromAllAlbums = removeWrittenAssetsFromAllAlbums
         self.timelineRecorder = timelineRecorder
+    }
+
+    private func captionWorkflowMisuseError() -> NSError {
+        NSError(
+            domain: "MockPhotosWriter",
+            code: 1,
+            userInfo: [NSLocalizedDescriptionKey: "Caption Workflow must be resolved before direct enumeration."]
+        )
+    }
+
+    private func resolvedAssets(forAlbumID albumID: String) -> [MediaAsset] {
+        if let orderedAssetIDs = albumAssetIDsByID[albumID] {
+            let assetsByID = Dictionary(uniqueKeysWithValues: assets.map { ($0.id, $0) })
+            return orderedAssetIDs.compactMap { assetsByID[$0] }
+        }
+        return assets.filter { $0.id.contains(albumID) }
+    }
+
+    func listUserAlbums() async throws -> [AlbumSummary] {
+        listUserAlbumsCallCount += 1
+        guard !listedAlbums.isEmpty else { return [] }
+
+        return listedAlbums.map { album in
+            let itemCount = albumAssetIDsByID[album.id]?.count ?? album.itemCount
+            return AlbumSummary(id: album.id, name: album.name, itemCount: itemCount)
+        }
     }
 
     func enumerate(scope: ScopeSource, dateRange: CaptureDateRange?) async throws -> [MediaAsset] {
@@ -1604,10 +2059,12 @@ private actor MockPhotosWriter: PhotosWriter, PhotosProcessMonitoring, PhotosLif
         case .library:
             selected = assets
         case let .album(id):
-            selected = assets.filter { $0.id.contains(id) }
+            selected = resolvedAssets(forAlbumID: id)
         case let .picker(ids):
             let idSet = Set(ids)
             selected = assets.filter { idSet.contains($0.id) }
+        case .captionWorkflow:
+            throw captionWorkflowMisuseError()
         }
 
         if let dateRange {
@@ -1654,6 +2111,11 @@ private actor MockPhotosWriter: PhotosWriter, PhotosProcessMonitoring, PhotosLif
         }
         writes[id] = (caption: caption, keywords: keywords)
         writeOrder.append(id)
+        if removeWrittenAssetsFromAllAlbums {
+            for albumID in albumAssetIDsByID.keys {
+                albumAssetIDsByID[albumID]?.removeAll { $0 == id }
+            }
+        }
         let tag = OwnershipTagCodec.extract(from: keywords)
         metadataByID[id] = ExistingMetadataState(
             caption: caption,
@@ -1801,6 +2263,10 @@ private actor MockPhotosWriter: PhotosWriter, PhotosProcessMonitoring, PhotosLif
     func waitForReadyCallCountValue() async -> Int {
         waitForReadyCallCount
     }
+
+    func listUserAlbumsCallCountValue() async -> Int {
+        listUserAlbumsCallCount
+    }
 }
 
 private struct MockAnalyzer: Analyzer {
@@ -1844,6 +2310,23 @@ private final class StatusRecorder {
         lock.lock()
         defer { lock.unlock() }
         return messages
+    }
+}
+
+private final class PreviewRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var previews: [CompletedItemPreview] = []
+
+    func record(preview: CompletedItemPreview) {
+        lock.lock()
+        previews.append(preview)
+        lock.unlock()
+    }
+
+    func firstValue() -> CompletedItemPreview? {
+        lock.lock()
+        defer { lock.unlock() }
+        return previews.first
     }
 }
 
