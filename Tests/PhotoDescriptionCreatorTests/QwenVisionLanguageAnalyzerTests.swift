@@ -12,6 +12,8 @@ final class QwenVisionLanguageAnalyzerTests: XCTestCase {
         XCTAssertTrue(prompt.hasPrefix("You are generating Apple Photos metadata for one photo."))
         XCTAssertTrue(prompt.contains("Return exactly one JSON object and nothing else."))
         XCTAssertTrue(prompt.contains("Use exactly these two keys and no others"))
+        XCTAssertTrue(prompt.contains("Write the caption in English only."))
+        XCTAssertTrue(prompt.contains("Write keywords in English only"))
     }
 
     func testVideoPromptMatchesCurrentPromptFile() throws {
@@ -22,6 +24,8 @@ final class QwenVisionLanguageAnalyzerTests: XCTestCase {
         XCTAssertTrue(prompt.hasPrefix("You are generating Apple Photos metadata for one video."))
         XCTAssertTrue(prompt.contains("The provided images are key frames from the same video in chronological order."))
         XCTAssertTrue(prompt.contains("Describe the primary visible action or event across the sequence"))
+        XCTAssertTrue(prompt.contains("Write the caption in English only."))
+        XCTAssertTrue(prompt.contains("Write keywords in English only"))
     }
 
     func testVideoKeyFrameSelectionKeepsChronologicalCoverageAcrossThirds() {

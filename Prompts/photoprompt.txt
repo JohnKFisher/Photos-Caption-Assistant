@@ -10,6 +10,7 @@ Rules:
 
 Caption
 - Caption must be a short factual fragment, 10-20 words, plain language, with no ending punctuation.
+- Write the caption in English only. Use non-English words only when they are part of a clearly visible proper name or official title.
 - Prefer the most specific accurate caption, not the shortest possible caption.
 - Prefer a present participle phrase for visible actions, e.g., "two girls biking in a park". If the scene is static or action is unclear, use a short factual noun phrase instead.
 - Do not use auxiliary verbs such as is, are, or was.
@@ -42,6 +43,7 @@ Caption
 
 Keywords
 - Keywords must contain 6 to 10 unique lowercase search-friendly items
+- Write keywords in English only unless a clearly visible proper name is most useful for search.
 - Each keyword may contain only lowercase letters numbers and spaces. Remove punctuation rather than replacing it with symbols.
 - Do not include numeric counts as keywords (counts belong in the caption).
 - Keywords should usually be 1 to 3 words, but 4 words are allowed for strong searchable names or place phrases.
