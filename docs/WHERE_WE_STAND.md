@@ -1,10 +1,10 @@
 # Photo Description Creator
 
-Current version/build: 2.4 (1)
+Current version/build: 2.4 (2)
 Current description logic version: 3.0.0
 
 Current overall status:
-The current source tree builds as version 2.4 build 1 with description logic 3.0.0. The most recent durable known-good release is version 2.4 build 1 from March 21, 2026.
+The current source tree builds as version 2.4 build 2 with description logic 3.0.0. The most recent durable known-good release is still version 2.4 build 1 from March 21, 2026.
 
 What is working now:
 - Local photo and video analysis through Ollama with the `qwen2.5vl:7b` model.
