@@ -2,6 +2,34 @@ import Foundation
 import XCTest
 @testable import PhotoDescriptionCreator
 
+private enum CaptionWorkflowAlbumStage: String, CaseIterable {
+    case priorityCaptioning = "0 - Priority Captioning"
+    case noCaptionNewPhotos = "1 - No Caption - New Photos"
+    case noCaptionAll = "2 - No Caption - All"
+    case olderCaptionLogic = "3 - Older Caption Logic"
+}
+
+private struct CaptionWorkflowAlbumAssignment {
+    let stage: CaptionWorkflowAlbumStage
+    let albumID: String
+    let albumName: String
+}
+
+private extension CaptionWorkflowConfiguration {
+    init(assignments: [CaptionWorkflowAlbumAssignment]) {
+        let orderedQueue = CaptionWorkflowAlbumStage.allCases.compactMap { stage -> CaptionWorkflowQueueEntry? in
+            guard let assignment = assignments.first(where: { $0.stage == stage }) else {
+                return nil
+            }
+            return CaptionWorkflowQueueEntry(
+                albumID: assignment.albumID,
+                albumName: assignment.albumName
+            )
+        }
+        self.init(queue: orderedQueue)
+    }
+}
+
 @MainActor
 final class RunCoordinatorTests: XCTestCase {
     func testAutomaticPhotosRestartFiresAtConfiguredIntervalWithoutManualPrompts() async {
@@ -537,7 +565,8 @@ final class RunCoordinatorTests: XCTestCase {
             options: RunOptions(
                 source: .captionWorkflow,
                 optionalCaptureDateRange: nil,
-                overwriteAppOwnedSameOrNewer: false
+                overwriteAppOwnedSameOrNewer: false,
+                captionWorkflowConfiguration: makeCaptionWorkflowConfiguration()
             ),
             capabilities: defaultCapabilities(),
             callbacks: RunCallbacks(
@@ -1415,7 +1444,8 @@ final class RunCoordinatorTests: XCTestCase {
             options: RunOptions(
                 source: .captionWorkflow,
                 optionalCaptureDateRange: nil,
-                overwriteAppOwnedSameOrNewer: false
+                overwriteAppOwnedSameOrNewer: false,
+                captionWorkflowConfiguration: makeCaptionWorkflowConfiguration()
             ),
             capabilities: defaultCapabilities(),
             callbacks: RunCallbacks(
@@ -1504,7 +1534,8 @@ final class RunCoordinatorTests: XCTestCase {
             options: RunOptions(
                 source: .captionWorkflow,
                 optionalCaptureDateRange: nil,
-                overwriteAppOwnedSameOrNewer: false
+                overwriteAppOwnedSameOrNewer: false,
+                captionWorkflowConfiguration: makeCaptionWorkflowConfiguration()
             ),
             capabilities: defaultCapabilities(),
             callbacks: RunCallbacks()
@@ -1545,7 +1576,8 @@ final class RunCoordinatorTests: XCTestCase {
             options: RunOptions(
                 source: .captionWorkflow,
                 optionalCaptureDateRange: nil,
-                overwriteAppOwnedSameOrNewer: false
+                overwriteAppOwnedSameOrNewer: false,
+                captionWorkflowConfiguration: makeCaptionWorkflowConfiguration()
             ),
             capabilities: defaultCapabilities(),
             callbacks: RunCallbacks(
@@ -1587,7 +1619,8 @@ final class RunCoordinatorTests: XCTestCase {
             options: RunOptions(
                 source: .captionWorkflow,
                 optionalCaptureDateRange: nil,
-                overwriteAppOwnedSameOrNewer: false
+                overwriteAppOwnedSameOrNewer: false,
+                captionWorkflowConfiguration: makeCaptionWorkflowConfiguration()
             ),
             capabilities: defaultCapabilities(),
             callbacks: RunCallbacks()
@@ -1620,7 +1653,8 @@ final class RunCoordinatorTests: XCTestCase {
             options: RunOptions(
                 source: .captionWorkflow,
                 optionalCaptureDateRange: nil,
-                overwriteAppOwnedSameOrNewer: false
+                overwriteAppOwnedSameOrNewer: false,
+                captionWorkflowConfiguration: makeCaptionWorkflowConfiguration()
             ),
             capabilities: defaultCapabilities(),
             callbacks: RunCallbacks()
@@ -1629,6 +1663,43 @@ final class RunCoordinatorTests: XCTestCase {
         XCTAssertEqual(summary.progress.processed, 0)
         XCTAssertEqual(summary.progress.changed, 0)
         XCTAssertTrue(summary.errors.contains(where: { $0.contains("no eligible items") }))
+    }
+
+    func testCaptionWorkflowFailsWhenQueueHasFewerThanTwoConfiguredAlbums() async {
+        let writer = MockPhotosWriter(
+            assets: [],
+            metadataByID: [:],
+            listedAlbums: makeCaptionWorkflowAlbums(),
+            albumAssetIDsByID: [
+                "cw-0": [],
+                "cw-1": [],
+                "cw-2": [],
+                "cw-3": []
+            ]
+        )
+        let coordinator = RunCoordinator(
+            photosWriter: writer,
+            analyzer: MockAnalyzer(result: GeneratedMetadata(caption: "caption", keywords: ["k1"]))
+        )
+
+        let summary = await coordinator.run(
+            options: RunOptions(
+                source: .captionWorkflow,
+                optionalCaptureDateRange: nil,
+                overwriteAppOwnedSameOrNewer: false,
+                captionWorkflowConfiguration: CaptionWorkflowConfiguration(queue: [
+                    CaptionWorkflowQueueEntry(
+                        albumID: "cw-0",
+                        albumName: CaptionWorkflowAlbumStage.priorityCaptioning.rawValue
+                    )
+                ])
+            ),
+            capabilities: defaultCapabilities(),
+            callbacks: RunCallbacks()
+        )
+
+        XCTAssertEqual(summary.progress.changed, 0)
+        XCTAssertTrue(summary.errors.contains(where: { $0.contains("queue item 2") }))
     }
 
     func testCaptionWorkflowFailsWhenConfiguredAlbumIsMissing() async {
@@ -1656,7 +1727,8 @@ final class RunCoordinatorTests: XCTestCase {
             options: RunOptions(
                 source: .captionWorkflow,
                 optionalCaptureDateRange: nil,
-                overwriteAppOwnedSameOrNewer: false
+                overwriteAppOwnedSameOrNewer: false,
+                captionWorkflowConfiguration: makeCaptionWorkflowConfiguration()
             ),
             capabilities: defaultCapabilities(),
             callbacks: RunCallbacks()
@@ -1718,24 +1790,16 @@ final class RunCoordinatorTests: XCTestCase {
         )
 
         XCTAssertEqual(summary.progress.changed, 0)
-        XCTAssertTrue(summary.errors.contains(where: { $0.contains("Repair the stage mappings") }))
+        XCTAssertTrue(summary.errors.contains(where: { $0.contains("Repair the queue") }))
     }
 
     func testCaptionWorkflowFailsWhenConfiguredAlbumIsDuplicated() async {
-        let listedAlbums = [
-            AlbumSummary(id: "cw-0a", name: CaptionWorkflowAlbumStage.priorityCaptioning.rawValue, itemCount: 0),
-            AlbumSummary(id: "cw-0b", name: CaptionWorkflowAlbumStage.priorityCaptioning.rawValue, itemCount: 0),
-            AlbumSummary(id: "cw-1", name: CaptionWorkflowAlbumStage.noCaptionNewPhotos.rawValue, itemCount: 0),
-            AlbumSummary(id: "cw-2", name: CaptionWorkflowAlbumStage.noCaptionAll.rawValue, itemCount: 0),
-            AlbumSummary(id: "cw-3", name: CaptionWorkflowAlbumStage.olderCaptionLogic.rawValue, itemCount: 0)
-        ]
         let writer = MockPhotosWriter(
             assets: [],
             metadataByID: [:],
-            listedAlbums: listedAlbums,
+            listedAlbums: makeCaptionWorkflowAlbums(),
             albumAssetIDsByID: [
-                "cw-0a": [],
-                "cw-0b": [],
+                "cw-0": [],
                 "cw-1": [],
                 "cw-2": [],
                 "cw-3": []
@@ -1750,14 +1814,32 @@ final class RunCoordinatorTests: XCTestCase {
             options: RunOptions(
                 source: .captionWorkflow,
                 optionalCaptureDateRange: nil,
-                overwriteAppOwnedSameOrNewer: false
+                overwriteAppOwnedSameOrNewer: false,
+                captionWorkflowConfiguration: CaptionWorkflowConfiguration(queue: [
+                    CaptionWorkflowQueueEntry(
+                        albumID: "cw-0",
+                        albumName: CaptionWorkflowAlbumStage.priorityCaptioning.rawValue
+                    ),
+                    CaptionWorkflowQueueEntry(
+                        albumID: "cw-0",
+                        albumName: CaptionWorkflowAlbumStage.priorityCaptioning.rawValue
+                    ),
+                    CaptionWorkflowQueueEntry(
+                        albumID: "cw-2",
+                        albumName: CaptionWorkflowAlbumStage.noCaptionAll.rawValue
+                    ),
+                    CaptionWorkflowQueueEntry(
+                        albumID: "cw-3",
+                        albumName: CaptionWorkflowAlbumStage.olderCaptionLogic.rawValue
+                    )
+                ])
             ),
             capabilities: defaultCapabilities(),
             callbacks: RunCallbacks()
         )
 
         XCTAssertEqual(summary.progress.changed, 0)
-        XCTAssertTrue(summary.errors.contains(where: { $0.contains("Rename duplicates") }))
+        XCTAssertTrue(summary.errors.contains(where: { $0.contains("Duplicate selections") }))
     }
 
     func testCaptionWorkflowFastOrderChunksLargeShrinkingStageWithoutSkippingAssets() async {
@@ -1790,7 +1872,8 @@ final class RunCoordinatorTests: XCTestCase {
                 source: .captionWorkflow,
                 optionalCaptureDateRange: nil,
                 traversalOrder: .photosOrderFast,
-                overwriteAppOwnedSameOrNewer: false
+                overwriteAppOwnedSameOrNewer: false,
+                captionWorkflowConfiguration: makeCaptionWorkflowConfiguration()
             ),
             capabilities: defaultCapabilities(),
             callbacks: RunCallbacks(
@@ -1840,7 +1923,8 @@ final class RunCoordinatorTests: XCTestCase {
                 source: .captionWorkflow,
                 optionalCaptureDateRange: nil,
                 traversalOrder: .oldestToNewest,
-                overwriteAppOwnedSameOrNewer: false
+                overwriteAppOwnedSameOrNewer: false,
+                captionWorkflowConfiguration: makeCaptionWorkflowConfiguration()
             ),
             capabilities: defaultCapabilities(),
             callbacks: RunCallbacks()
@@ -1884,7 +1968,8 @@ final class RunCoordinatorTests: XCTestCase {
                 source: .captionWorkflow,
                 optionalCaptureDateRange: nil,
                 traversalOrder: .oldestToNewest,
-                overwriteAppOwnedSameOrNewer: false
+                overwriteAppOwnedSameOrNewer: false,
+                captionWorkflowConfiguration: makeCaptionWorkflowConfiguration()
             ),
             capabilities: defaultCapabilities(),
             callbacks: RunCallbacks()
@@ -1936,7 +2021,8 @@ final class RunCoordinatorTests: XCTestCase {
                     end: now.addingTimeInterval(86_400)
                 ),
                 traversalOrder: .photosOrderFast,
-                overwriteAppOwnedSameOrNewer: false
+                overwriteAppOwnedSameOrNewer: false,
+                captionWorkflowConfiguration: makeCaptionWorkflowConfiguration()
             ),
             capabilities: defaultCapabilities(),
             callbacks: RunCallbacks()

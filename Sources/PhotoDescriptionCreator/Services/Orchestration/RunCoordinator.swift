@@ -64,29 +64,23 @@ private enum CaptionWorkflowRunError: LocalizedError {
     case albumListingUnavailable
     case incompleteConfiguration([String])
     case duplicateConfiguredAlbums([String])
-    case missingConfiguredAlbum(String, String)
-    case missingAlbum(String)
-    case duplicateAlbum(String, Int)
-    case noEligibleItems(filtered: Bool)
+    case missingConfiguredAlbum(queueItem: Int, savedAlbumName: String)
+    case noEligibleItems(filtered: Bool, albumNames: [String])
 
     var errorDescription: String? {
         switch self {
         case .albumListingUnavailable:
             return "Caption Workflow requires a Photos client that can list user albums."
-        case let .incompleteConfiguration(stages):
-            return "Caption Workflow is missing configured albums for: \(stages.joined(separator: ", ")). Repair the stage mappings before starting the run."
-        case let .duplicateConfiguredAlbums(stages):
-            return "Caption Workflow stages must use different albums. Duplicate selections were found for: \(stages.joined(separator: ", "))."
-        case let .missingConfiguredAlbum(stageName, albumName):
-            return "Caption Workflow could not find the configured album for \"\(stageName)\". Saved selection: \"\(albumName)\". Repair the stage mappings before starting the run."
-        case let .missingAlbum(name):
-            return "Caption Workflow could not find the smart album named \"\(name)\"."
-        case let .duplicateAlbum(name, count):
-            return "Caption Workflow found \(count) albums named \"\(name)\". Rename duplicates so the run can resolve the correct smart album."
-        case let .noEligibleItems(filtered):
+        case let .incompleteConfiguration(queueItems):
+            return "Caption Workflow is missing configured albums for: \(queueItems.joined(separator: ", ")). Repair the queue before starting the run."
+        case let .duplicateConfiguredAlbums(queueItems):
+            return "Caption Workflow queue items must use different albums. Duplicate selections were found for: \(queueItems.joined(separator: ", "))."
+        case let .missingConfiguredAlbum(queueItem, savedAlbumName):
+            return "Caption Workflow could not find the configured album for queue item \(queueItem). Saved selection: \"\(savedAlbumName)\". Repair the queue before starting the run."
+        case let .noEligibleItems(filtered, albumNames):
             let scopeText = filtered ? " after the current capture-date filter" : ""
-            let albumNames = CaptionWorkflowAlbumStage.allCases.map(\.rawValue).joined(separator: "\", \"")
-            return "Caption Workflow found no eligible items\(scopeText) in \"\(albumNames)\"."
+            let albumList = albumNames.joined(separator: "\", \"")
+            return "Caption Workflow found no eligible items\(scopeText) in \"\(albumList)\"."
         }
     }
 }
@@ -266,11 +260,19 @@ actor DefaultPreviewRenderer: PreviewRendering {
 
 @MainActor
 public final class RunCoordinator {
-    private struct ResolvedCaptionWorkflowStage: Sendable {
-        let stage: CaptionWorkflowAlbumStage
+    private struct ResolvedCaptionWorkflowQueueItem: Sendable {
+        let queueIndex: Int
         let albumID: String
         let configuredAlbumName: String
         let currentAlbumName: String
+
+        var queueLabel: String {
+            "queue item \(queueIndex + 1)"
+        }
+
+        var displayName: String {
+            "\"\(currentAlbumName)\" (\(queueLabel))"
+        }
     }
 
     private struct AnalysisJobResult: Sendable {
@@ -1170,79 +1172,61 @@ public final class RunCoordinator {
             return !isCancelled
         }
 
-        func resolveCaptionWorkflowAlbum(
-            for stage: CaptionWorkflowAlbumStage,
+        func resolveCaptionWorkflowQueue(
             from albums: [AlbumSummary]
-        ) throws -> AlbumSummary {
-            let matches = albums.filter { $0.name == stage.rawValue }
-            guard !matches.isEmpty else {
-                throw CaptionWorkflowRunError.missingAlbum(stage.rawValue)
+        ) throws -> [ResolvedCaptionWorkflowQueueItem] {
+            guard let configuration = options.captionWorkflowConfiguration else {
+                let queueItems = (1...CaptionWorkflowConfiguration.minimumQueueLength).map { "queue item \($0)" }
+                throw CaptionWorkflowRunError.incompleteConfiguration(queueItems)
             }
-            guard matches.count == 1 else {
-                throw CaptionWorkflowRunError.duplicateAlbum(stage.rawValue, matches.count)
+
+            guard configuration.queue.count >= CaptionWorkflowConfiguration.minimumQueueLength else {
+                let queueItems = (configuration.queue.count + 1...CaptionWorkflowConfiguration.minimumQueueLength)
+                    .map { "queue item \($0)" }
+                throw CaptionWorkflowRunError.incompleteConfiguration(queueItems)
             }
-            return matches[0]
-        }
 
-        func resolveCaptionWorkflowStages(
-            from albums: [AlbumSummary]
-        ) throws -> [CaptionWorkflowAlbumStage: ResolvedCaptionWorkflowStage] {
-            if let configuration = options.captionWorkflowConfiguration {
-                let missingConfiguredStages = CaptionWorkflowAlbumStage.allCases.filter {
-                    configuration.assignment(for: $0) == nil
-                }
-                if !missingConfiguredStages.isEmpty {
-                    throw CaptionWorkflowRunError.incompleteConfiguration(
-                        missingConfiguredStages.map(\.rawValue)
-                    )
-                }
+            let missingQueueItems = configuration.queue.enumerated().compactMap { index, entry -> String? in
+                entry.isConfigured ? nil : "queue item \(index + 1)"
+            }
+            if !missingQueueItems.isEmpty {
+                throw CaptionWorkflowRunError.incompleteConfiguration(missingQueueItems)
+            }
 
-                var stagesByAlbumID: [String: [CaptionWorkflowAlbumStage]] = [:]
-                var resolved: [CaptionWorkflowAlbumStage: ResolvedCaptionWorkflowStage] = [:]
-                let albumsByID = Dictionary(uniqueKeysWithValues: albums.map { ($0.id, $0) })
-
-                for stage in CaptionWorkflowAlbumStage.allCases {
-                    guard let assignment = configuration.assignment(for: stage) else {
-                        continue
+            let duplicateQueueItems = Dictionary(grouping: configuration.queue.enumerated().compactMap { index, entry in
+                entry.albumID.map { ($0, index) }
+            }, by: { $0.0 })
+                .values
+                .filter { $0.count > 1 }
+                .flatMap { duplicates in
+                    duplicates.map { _, index in
+                        "queue item \(index + 1)"
                     }
-                    stagesByAlbumID[assignment.albumID, default: []].append(stage)
-                    guard let currentAlbum = albumsByID[assignment.albumID] else {
-                        throw CaptionWorkflowRunError.missingConfiguredAlbum(
-                            stage.rawValue,
-                            assignment.albumName
-                        )
-                    }
-                    resolved[stage] = ResolvedCaptionWorkflowStage(
-                        stage: stage,
-                        albumID: currentAlbum.id,
-                        configuredAlbumName: assignment.albumName,
-                        currentAlbumName: currentAlbum.name
-                    )
                 }
-
-                let duplicateStages = stagesByAlbumID.values
-                    .filter { $0.count > 1 }
-                    .flatMap { $0 }
-                if !duplicateStages.isEmpty {
-                    throw CaptionWorkflowRunError.duplicateConfiguredAlbums(
-                        duplicateStages.map(\.rawValue)
-                    )
-                }
-
-                return resolved
+            if !duplicateQueueItems.isEmpty {
+                throw CaptionWorkflowRunError.duplicateConfiguredAlbums(duplicateQueueItems)
             }
 
-            var resolved: [CaptionWorkflowAlbumStage: ResolvedCaptionWorkflowStage] = [:]
-            for stage in CaptionWorkflowAlbumStage.allCases {
-                let album = try resolveCaptionWorkflowAlbum(for: stage, from: albums)
-                resolved[stage] = ResolvedCaptionWorkflowStage(
-                    stage: stage,
-                    albumID: album.id,
-                    configuredAlbumName: album.name,
-                    currentAlbumName: album.name
+            let albumsByID = Dictionary(uniqueKeysWithValues: albums.map { ($0.id, $0) })
+            return try configuration.queue.enumerated().map { index, entry in
+                guard let albumID = entry.albumID,
+                      let configuredAlbumName = entry.albumName
+                else {
+                    throw CaptionWorkflowRunError.incompleteConfiguration(["queue item \(index + 1)"])
+                }
+                guard let currentAlbum = albumsByID[albumID] else {
+                    throw CaptionWorkflowRunError.missingConfiguredAlbum(
+                        queueItem: index + 1,
+                        savedAlbumName: configuredAlbumName
+                    )
+                }
+                return ResolvedCaptionWorkflowQueueItem(
+                    queueIndex: index,
+                    albumID: currentAlbum.id,
+                    configuredAlbumName: configuredAlbumName,
+                    currentAlbumName: currentAlbum.name
                 )
             }
-            return resolved
         }
 
         func enumerateCaptionWorkflowSnapshot(
@@ -1291,17 +1275,27 @@ public final class RunCoordinator {
             return dateRange.contains(asset.captureDate)
         }
 
+        func captionWorkflowQueueItem(
+            at index: Int,
+            from queue: [ResolvedCaptionWorkflowQueueItem]
+        ) -> ResolvedCaptionWorkflowQueueItem? {
+            guard queue.indices.contains(index) else {
+                return nil
+            }
+            return queue[index]
+        }
+
         func captionWorkflowChunkCollectionStatus(
-            stage: CaptionWorkflowAlbumStage,
+            queueItem: ResolvedCaptionWorkflowQueueItem,
             discovered: Int,
             target: Int
         ) -> String {
-            "Caption Workflow: collecting next chunk for \"\(stage.rawValue)\" (\(min(discovered, target))/\(target) discovered)."
+            "Caption Workflow: collecting next chunk for \(queueItem.displayName) (\(min(discovered, target))/\(target) discovered)."
         }
 
         func enumerateCaptionWorkflowChunk(
             albumID: String,
-            stage: CaptionWorkflowAlbumStage,
+            queueItem: ResolvedCaptionWorkflowQueueItem,
             incrementalWriter: IncrementalPhotosWriter,
             targetCount: Int
         ) async throws -> [MediaAsset] {
@@ -1313,7 +1307,7 @@ public final class RunCoordinator {
 
             callbacks.onStatusChanged(
                 captionWorkflowChunkCollectionStatus(
-                    stage: stage,
+                    queueItem: queueItem,
                     discovered: 0,
                     target: targetCount
                 )
@@ -1344,7 +1338,7 @@ public final class RunCoordinator {
 
                 callbacks.onStatusChanged(
                     captionWorkflowChunkCollectionStatus(
-                        stage: stage,
+                        queueItem: queueItem,
                         discovered: assets.count,
                         target: targetCount
                     )
@@ -1358,11 +1352,11 @@ public final class RunCoordinator {
             return assets
         }
 
-        func loadCaptionWorkflowStageSnapshot(
-            stagePlan: ResolvedCaptionWorkflowStage,
-            preflightStages: [CaptionWorkflowAlbumStage: ResolvedCaptionWorkflowStage],
+        func loadCaptionWorkflowQueueSnapshot(
+            queueItemPlan: ResolvedCaptionWorkflowQueueItem,
+            preflightQueue: [ResolvedCaptionWorkflowQueueItem],
             confirmEmptyAfterWrites: Bool
-        ) async throws -> (ResolvedCaptionWorkflowStage, [MediaAsset]) {
+        ) async throws -> (ResolvedCaptionWorkflowQueueItem, [MediaAsset]) {
             let emptyConfirmationLimit = confirmEmptyAfterWrites
                 ? min(Self.captionWorkflowStageLoadMaxAttempts, Self.captionWorkflowEmptyConfirmationAttempts)
                 : 1
@@ -1371,37 +1365,39 @@ public final class RunCoordinator {
             for attempt in 1...Self.captionWorkflowStageLoadMaxAttempts {
                 if attempt > 1 {
                     callbacks.onStatusChanged(
-                        "Caption Workflow: retrying \"\(stagePlan.stage.rawValue)\" (attempt \(attempt) of \(Self.captionWorkflowStageLoadMaxAttempts))."
+                        "Caption Workflow: retrying \(queueItemPlan.displayName) (attempt \(attempt) of \(Self.captionWorkflowStageLoadMaxAttempts))."
                     )
                 }
 
                 do {
                     let albums = try await albumListingSource!.listUserAlbums()
-                    let refreshedStages = try resolveCaptionWorkflowStages(from: albums)
-                    guard let refreshedStage = refreshedStages[stagePlan.stage] ?? preflightStages[stagePlan.stage] else {
+                    let refreshedQueue = try resolveCaptionWorkflowQueue(from: albums)
+                    guard let refreshedQueueItem = captionWorkflowQueueItem(at: queueItemPlan.queueIndex, from: refreshedQueue)
+                        ?? captionWorkflowQueueItem(at: queueItemPlan.queueIndex, from: preflightQueue)
+                    else {
                         throw CaptionWorkflowRunError.missingConfiguredAlbum(
-                            stagePlan.stage.rawValue,
-                            stagePlan.configuredAlbumName
+                            queueItem: queueItemPlan.queueIndex + 1,
+                            savedAlbumName: queueItemPlan.configuredAlbumName
                         )
                     }
-                    let snapshot = try await enumerateCaptionWorkflowSnapshot(albumID: refreshedStage.albumID)
+                    let snapshot = try await enumerateCaptionWorkflowSnapshot(albumID: refreshedQueueItem.albumID)
                     if snapshot.isEmpty, attempt < emptyConfirmationLimit {
                         callbacks.onStatusChanged(
-                            "Caption Workflow: waiting for Photos to refresh \"\(stagePlan.stage.rawValue)\" before deciding it is empty."
+                            "Caption Workflow: waiting for Photos to refresh \(refreshedQueueItem.displayName) before deciding it is empty."
                         )
                         guard await waitForCaptionWorkflowRetryDelay() else {
-                            return (refreshedStage, [])
+                            return (refreshedQueueItem, [])
                         }
                         continue
                     }
-                    return (refreshedStage, snapshot)
+                    return (refreshedQueueItem, snapshot)
                 } catch {
                     lastError = error
                     guard attempt < Self.captionWorkflowStageLoadMaxAttempts else {
                         throw error
                     }
                     callbacks.onStatusChanged(
-                        "Caption Workflow: stage handoff for \"\(stagePlan.stage.rawValue)\" failed (\(error.localizedDescription)). Waiting briefly and retrying."
+                        "Caption Workflow: stage handoff for \(queueItemPlan.displayName) failed (\(error.localizedDescription)). Waiting briefly and retrying."
                     )
                     guard await waitForCaptionWorkflowRetryDelay() else {
                         break
@@ -1410,17 +1406,17 @@ public final class RunCoordinator {
             }
 
             throw lastError ?? PhotosAppleScriptError.scriptFailed(
-                message: "Caption Workflow failed while loading \"\(stagePlan.stage.rawValue)\"."
+                message: "Caption Workflow failed while loading \(queueItemPlan.displayName)."
             )
         }
 
-        func loadCaptionWorkflowStageChunk(
-            stagePlan: ResolvedCaptionWorkflowStage,
-            preflightStages: [CaptionWorkflowAlbumStage: ResolvedCaptionWorkflowStage],
+        func loadCaptionWorkflowQueueChunk(
+            queueItemPlan: ResolvedCaptionWorkflowQueueItem,
+            preflightQueue: [ResolvedCaptionWorkflowQueueItem],
             incrementalWriter: IncrementalPhotosWriter,
             targetCount: Int,
             confirmEmptyAfterWrites: Bool
-        ) async throws -> (ResolvedCaptionWorkflowStage, [MediaAsset]) {
+        ) async throws -> (ResolvedCaptionWorkflowQueueItem, [MediaAsset]) {
             let emptyConfirmationLimit = confirmEmptyAfterWrites
                 ? min(Self.captionWorkflowStageLoadMaxAttempts, Self.captionWorkflowEmptyConfirmationAttempts)
                 : 1
@@ -1429,45 +1425,47 @@ public final class RunCoordinator {
             for attempt in 1...Self.captionWorkflowStageLoadMaxAttempts {
                 if attempt > 1 {
                     callbacks.onStatusChanged(
-                        "Caption Workflow: retrying \"\(stagePlan.stage.rawValue)\" (attempt \(attempt) of \(Self.captionWorkflowStageLoadMaxAttempts))."
+                        "Caption Workflow: retrying \(queueItemPlan.displayName) (attempt \(attempt) of \(Self.captionWorkflowStageLoadMaxAttempts))."
                     )
                 }
 
                 do {
                     let albums = try await albumListingSource!.listUserAlbums()
-                    let refreshedStages = try resolveCaptionWorkflowStages(from: albums)
-                    guard let refreshedStage = refreshedStages[stagePlan.stage] ?? preflightStages[stagePlan.stage] else {
+                    let refreshedQueue = try resolveCaptionWorkflowQueue(from: albums)
+                    guard let refreshedQueueItem = captionWorkflowQueueItem(at: queueItemPlan.queueIndex, from: refreshedQueue)
+                        ?? captionWorkflowQueueItem(at: queueItemPlan.queueIndex, from: preflightQueue)
+                    else {
                         throw CaptionWorkflowRunError.missingConfiguredAlbum(
-                            stagePlan.stage.rawValue,
-                            stagePlan.configuredAlbumName
+                            queueItem: queueItemPlan.queueIndex + 1,
+                            savedAlbumName: queueItemPlan.configuredAlbumName
                         )
                     }
 
                     let chunk = try await enumerateCaptionWorkflowChunk(
-                        albumID: refreshedStage.albumID,
-                        stage: refreshedStage.stage,
+                        albumID: refreshedQueueItem.albumID,
+                        queueItem: refreshedQueueItem,
                         incrementalWriter: incrementalWriter,
                         targetCount: targetCount
                     )
 
                     if chunk.isEmpty, attempt < emptyConfirmationLimit {
                         callbacks.onStatusChanged(
-                            "Caption Workflow: waiting for Photos to refresh \"\(stagePlan.stage.rawValue)\" before deciding it is empty."
+                            "Caption Workflow: waiting for Photos to refresh \(refreshedQueueItem.displayName) before deciding it is empty."
                         )
                         guard await waitForCaptionWorkflowRetryDelay() else {
-                            return (refreshedStage, [])
+                            return (refreshedQueueItem, [])
                         }
                         continue
                     }
 
-                    return (refreshedStage, chunk)
+                    return (refreshedQueueItem, chunk)
                 } catch {
                     lastError = error
                     guard attempt < Self.captionWorkflowStageLoadMaxAttempts else {
                         throw error
                     }
                     callbacks.onStatusChanged(
-                        "Caption Workflow: stage handoff for \"\(stagePlan.stage.rawValue)\" failed (\(error.localizedDescription)). Waiting briefly and retrying."
+                        "Caption Workflow: stage handoff for \(queueItemPlan.displayName) failed (\(error.localizedDescription)). Waiting briefly and retrying."
                     )
                     guard await waitForCaptionWorkflowRetryDelay() else {
                         break
@@ -1476,31 +1474,31 @@ public final class RunCoordinator {
             }
 
             throw lastError ?? PhotosAppleScriptError.scriptFailed(
-                message: "Caption Workflow failed while loading \"\(stagePlan.stage.rawValue)\"."
+                message: "Caption Workflow failed while loading \(queueItemPlan.displayName)."
             )
         }
 
         func captionWorkflowSkipStatus(
-            stage: CaptionWorkflowAlbumStage,
+            queueItem: ResolvedCaptionWorkflowQueueItem,
             filtered: Bool
         ) -> String {
             let suffix = filtered ? " after the capture-date filter" : ""
-            return "Caption Workflow: \"\(stage.rawValue)\" has no eligible items\(suffix)."
+            return "Caption Workflow: \(queueItem.displayName) has no eligible items\(suffix)."
         }
 
         func captionWorkflowProcessingStatus(
-            stage: CaptionWorkflowAlbumStage,
+            queueItem: ResolvedCaptionWorkflowQueueItem,
             itemCount: Int,
-            skippedStages: [CaptionWorkflowAlbumStage]
+            skippedQueueItems: [String]
         ) -> String {
             let prefix: String
-            if skippedStages.isEmpty {
+            if skippedQueueItems.isEmpty {
                 prefix = "Caption Workflow: processing"
             } else {
-                let skippedNames = skippedStages.map { "\"\($0.rawValue)\"" }.joined(separator: ", ")
+                let skippedNames = skippedQueueItems.joined(separator: ", ")
                 prefix = "Caption Workflow: \(skippedNames) had no eligible items, now processing"
             }
-            return "\(prefix) \"\(stage.rawValue)\" (\(itemCount) items)."
+            return "\(prefix) \(queueItem.displayName) (\(itemCount) items)."
         }
 
         func runCaptionWorkflow() async -> RunSummary {
@@ -1517,9 +1515,9 @@ public final class RunCoordinator {
                 return await completeRun()
             }
 
-            let preflightStages: [CaptionWorkflowAlbumStage: ResolvedCaptionWorkflowStage]
+            let preflightQueue: [ResolvedCaptionWorkflowQueueItem]
             do {
-                preflightStages = try resolveCaptionWorkflowStages(from: preflightAlbums)
+                preflightQueue = try resolveCaptionWorkflowQueue(from: preflightAlbums)
             } catch {
                 errors.append(error.localizedDescription)
                 return await completeRun()
@@ -1530,43 +1528,34 @@ public final class RunCoordinator {
                 ? (photosWriter as? IncrementalPhotosWriter)
                 : nil
             let filtered = options.optionalCaptureDateRange != nil
-            var skippedStages: [CaptionWorkflowAlbumStage] = []
+            var skippedQueueItems: [String] = []
             var foundEligibleAssets = false
 
-            for stage in CaptionWorkflowAlbumStage.allCases {
+            for queueItem in preflightQueue {
                 guard !isCancelled else {
                     return await completeRun()
                 }
 
-                callbacks.onStatusChanged("Caption Workflow: refreshing \"\(stage.rawValue)\".")
-
-                let stagePlan: ResolvedCaptionWorkflowStage
-                do {
-                    guard let resolved = preflightStages[stage] else {
-                        throw CaptionWorkflowRunError.missingConfiguredAlbum(stage.rawValue, stage.rawValue)
-                    }
-                    stagePlan = resolved
-                } catch {
-                    errors.append(error.localizedDescription)
-                    return await completeRun()
-                }
+                callbacks.onStatusChanged("Caption Workflow: refreshing \(queueItem.displayName).")
 
                 if let chunkedFastTraversalWriter {
-                    var processedChunkForStage = false
+                    var processedChunkForQueueItem = false
 
                     while !isCancelled {
+                        let refreshedQueueItem: ResolvedCaptionWorkflowQueueItem
                         let chunk: [MediaAsset]
                         do {
-                            let (_, refreshedChunk) = try await loadCaptionWorkflowStageChunk(
-                                stagePlan: stagePlan,
-                                preflightStages: preflightStages,
+                            let loaded = try await loadCaptionWorkflowQueueChunk(
+                                queueItemPlan: queueItem,
+                                preflightQueue: preflightQueue,
                                 incrementalWriter: chunkedFastTraversalWriter,
                                 targetCount: Self.captionWorkflowChunkTarget,
                                 confirmEmptyAfterWrites: progress.changed > 0
                             )
-                            chunk = refreshedChunk
+                            refreshedQueueItem = loaded.0
+                            chunk = loaded.1
                         } catch {
-                            errors.append("Caption Workflow failed while loading \"\(stage.rawValue)\": \(error.localizedDescription)")
+                            errors.append("Caption Workflow failed while loading \(queueItem.displayName): \(error.localizedDescription)")
                             return await completeRun()
                         }
 
@@ -1575,48 +1564,50 @@ public final class RunCoordinator {
                         }
 
                         guard !chunk.isEmpty else {
-                            if !processedChunkForStage {
+                            if !processedChunkForQueueItem {
                                 callbacks.onStatusChanged(
                                     captionWorkflowSkipStatus(
-                                        stage: stage,
+                                        queueItem: refreshedQueueItem,
                                         filtered: filtered
                                     )
                                 )
-                                skippedStages.append(stage)
+                                skippedQueueItems.append(refreshedQueueItem.displayName)
                             }
                             break
                         }
 
-                        processedChunkForStage = true
+                        processedChunkForQueueItem = true
                         foundEligibleAssets = true
                         progress.totalDiscovered += chunk.count
                         callbacks.onProgress(progress)
 
                         callbacks.onStatusChanged(
                             captionWorkflowProcessingStatus(
-                                stage: stage,
+                                queueItem: refreshedQueueItem,
                                 itemCount: chunk.count,
-                                skippedStages: skippedStages
+                                skippedQueueItems: skippedQueueItems
                             )
                         )
 
                         appendPendingAssets(chunk)
                         await processAssetsInBatches(
                             chunk,
-                            sourceContext: stage.rawValue
+                            sourceContext: refreshedQueueItem.currentAlbumName
                         )
                     }
                 } else {
+                    let refreshedQueueItem: ResolvedCaptionWorkflowQueueItem
                     let snapshot: [MediaAsset]
                     do {
-                        let (_, refreshedSnapshot) = try await loadCaptionWorkflowStageSnapshot(
-                            stagePlan: stagePlan,
-                            preflightStages: preflightStages,
+                        let loaded = try await loadCaptionWorkflowQueueSnapshot(
+                            queueItemPlan: queueItem,
+                            preflightQueue: preflightQueue,
                             confirmEmptyAfterWrites: progress.changed > 0
                         )
-                        snapshot = refreshedSnapshot
+                        refreshedQueueItem = loaded.0
+                        snapshot = loaded.1
                     } catch {
-                        errors.append("Caption Workflow failed while loading \"\(stage.rawValue)\": \(error.localizedDescription)")
+                        errors.append("Caption Workflow failed while loading \(queueItem.displayName): \(error.localizedDescription)")
                         return await completeRun()
                     }
 
@@ -1624,11 +1615,11 @@ public final class RunCoordinator {
                     guard !remainingAssets.isEmpty else {
                         callbacks.onStatusChanged(
                             captionWorkflowSkipStatus(
-                                stage: stage,
+                                queueItem: refreshedQueueItem,
                                 filtered: filtered
                             )
                         )
-                        skippedStages.append(stage)
+                        skippedQueueItems.append(refreshedQueueItem.displayName)
                         continue
                     }
 
@@ -1643,9 +1634,9 @@ public final class RunCoordinator {
 
                     callbacks.onStatusChanged(
                         captionWorkflowProcessingStatus(
-                            stage: stage,
+                            queueItem: refreshedQueueItem,
                             itemCount: remainingAssets.count,
-                            skippedStages: skippedStages
+                            skippedQueueItems: skippedQueueItems
                         )
                     )
 
@@ -1653,14 +1644,17 @@ public final class RunCoordinator {
                     appendPendingAssets(orderedRemainingAssets)
                     await processAssetsInBatches(
                         orderedRemainingAssets,
-                        sourceContext: stage.rawValue
+                        sourceContext: refreshedQueueItem.currentAlbumName
                     )
                 }
             }
 
             if !foundEligibleAssets, !isCancelled {
                 errors.append(
-                    CaptionWorkflowRunError.noEligibleItems(filtered: filtered).localizedDescription
+                    CaptionWorkflowRunError.noEligibleItems(
+                        filtered: filtered,
+                        albumNames: preflightQueue.map(\.currentAlbumName)
+                    ).localizedDescription
                 )
             }
 

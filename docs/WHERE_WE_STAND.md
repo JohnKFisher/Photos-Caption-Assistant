@@ -10,11 +10,11 @@ What is working now:
 - Local photo and video analysis through Ollama with the `qwen2.5vl:7b` model.
 - Apple Photos metadata reads and writes, including captions, keywords, and app ownership tags.
 - Library, album, and picker-based runs with overwrite policy checks.
-- A `Caption Workflow` source mode that stores album-ID mappings for these four stages and re-queries them in order: `0 - Priority Captioning`, then `1 - No Caption - New Photos`, then `2 - No Caption - All`, then `3 - Older Caption Logic`.
+- A `Caption Workflow` source mode that stores an ordered user-managed album queue, starts with 2 visible queue rows, lets the user add more rows, and re-queries the selected albums from top to bottom during a run.
 - Incremental processing, pending-item tracking, and per-item completion previews.
 - Batched metadata reads and batched metadata writes in the current source tree.
 - Resilient enumerate-page retry behavior for large fast-order runs.
-- Caption-workflow stage handoffs now preflight the configured albums, tolerate album renames, and use bounded retry/wait behavior before concluding that the next stage is empty or failed.
+- Caption-workflow queue handoffs now preflight the configured albums, tolerate album renames, and use bounded retry/wait behavior before concluding that the next queue item is empty or failed.
 - Caption-workflow fast runs now collect and freeze bounded smart-album chunks before processing, so large shrinking smart albums can start sooner without relying on stale offsets.
 - Automatic Photos restart after every 500 changed items, plus the same restart path as a backup when Photos memory usage crosses the configured threshold.
 - Future builds from this source baseline now embed the current prompt files and use prompt logic 3.0.0.
@@ -39,9 +39,9 @@ What is not implemented yet:
 Known limitations and trust warnings:
 - The app depends on Apple Photos automation and local Ollama availability.
 - Prompt quality and throughput can vary with model readiness and local machine performance.
-- The `Caption Workflow` source now depends on saved stage-to-album mappings; if a mapped album is deleted or recreated under a new ID, the mapping must be repaired in the setup UI before the run can start.
-- The `Caption Workflow` source re-queries each configured stage and may briefly wait/retry when Photos is slow to update the next smart album, so stage handoffs are a little more defensive than the normal fast library/album modes.
-- The `Caption Workflow` fast-start path now trades a little more stage-refresh overhead for earlier visible progress; ordered traversal modes still use the slower full-stage snapshot path.
+- The `Caption Workflow` source now depends on saved queue-item album mappings; if a selected album is deleted or recreated under a new ID, that queue item must be repaired in the setup UI before the run can start.
+- The `Caption Workflow` source re-queries each configured queue item and may briefly wait/retry when Photos is slow to update the next smart album, so queue handoffs are a little more defensive than the normal fast library/album modes.
+- The `Caption Workflow` fast-start path now trades a little more queue-refresh overhead for earlier visible progress; ordered traversal modes still use the slower full-queue snapshot path.
 - If the immersive preview backlog grows past 60 queued items, it samples the queue to stay reasonably current instead of showing every completed image in strict order.
 - Video-analysis throughput may vary modestly with clip format because key-frame selection now evaluates a larger candidate set before sending frames to the model.
 - Metadata writes still happen after each analyzed window, so the pipeline is only partially streamed end to end even though preview generation now overlaps later writes.

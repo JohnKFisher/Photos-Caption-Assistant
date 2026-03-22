@@ -44,9 +44,8 @@ struct RunSetupView: View {
     @Binding var sourceSelection: SourceSelection
     @Binding var selectedAlbumID: String?
     let albums: [AlbumSummary]
-    let captionWorkflowStageAlbumIDs: [CaptionWorkflowAlbumStage: String]
+    let captionWorkflowQueueRows: [CaptionWorkflowQueueRowState]
     let captionWorkflowStatusMessage: String?
-    let captionWorkflowCanAutoFill: Bool
 
     @Binding var useDateFilter: Bool
     @Binding var startDate: Date
@@ -59,8 +58,11 @@ struct RunSetupView: View {
     let pickerSupported: Bool
     let pickerUnsupportedReason: String?
     @Binding var pickerIDs: [String]
-    let onCaptionWorkflowAlbumSelectionChanged: (CaptionWorkflowAlbumStage, String?) -> Void
-    let onAutoFillCaptionWorkflowAlbums: () -> Void
+    let onCaptionWorkflowAlbumSelectionChanged: (Int, String?) -> Void
+    let onAddCaptionWorkflowQueueRow: () -> Void
+    let onRemoveCaptionWorkflowQueueRow: (Int) -> Void
+    let onMoveCaptionWorkflowQueueRowUp: (Int) -> Void
+    let onMoveCaptionWorkflowQueueRowDown: (Int) -> Void
 
     @State private var pickerItems: [PhotosPickerItem] = []
 
@@ -109,22 +111,61 @@ struct RunSetupView: View {
 
                 if sourceSelection == .captionWorkflow {
                     VStack(alignment: .leading, spacing: 6) {
-                        Text("Re-queries these configured albums in order and waits briefly if Photos needs time to update the next stage:")
+                        Text("Runs these selected albums top-to-bottom and waits briefly if Photos needs time to refresh the next queue item:")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
 
-                        ForEach(CaptionWorkflowAlbumStage.allCases, id: \.rawValue) { stage in
-                            Picker(stage.rawValue, selection: Binding(get: {
-                                captionWorkflowStageAlbumIDs[stage] ?? ""
-                            }, set: { value in
-                                onCaptionWorkflowAlbumSelectionChanged(stage, value.isEmpty ? nil : value)
-                            })) {
-                                Text("Choose an album").tag("")
-                                ForEach(albums) { album in
-                                    Text(album.itemCount >= 0 ? "\(album.name) (\(album.itemCount))" : album.name)
-                                        .tag(album.id)
+                        ForEach(Array(captionWorkflowQueueRows.enumerated()), id: \.element.id) { index, row in
+                            HStack(spacing: 8) {
+                                Picker("", selection: Binding(get: {
+                                    row.albumID ?? ""
+                                }, set: { value in
+                                    onCaptionWorkflowAlbumSelectionChanged(index, value.isEmpty ? nil : value)
+                                })) {
+                                    if let albumID = row.albumID,
+                                       !albumID.isEmpty,
+                                       !albums.contains(where: { $0.id == albumID })
+                                    {
+                                        Text("Missing: \(row.savedAlbumName ?? "Unknown Album")")
+                                            .tag(albumID)
+                                    }
+
+                                    Text("Choose an album").tag("")
+                                    ForEach(albums) { album in
+                                        Text(album.itemCount >= 0 ? "\(album.name) (\(album.itemCount))" : album.name)
+                                            .tag(album.id)
+                                    }
                                 }
+                                .labelsHidden()
+
+                                Button {
+                                    onMoveCaptionWorkflowQueueRowUp(index)
+                                } label: {
+                                    Image(systemName: "arrow.up")
+                                }
+                                .buttonStyle(.borderless)
+                                .disabled(index == 0)
+
+                                Button {
+                                    onMoveCaptionWorkflowQueueRowDown(index)
+                                } label: {
+                                    Image(systemName: "arrow.down")
+                                }
+                                .buttonStyle(.borderless)
+                                .disabled(index == captionWorkflowQueueRows.count - 1)
+
+                                Button {
+                                    onRemoveCaptionWorkflowQueueRow(index)
+                                } label: {
+                                    Image(systemName: "minus.circle")
+                                }
+                                .buttonStyle(.borderless)
+                                .disabled(captionWorkflowQueueRows.count <= CaptionWorkflowConfiguration.minimumQueueLength)
                             }
+                        }
+
+                        Button("Add Album To Queue") {
+                            onAddCaptionWorkflowQueueRow()
                         }
 
                         if let captionWorkflowStatusMessage {
@@ -134,11 +175,6 @@ struct RunSetupView: View {
                                     ? .orange
                                     : .secondary)
                         }
-
-                        Button("Auto-Fill By Stage Names") {
-                            onAutoFillCaptionWorkflowAlbums()
-                        }
-                        .disabled(!captionWorkflowCanAutoFill)
                     }
                 }
             }
@@ -167,7 +203,7 @@ struct RunSetupView: View {
             }
         }
         .onChange(of: pickerItems, initial: false) { _, newItems in
-            pickerIDs = newItems.compactMap(\ .itemIdentifier)
+            pickerIDs = newItems.compactMap(\.itemIdentifier)
         }
     }
 }

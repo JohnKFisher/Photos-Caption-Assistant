@@ -7,49 +7,57 @@ public enum ScopeSource: Sendable, Equatable {
     case captionWorkflow
 }
 
-public enum CaptionWorkflowAlbumStage: String, CaseIterable, Sendable, Codable {
-    case priorityCaptioning = "0 - Priority Captioning"
-    case noCaptionNewPhotos = "1 - No Caption - New Photos"
-    case noCaptionAll = "2 - No Caption - All"
-    case olderCaptionLogic = "3 - Older Caption Logic"
-}
+public struct CaptionWorkflowQueueEntry: Sendable, Equatable, Codable {
+    public let albumID: String?
+    public let albumName: String?
 
-public struct CaptionWorkflowAlbumAssignment: Sendable, Equatable, Codable, Identifiable {
-    public let stage: CaptionWorkflowAlbumStage
-    public let albumID: String
-    public let albumName: String
+    public init(albumID: String? = nil, albumName: String? = nil) {
+        self.albumID = CaptionWorkflowQueueEntry.normalized(albumID)
+        self.albumName = CaptionWorkflowQueueEntry.normalized(albumName)
+    }
 
-    public var id: CaptionWorkflowAlbumStage { stage }
+    public var isConfigured: Bool {
+        guard let albumID, let albumName else {
+            return false
+        }
+        return !albumID.isEmpty && !albumName.isEmpty
+    }
 
-    public init(stage: CaptionWorkflowAlbumStage, albumID: String, albumName: String) {
-        self.stage = stage
-        self.albumID = albumID
-        self.albumName = albumName
+    private static func normalized(_ value: String?) -> String? {
+        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmed.isEmpty
+        else {
+            return nil
+        }
+        return trimmed
     }
 }
 
 public struct CaptionWorkflowConfiguration: Sendable, Equatable, Codable {
-    public let assignments: [CaptionWorkflowAlbumAssignment]
+    public static let minimumQueueLength = 2
+    public let queue: [CaptionWorkflowQueueEntry]
 
-    public init(assignments: [CaptionWorkflowAlbumAssignment]) {
-        var uniqueAssignments: [CaptionWorkflowAlbumAssignment] = []
-        var seenStages = Set<CaptionWorkflowAlbumStage>()
-        for stage in CaptionWorkflowAlbumStage.allCases {
-            guard let assignment = assignments.first(where: { $0.stage == stage }) else {
-                continue
-            }
-            guard seenStages.insert(stage).inserted else { continue }
-            uniqueAssignments.append(assignment)
+    public init(queue: [CaptionWorkflowQueueEntry]) {
+        self.queue = queue
+    }
+
+    public var duplicateAlbumIDs: [String] {
+        Dictionary(grouping: queue.compactMap(\.albumID), by: { $0 })
+            .filter { $0.value.count > 1 }
+            .keys
+            .sorted()
+    }
+
+    public var missingQueuePositions: [Int] {
+        queue.enumerated().compactMap { index, entry in
+            entry.isConfigured ? nil : index
         }
-        self.assignments = uniqueAssignments
     }
 
-    public func assignment(for stage: CaptionWorkflowAlbumStage) -> CaptionWorkflowAlbumAssignment? {
-        assignments.first { $0.stage == stage }
-    }
-
-    public var isComplete: Bool {
-        CaptionWorkflowAlbumStage.allCases.allSatisfy { assignment(for: $0) != nil }
+    public var isRunnable: Bool {
+        queue.count >= Self.minimumQueueLength
+            && missingQueuePositions.isEmpty
+            && duplicateAlbumIDs.isEmpty
     }
 }
 

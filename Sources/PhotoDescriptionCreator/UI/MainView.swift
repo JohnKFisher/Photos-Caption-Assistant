@@ -84,6 +84,26 @@ enum ImmersivePreviewPolicy {
     }
 }
 
+struct CaptionWorkflowQueueRowState: Identifiable, Equatable {
+    let id: UUID
+    var albumID: String?
+    var savedAlbumName: String?
+
+    init(id: UUID = UUID(), albumID: String? = nil, savedAlbumName: String? = nil) {
+        self.id = id
+        self.albumID = albumID
+        self.savedAlbumName = savedAlbumName
+    }
+
+    init(entry: CaptionWorkflowQueueEntry) {
+        self.init(albumID: entry.albumID, savedAlbumName: entry.albumName)
+    }
+
+    var persistedEntry: CaptionWorkflowQueueEntry {
+        CaptionWorkflowQueueEntry(albumID: albumID, albumName: savedAlbumName)
+    }
+}
+
 @MainActor
 final class AppViewModel: ObservableObject {
     private struct ImmersivePreviewQueue {
@@ -173,7 +193,9 @@ final class AppViewModel: ObservableObject {
     @Published var selectedAlbumID: String?
     @Published var pickerIDs: [String] = []
     @Published var albums: [AlbumSummary] = []
-    @Published var captionWorkflowStageAlbumIDs: [CaptionWorkflowAlbumStage: String] = [:]
+    @Published var captionWorkflowQueueRows: [CaptionWorkflowQueueRowState] = (0..<CaptionWorkflowConfiguration.minimumQueueLength).map { _ in
+        CaptionWorkflowQueueRowState()
+    }
     @Published var captionWorkflowStatusMessage: String?
 
     @Published var useDateFilter = false
@@ -252,7 +274,7 @@ final class AppViewModel: ObservableObject {
     func refreshAlbums() async {
         do {
             albums = try await photosClient.listUserAlbums()
-            await reconcileCaptionWorkflowSelections(autoFillUnconfiguredStages: true, persistChanges: true)
+            await reconcileCaptionWorkflowSelections(persistChanges: true)
         } catch {
             showMessage(title: "Album Load Failed", message: error.localizedDescription)
         }
@@ -746,68 +768,78 @@ final class AppViewModel: ObservableObject {
         applyCaptionWorkflowConfiguration(configuration)
     }
 
-    func autoFillCaptionWorkflowAlbums() async {
-        await reconcileCaptionWorkflowSelections(autoFillUnconfiguredStages: true, persistChanges: true)
-    }
-
-    func setCaptionWorkflowAlbumSelection(_ albumID: String?, for stage: CaptionWorkflowAlbumStage) async {
-        if let albumID, !albumID.isEmpty {
-            captionWorkflowStageAlbumIDs[stage] = albumID
+    func setCaptionWorkflowAlbumSelection(_ albumID: String?, at index: Int) async {
+        guard captionWorkflowQueueRows.indices.contains(index) else { return }
+        if let albumID,
+           let album = albums.first(where: { $0.id == albumID })
+        {
+            captionWorkflowQueueRows[index].albumID = album.id
+            captionWorkflowQueueRows[index].savedAlbumName = album.name
         } else {
-            captionWorkflowStageAlbumIDs.removeValue(forKey: stage)
+            captionWorkflowQueueRows[index].albumID = nil
+            captionWorkflowQueueRows[index].savedAlbumName = nil
         }
         await persistCaptionWorkflowConfiguration()
         refreshCaptionWorkflowStatus()
     }
 
-    var captionWorkflowCanAutoFill: Bool {
-        CaptionWorkflowAlbumStage.allCases.contains { stage in
-            captionWorkflowStageAlbumIDs[stage] == nil && exactUniqueAlbum(named: stage.rawValue) != nil
-        }
+    func addCaptionWorkflowQueueRow() async {
+        captionWorkflowQueueRows.append(CaptionWorkflowQueueRowState())
+        await persistCaptionWorkflowConfiguration()
+        refreshCaptionWorkflowStatus()
+    }
+
+    func removeCaptionWorkflowQueueRow(at index: Int) async {
+        guard captionWorkflowQueueRows.indices.contains(index) else { return }
+        guard captionWorkflowQueueRows.count > CaptionWorkflowConfiguration.minimumQueueLength else { return }
+        captionWorkflowQueueRows.remove(at: index)
+        captionWorkflowQueueRows = normalizedCaptionWorkflowQueueRows(captionWorkflowQueueRows)
+        await persistCaptionWorkflowConfiguration()
+        refreshCaptionWorkflowStatus()
+    }
+
+    func moveCaptionWorkflowQueueRowUp(from index: Int) async {
+        guard captionWorkflowQueueRows.indices.contains(index), index > 0 else { return }
+        captionWorkflowQueueRows.swapAt(index, index - 1)
+        await persistCaptionWorkflowConfiguration()
+        refreshCaptionWorkflowStatus()
+    }
+
+    func moveCaptionWorkflowQueueRowDown(from index: Int) async {
+        guard captionWorkflowQueueRows.indices.contains(index), index < captionWorkflowQueueRows.count - 1 else { return }
+        captionWorkflowQueueRows.swapAt(index, index + 1)
+        await persistCaptionWorkflowConfiguration()
+        refreshCaptionWorkflowStatus()
     }
 
     private func applyCaptionWorkflowConfiguration(_ configuration: CaptionWorkflowConfiguration?) {
-        captionWorkflowStageAlbumIDs = Dictionary(
-            uniqueKeysWithValues: (configuration?.assignments ?? []).map { ($0.stage, $0.albumID) }
+        captionWorkflowQueueRows = normalizedCaptionWorkflowQueueRows(
+            (configuration?.queue ?? []).map(CaptionWorkflowQueueRowState.init(entry:))
         )
         refreshCaptionWorkflowStatus()
     }
 
-    private func reconcileCaptionWorkflowSelections(
-        autoFillUnconfiguredStages: Bool,
-        persistChanges: Bool
-    ) async {
-        let storedConfiguration = await captionWorkflowConfigurationStore.load()
+    private func reconcileCaptionWorkflowSelections(persistChanges: Bool) async {
         let currentAlbumsByID = Dictionary(uniqueKeysWithValues: albums.map { ($0.id, $0) })
-        var resolvedStageIDs: [CaptionWorkflowAlbumStage: String] = [:]
-        var stagesNeedingExplicitRepair = Set<CaptionWorkflowAlbumStage>()
-
-        for stage in CaptionWorkflowAlbumStage.allCases {
-            if let assignment = storedConfiguration?.assignment(for: stage) {
-                if currentAlbumsByID[assignment.albumID] != nil {
-                    resolvedStageIDs[stage] = assignment.albumID
-                } else {
-                    stagesNeedingExplicitRepair.insert(stage)
+        let priorSelections = captionWorkflowQueueRows
+        captionWorkflowQueueRows = normalizedCaptionWorkflowQueueRows(
+            captionWorkflowQueueRows.map { row in
+                guard let albumID = row.albumID else {
+                    return row
                 }
+                guard let album = currentAlbumsByID[albumID] else {
+                    return row
+                }
+                return CaptionWorkflowQueueRowState(
+                    id: row.id,
+                    albumID: album.id,
+                    savedAlbumName: album.name
+                )
             }
-        }
-
-        if autoFillUnconfiguredStages {
-            for stage in CaptionWorkflowAlbumStage.allCases where resolvedStageIDs[stage] == nil {
-                guard !stagesNeedingExplicitRepair.contains(stage) else {
-                    continue
-                }
-                if let matchingAlbum = exactUniqueAlbum(named: stage.rawValue) {
-                    resolvedStageIDs[stage] = matchingAlbum.id
-                }
-            }
-        }
-
-        let priorSelections = captionWorkflowStageAlbumIDs
-        captionWorkflowStageAlbumIDs = resolvedStageIDs
+        )
         refreshCaptionWorkflowStatus()
 
-        if persistChanges, priorSelections != resolvedStageIDs {
+        if persistChanges, priorSelections != captionWorkflowQueueRows {
             await persistCaptionWorkflowConfiguration()
         }
     }
@@ -822,54 +854,96 @@ final class AppViewModel: ObservableObject {
 
     private func makeCaptionWorkflowConfiguration() -> CaptionWorkflowConfiguration? {
         let currentAlbumsByID = Dictionary(uniqueKeysWithValues: albums.map { ($0.id, $0) })
-        let assignments = CaptionWorkflowAlbumStage.allCases.compactMap { stage -> CaptionWorkflowAlbumAssignment? in
-            guard let albumID = captionWorkflowStageAlbumIDs[stage],
-                  let album = currentAlbumsByID[albumID]
-            else {
-                return nil
+        let queue = normalizedCaptionWorkflowQueueRows(captionWorkflowQueueRows).map { row in
+            if let albumID = row.albumID,
+               let album = currentAlbumsByID[albumID]
+            {
+                return CaptionWorkflowQueueEntry(albumID: album.id, albumName: album.name)
             }
-            return CaptionWorkflowAlbumAssignment(stage: stage, albumID: album.id, albumName: album.name)
+            return row.persistedEntry
         }
-        guard !assignments.isEmpty else {
+        let onlyBlankMinimumRows = queue.count == CaptionWorkflowConfiguration.minimumQueueLength
+            && queue.allSatisfy { $0.albumID == nil && $0.albumName == nil }
+        if onlyBlankMinimumRows {
             return nil
         }
-        return CaptionWorkflowConfiguration(assignments: assignments)
+        return CaptionWorkflowConfiguration(queue: queue)
     }
 
     private func refreshCaptionWorkflowStatus() {
         let currentAlbumsByID = Dictionary(uniqueKeysWithValues: albums.map { ($0.id, $0) })
-        let configuredStages = CaptionWorkflowAlbumStage.allCases.filter { stage in
-            guard let albumID = captionWorkflowStageAlbumIDs[stage] else { return false }
-            return currentAlbumsByID[albumID] != nil
-        }
-        let missingStages = CaptionWorkflowAlbumStage.allCases.filter { !configuredStages.contains($0) }
+        let queueConfiguration = CaptionWorkflowConfiguration(
+            queue: normalizedCaptionWorkflowQueueRows(captionWorkflowQueueRows).map(\.persistedEntry)
+        )
+        let duplicateQueueItems = duplicateCaptionWorkflowQueueItemLabels(configuration: queueConfiguration)
 
-        let duplicateAlbumNames = Dictionary(grouping: configuredStages, by: { stage in
-            captionWorkflowStageAlbumIDs[stage] ?? ""
-        })
-            .values
-            .filter { $0.count > 1 }
-            .flatMap { $0.map(\.rawValue) }
-
-        if !duplicateAlbumNames.isEmpty {
-            captionWorkflowStatusMessage = "Select a different album for each stage. Duplicate stages: \(duplicateAlbumNames.joined(separator: ", "))."
+        if !duplicateQueueItems.isEmpty {
+            captionWorkflowStatusMessage = "Select a different album for each queue item. Duplicate selections: \(duplicateQueueItems.joined(separator: ", "))."
             return
         }
 
-        if !missingStages.isEmpty {
-            captionWorkflowStatusMessage = "Needs repair before run: \(missingStages.map(\.rawValue).joined(separator: ", "))."
+        let repairDescriptions = captionWorkflowRepairDescriptions(
+            configuration: queueConfiguration,
+            currentAlbumsByID: currentAlbumsByID
+        )
+        if !repairDescriptions.isEmpty {
+            captionWorkflowStatusMessage = "Needs repair before run: \(repairDescriptions.joined(separator: "; "))."
             return
         }
 
-        captionWorkflowStatusMessage = "All 4 caption workflow stages are configured."
+        captionWorkflowStatusMessage = "Caption Workflow queue is configured with \(queueConfiguration.queue.count) albums."
     }
 
-    private func exactUniqueAlbum(named name: String) -> AlbumSummary? {
-        let matches = albums.filter { $0.name == name }
-        guard matches.count == 1 else {
+    private func normalizedCaptionWorkflowQueueRows(
+        _ rows: [CaptionWorkflowQueueRowState]
+    ) -> [CaptionWorkflowQueueRowState] {
+        var normalizedRows = rows
+        while normalizedRows.count < CaptionWorkflowConfiguration.minimumQueueLength {
+            normalizedRows.append(CaptionWorkflowQueueRowState())
+        }
+        return normalizedRows
+    }
+
+    private func duplicateCaptionWorkflowQueueItemLabels(
+        configuration: CaptionWorkflowConfiguration
+    ) -> [String] {
+        var indicesByAlbumID: [String: [Int]] = [:]
+        for (index, entry) in configuration.queue.enumerated() {
+            guard let albumID = entry.albumID else {
+                continue
+            }
+            indicesByAlbumID[albumID, default: []].append(index)
+        }
+
+        let duplicateIndices = indicesByAlbumID.values
+            .filter { $0.count > 1 }
+            .flatMap { $0 }
+            .sorted()
+        return duplicateIndices.map(captionWorkflowQueueItemLabel)
+    }
+
+    private func captionWorkflowRepairDescriptions(
+        configuration: CaptionWorkflowConfiguration,
+        currentAlbumsByID: [String: AlbumSummary]
+    ) -> [String] {
+        configuration.queue.enumerated().compactMap { index, entry in
+            let label = captionWorkflowQueueItemLabel(index)
+            guard let albumID = entry.albumID else {
+                return "choose an album for \(label)"
+            }
+            guard let album = currentAlbumsByID[albumID] else {
+                let savedAlbumName = entry.albumName ?? "Unknown Album"
+                return "repair \(label) (saved selection: \"\(savedAlbumName)\")"
+            }
+            guard entry.isConfigured else {
+                return "repair \(label) (saved selection: \"\(album.name)\")"
+            }
             return nil
         }
-        return matches[0]
+    }
+
+    private func captionWorkflowQueueItemLabel(_ index: Int) -> String {
+        "queue item \(index + 1)"
     }
 
     private func makeRunOptions() -> RunOptions? {
@@ -903,29 +977,41 @@ final class AppViewModel: ObservableObject {
             captionWorkflowConfiguration = nil
         case .captionWorkflow:
             let currentAlbumsByID = Dictionary(uniqueKeysWithValues: albums.map { ($0.id, $0) })
-            let missingStages = CaptionWorkflowAlbumStage.allCases.filter { stage in
-                guard let albumID = captionWorkflowStageAlbumIDs[stage] else { return true }
-                return currentAlbumsByID[albumID] == nil
-            }
-            if !missingStages.isEmpty {
+            let queueConfiguration = CaptionWorkflowConfiguration(
+                queue: normalizedCaptionWorkflowQueueRows(captionWorkflowQueueRows).map(\.persistedEntry)
+            )
+
+            guard queueConfiguration.queue.count >= CaptionWorkflowConfiguration.minimumQueueLength else {
                 showMessage(
                     title: "Caption Workflow Needs Repair",
-                    message: "Assign an album for each stage before starting the run. Missing stages: \(missingStages.map(\.rawValue).joined(separator: ", "))."
+                    message: "Caption Workflow needs at least \(CaptionWorkflowConfiguration.minimumQueueLength) queue items."
                 )
                 return nil
             }
 
-            let configuredAlbumIDs = CaptionWorkflowAlbumStage.allCases.compactMap { captionWorkflowStageAlbumIDs[$0] }
-            if Set(configuredAlbumIDs).count != configuredAlbumIDs.count {
+            let repairDescriptions = captionWorkflowRepairDescriptions(
+                configuration: queueConfiguration,
+                currentAlbumsByID: currentAlbumsByID
+            )
+            if !repairDescriptions.isEmpty {
                 showMessage(
                     title: "Caption Workflow Needs Repair",
-                    message: "Each caption workflow stage must point to a different album."
+                    message: "Assign a valid album to each queue item before starting the run: \(repairDescriptions.joined(separator: "; "))."
+                )
+                return nil
+            }
+
+            let duplicateQueueItems = duplicateCaptionWorkflowQueueItemLabels(configuration: queueConfiguration)
+            if !duplicateQueueItems.isEmpty {
+                showMessage(
+                    title: "Caption Workflow Needs Repair",
+                    message: "Each caption workflow queue item must point to a different album. Duplicate selections: \(duplicateQueueItems.joined(separator: ", "))."
                 )
                 return nil
             }
 
             source = .captionWorkflow
-            captionWorkflowConfiguration = makeCaptionWorkflowConfiguration()
+            captionWorkflowConfiguration = queueConfiguration
         }
 
         let dateRange: CaptureDateRange? = useDateFilter
@@ -1022,9 +1108,8 @@ struct MainView: View {
                     sourceSelection: $viewModel.sourceSelection,
                     selectedAlbumID: $viewModel.selectedAlbumID,
                     albums: viewModel.albums,
-                    captionWorkflowStageAlbumIDs: viewModel.captionWorkflowStageAlbumIDs,
+                    captionWorkflowQueueRows: viewModel.captionWorkflowQueueRows,
                     captionWorkflowStatusMessage: viewModel.captionWorkflowStatusMessage,
-                    captionWorkflowCanAutoFill: viewModel.captionWorkflowCanAutoFill,
                     useDateFilter: $viewModel.useDateFilter,
                     startDate: $viewModel.startDate,
                     endDate: $viewModel.endDate,
@@ -1034,14 +1119,29 @@ struct MainView: View {
                     pickerSupported: viewModel.pickerSupported,
                     pickerUnsupportedReason: viewModel.pickerUnavailableReason,
                     pickerIDs: $viewModel.pickerIDs,
-                    onCaptionWorkflowAlbumSelectionChanged: { stage, albumID in
+                    onCaptionWorkflowAlbumSelectionChanged: { index, albumID in
                         Task {
-                            await viewModel.setCaptionWorkflowAlbumSelection(albumID, for: stage)
+                            await viewModel.setCaptionWorkflowAlbumSelection(albumID, at: index)
                         }
                     },
-                    onAutoFillCaptionWorkflowAlbums: {
+                    onAddCaptionWorkflowQueueRow: {
                         Task {
-                            await viewModel.autoFillCaptionWorkflowAlbums()
+                            await viewModel.addCaptionWorkflowQueueRow()
+                        }
+                    },
+                    onRemoveCaptionWorkflowQueueRow: { index in
+                        Task {
+                            await viewModel.removeCaptionWorkflowQueueRow(at: index)
+                        }
+                    },
+                    onMoveCaptionWorkflowQueueRowUp: { index in
+                        Task {
+                            await viewModel.moveCaptionWorkflowQueueRowUp(from: index)
+                        }
+                    },
+                    onMoveCaptionWorkflowQueueRowDown: { index in
+                        Task {
+                            await viewModel.moveCaptionWorkflowQueueRowDown(from: index)
                         }
                     }
                 )

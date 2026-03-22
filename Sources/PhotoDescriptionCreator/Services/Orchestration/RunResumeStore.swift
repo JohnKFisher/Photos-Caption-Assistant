@@ -24,6 +24,18 @@ struct PersistedRunOptions: Codable, Equatable {
     let alwaysOverwriteExternalMetadata: Bool
     let captionWorkflowConfiguration: CaptionWorkflowConfiguration?
 
+    private enum CodingKeys: String, CodingKey {
+        case sourceKind
+        case sourceAlbumID
+        case sourcePickerIDs
+        case dateRangeStart
+        case dateRangeEnd
+        case traversalOrder
+        case overwriteAppOwnedSameOrNewer
+        case alwaysOverwriteExternalMetadata
+        case captionWorkflowConfiguration
+    }
+
     init(runOptions: RunOptions) {
         switch runOptions.source {
         case .library:
@@ -50,6 +62,22 @@ struct PersistedRunOptions: Codable, Equatable {
         self.overwriteAppOwnedSameOrNewer = runOptions.overwriteAppOwnedSameOrNewer
         self.alwaysOverwriteExternalMetadata = runOptions.alwaysOverwriteExternalMetadata
         self.captionWorkflowConfiguration = runOptions.captionWorkflowConfiguration
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.sourceKind = try container.decode(SourceKind.self, forKey: .sourceKind)
+        self.sourceAlbumID = try container.decodeIfPresent(String.self, forKey: .sourceAlbumID)
+        self.sourcePickerIDs = try container.decodeIfPresent([String].self, forKey: .sourcePickerIDs)
+        self.dateRangeStart = try container.decodeIfPresent(Date.self, forKey: .dateRangeStart)
+        self.dateRangeEnd = try container.decodeIfPresent(Date.self, forKey: .dateRangeEnd)
+        self.traversalOrder = try container.decode(RunTraversalOrder.self, forKey: .traversalOrder)
+        self.overwriteAppOwnedSameOrNewer = try container.decode(Bool.self, forKey: .overwriteAppOwnedSameOrNewer)
+        self.alwaysOverwriteExternalMetadata = try container.decode(Bool.self, forKey: .alwaysOverwriteExternalMetadata)
+        self.captionWorkflowConfiguration = try? container.decode(
+            CaptionWorkflowConfiguration.self,
+            forKey: .captionWorkflowConfiguration
+        )
     }
 
     func toRunOptions(sourceOverride: ScopeSource? = nil, dateRangeOverride: CaptureDateRange? = nil) -> RunOptions {
