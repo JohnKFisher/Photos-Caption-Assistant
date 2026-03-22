@@ -22,6 +22,7 @@ struct PersistedRunOptions: Codable, Equatable {
     let traversalOrder: RunTraversalOrder
     let overwriteAppOwnedSameOrNewer: Bool
     let alwaysOverwriteExternalMetadata: Bool
+    let captionWorkflowConfiguration: CaptionWorkflowConfiguration?
 
     init(runOptions: RunOptions) {
         switch runOptions.source {
@@ -48,6 +49,7 @@ struct PersistedRunOptions: Codable, Equatable {
         self.traversalOrder = runOptions.traversalOrder
         self.overwriteAppOwnedSameOrNewer = runOptions.overwriteAppOwnedSameOrNewer
         self.alwaysOverwriteExternalMetadata = runOptions.alwaysOverwriteExternalMetadata
+        self.captionWorkflowConfiguration = runOptions.captionWorkflowConfiguration
     }
 
     func toRunOptions(sourceOverride: ScopeSource? = nil, dateRangeOverride: CaptureDateRange? = nil) -> RunOptions {
@@ -58,7 +60,8 @@ struct PersistedRunOptions: Codable, Equatable {
             optionalCaptureDateRange: dateRange,
             traversalOrder: traversalOrder,
             overwriteAppOwnedSameOrNewer: overwriteAppOwnedSameOrNewer,
-            alwaysOverwriteExternalMetadata: alwaysOverwriteExternalMetadata
+            alwaysOverwriteExternalMetadata: alwaysOverwriteExternalMetadata,
+            captionWorkflowConfiguration: captionWorkflowConfiguration
         )
     }
 

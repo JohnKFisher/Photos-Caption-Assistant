@@ -173,6 +173,8 @@ final class AppViewModel: ObservableObject {
     @Published var selectedAlbumID: String?
     @Published var pickerIDs: [String] = []
     @Published var albums: [AlbumSummary] = []
+    @Published var captionWorkflowStageAlbumIDs: [CaptionWorkflowAlbumStage: String] = [:]
+    @Published var captionWorkflowStatusMessage: String?
 
     @Published var useDateFilter = false
     @Published var startDate = Calendar.current.date(byAdding: .month, value: -1, to: Date()) ?? Date()
@@ -221,6 +223,7 @@ final class AppViewModel: ObservableObject {
     private let photosClient = PhotosAppleScriptClient()
     private let ollamaManager = OllamaManager()
     private let runResumeStore = RunResumeStore()
+    private let captionWorkflowConfigurationStore = CaptionWorkflowConfigurationStore()
     private lazy var capabilityProbe = CapabilityProbe(photosClient: photosClient, ollamaManager: ollamaManager)
     private lazy var coordinator = RunCoordinator(
         photosWriter: photosClient,
@@ -241,6 +244,7 @@ final class AppViewModel: ObservableObject {
         ollamaStatusMessage = capabilities.qwenModelAvailable
             ? "Qwen 2.5VL 7B is ready."
             : "Qwen 2.5VL 7B not ready. The app will start/install it when you run."
+        await loadCaptionWorkflowConfiguration()
         await refreshAlbums()
         await loadPersistedRunState()
     }
@@ -248,6 +252,7 @@ final class AppViewModel: ObservableObject {
     func refreshAlbums() async {
         do {
             albums = try await photosClient.listUserAlbums()
+            await reconcileCaptionWorkflowSelections(autoFillUnconfiguredStages: true, persistChanges: true)
         } catch {
             showMessage(title: "Album Load Failed", message: error.localizedDescription)
         }
@@ -736,18 +741,152 @@ final class AppViewModel: ObservableObject {
         await persistRunStateIfNeeded(pendingIDs: latestPendingIDs, force: true)
     }
 
+    private func loadCaptionWorkflowConfiguration() async {
+        let configuration = await captionWorkflowConfigurationStore.load()
+        applyCaptionWorkflowConfiguration(configuration)
+    }
+
+    func autoFillCaptionWorkflowAlbums() async {
+        await reconcileCaptionWorkflowSelections(autoFillUnconfiguredStages: true, persistChanges: true)
+    }
+
+    func setCaptionWorkflowAlbumSelection(_ albumID: String?, for stage: CaptionWorkflowAlbumStage) async {
+        if let albumID, !albumID.isEmpty {
+            captionWorkflowStageAlbumIDs[stage] = albumID
+        } else {
+            captionWorkflowStageAlbumIDs.removeValue(forKey: stage)
+        }
+        await persistCaptionWorkflowConfiguration()
+        refreshCaptionWorkflowStatus()
+    }
+
+    var captionWorkflowCanAutoFill: Bool {
+        CaptionWorkflowAlbumStage.allCases.contains { stage in
+            captionWorkflowStageAlbumIDs[stage] == nil && exactUniqueAlbum(named: stage.rawValue) != nil
+        }
+    }
+
+    private func applyCaptionWorkflowConfiguration(_ configuration: CaptionWorkflowConfiguration?) {
+        captionWorkflowStageAlbumIDs = Dictionary(
+            uniqueKeysWithValues: (configuration?.assignments ?? []).map { ($0.stage, $0.albumID) }
+        )
+        refreshCaptionWorkflowStatus()
+    }
+
+    private func reconcileCaptionWorkflowSelections(
+        autoFillUnconfiguredStages: Bool,
+        persistChanges: Bool
+    ) async {
+        let storedConfiguration = await captionWorkflowConfigurationStore.load()
+        let currentAlbumsByID = Dictionary(uniqueKeysWithValues: albums.map { ($0.id, $0) })
+        var resolvedStageIDs: [CaptionWorkflowAlbumStage: String] = [:]
+        var stagesNeedingExplicitRepair = Set<CaptionWorkflowAlbumStage>()
+
+        for stage in CaptionWorkflowAlbumStage.allCases {
+            if let assignment = storedConfiguration?.assignment(for: stage) {
+                if currentAlbumsByID[assignment.albumID] != nil {
+                    resolvedStageIDs[stage] = assignment.albumID
+                } else {
+                    stagesNeedingExplicitRepair.insert(stage)
+                }
+            }
+        }
+
+        if autoFillUnconfiguredStages {
+            for stage in CaptionWorkflowAlbumStage.allCases where resolvedStageIDs[stage] == nil {
+                guard !stagesNeedingExplicitRepair.contains(stage) else {
+                    continue
+                }
+                if let matchingAlbum = exactUniqueAlbum(named: stage.rawValue) {
+                    resolvedStageIDs[stage] = matchingAlbum.id
+                }
+            }
+        }
+
+        let priorSelections = captionWorkflowStageAlbumIDs
+        captionWorkflowStageAlbumIDs = resolvedStageIDs
+        refreshCaptionWorkflowStatus()
+
+        if persistChanges, priorSelections != resolvedStageIDs {
+            await persistCaptionWorkflowConfiguration()
+        }
+    }
+
+    private func persistCaptionWorkflowConfiguration() async {
+        guard let configuration = makeCaptionWorkflowConfiguration() else {
+            await captionWorkflowConfigurationStore.clear()
+            return
+        }
+        await captionWorkflowConfigurationStore.save(configuration)
+    }
+
+    private func makeCaptionWorkflowConfiguration() -> CaptionWorkflowConfiguration? {
+        let currentAlbumsByID = Dictionary(uniqueKeysWithValues: albums.map { ($0.id, $0) })
+        let assignments = CaptionWorkflowAlbumStage.allCases.compactMap { stage -> CaptionWorkflowAlbumAssignment? in
+            guard let albumID = captionWorkflowStageAlbumIDs[stage],
+                  let album = currentAlbumsByID[albumID]
+            else {
+                return nil
+            }
+            return CaptionWorkflowAlbumAssignment(stage: stage, albumID: album.id, albumName: album.name)
+        }
+        guard !assignments.isEmpty else {
+            return nil
+        }
+        return CaptionWorkflowConfiguration(assignments: assignments)
+    }
+
+    private func refreshCaptionWorkflowStatus() {
+        let currentAlbumsByID = Dictionary(uniqueKeysWithValues: albums.map { ($0.id, $0) })
+        let configuredStages = CaptionWorkflowAlbumStage.allCases.filter { stage in
+            guard let albumID = captionWorkflowStageAlbumIDs[stage] else { return false }
+            return currentAlbumsByID[albumID] != nil
+        }
+        let missingStages = CaptionWorkflowAlbumStage.allCases.filter { !configuredStages.contains($0) }
+
+        let duplicateAlbumNames = Dictionary(grouping: configuredStages, by: { stage in
+            captionWorkflowStageAlbumIDs[stage] ?? ""
+        })
+            .values
+            .filter { $0.count > 1 }
+            .flatMap { $0.map(\.rawValue) }
+
+        if !duplicateAlbumNames.isEmpty {
+            captionWorkflowStatusMessage = "Select a different album for each stage. Duplicate stages: \(duplicateAlbumNames.joined(separator: ", "))."
+            return
+        }
+
+        if !missingStages.isEmpty {
+            captionWorkflowStatusMessage = "Needs repair before run: \(missingStages.map(\.rawValue).joined(separator: ", "))."
+            return
+        }
+
+        captionWorkflowStatusMessage = "All 4 caption workflow stages are configured."
+    }
+
+    private func exactUniqueAlbum(named name: String) -> AlbumSummary? {
+        let matches = albums.filter { $0.name == name }
+        guard matches.count == 1 else {
+            return nil
+        }
+        return matches[0]
+    }
+
     private func makeRunOptions() -> RunOptions? {
         let source: ScopeSource
+        let captionWorkflowConfiguration: CaptionWorkflowConfiguration?
 
         switch sourceSelection {
         case .library:
             source = .library
+            captionWorkflowConfiguration = nil
         case .album:
             guard let selectedAlbumID, !selectedAlbumID.isEmpty else {
                 showMessage(title: "Album Required", message: "Select an album before starting the run.")
                 return nil
             }
             source = .album(id: selectedAlbumID)
+            captionWorkflowConfiguration = nil
         case .picker:
             guard case .supported = capabilities.pickerCapability else {
                 showMessage(title: "Picker Unavailable", message: pickerUnavailableReason)
@@ -761,8 +900,32 @@ final class AppViewModel: ObservableObject {
                 return nil
             }
             source = .picker(ids: pickerIDs)
+            captionWorkflowConfiguration = nil
         case .captionWorkflow:
+            let currentAlbumsByID = Dictionary(uniqueKeysWithValues: albums.map { ($0.id, $0) })
+            let missingStages = CaptionWorkflowAlbumStage.allCases.filter { stage in
+                guard let albumID = captionWorkflowStageAlbumIDs[stage] else { return true }
+                return currentAlbumsByID[albumID] == nil
+            }
+            if !missingStages.isEmpty {
+                showMessage(
+                    title: "Caption Workflow Needs Repair",
+                    message: "Assign an album for each stage before starting the run. Missing stages: \(missingStages.map(\.rawValue).joined(separator: ", "))."
+                )
+                return nil
+            }
+
+            let configuredAlbumIDs = CaptionWorkflowAlbumStage.allCases.compactMap { captionWorkflowStageAlbumIDs[$0] }
+            if Set(configuredAlbumIDs).count != configuredAlbumIDs.count {
+                showMessage(
+                    title: "Caption Workflow Needs Repair",
+                    message: "Each caption workflow stage must point to a different album."
+                )
+                return nil
+            }
+
             source = .captionWorkflow
+            captionWorkflowConfiguration = makeCaptionWorkflowConfiguration()
         }
 
         let dateRange: CaptureDateRange? = useDateFilter
@@ -774,7 +937,8 @@ final class AppViewModel: ObservableObject {
             optionalCaptureDateRange: dateRange,
             traversalOrder: traversalOrder,
             overwriteAppOwnedSameOrNewer: overwriteAppOwnedSameOrNewer,
-            alwaysOverwriteExternalMetadata: alwaysOverwriteExternalMetadata
+            alwaysOverwriteExternalMetadata: alwaysOverwriteExternalMetadata,
+            captionWorkflowConfiguration: captionWorkflowConfiguration
         )
     }
 
@@ -858,6 +1022,9 @@ struct MainView: View {
                     sourceSelection: $viewModel.sourceSelection,
                     selectedAlbumID: $viewModel.selectedAlbumID,
                     albums: viewModel.albums,
+                    captionWorkflowStageAlbumIDs: viewModel.captionWorkflowStageAlbumIDs,
+                    captionWorkflowStatusMessage: viewModel.captionWorkflowStatusMessage,
+                    captionWorkflowCanAutoFill: viewModel.captionWorkflowCanAutoFill,
                     useDateFilter: $viewModel.useDateFilter,
                     startDate: $viewModel.startDate,
                     endDate: $viewModel.endDate,
@@ -866,7 +1033,17 @@ struct MainView: View {
                     alwaysOverwriteExternalMetadata: $viewModel.alwaysOverwriteExternalMetadata,
                     pickerSupported: viewModel.pickerSupported,
                     pickerUnsupportedReason: viewModel.pickerUnavailableReason,
-                    pickerIDs: $viewModel.pickerIDs
+                    pickerIDs: $viewModel.pickerIDs,
+                    onCaptionWorkflowAlbumSelectionChanged: { stage, albumID in
+                        Task {
+                            await viewModel.setCaptionWorkflowAlbumSelection(albumID, for: stage)
+                        }
+                    },
+                    onAutoFillCaptionWorkflowAlbums: {
+                        Task {
+                            await viewModel.autoFillCaptionWorkflowAlbums()
+                        }
+                    }
                 )
                 .frame(maxHeight: 330)
 

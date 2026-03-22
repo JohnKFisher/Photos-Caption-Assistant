@@ -44,6 +44,9 @@ struct RunSetupView: View {
     @Binding var sourceSelection: SourceSelection
     @Binding var selectedAlbumID: String?
     let albums: [AlbumSummary]
+    let captionWorkflowStageAlbumIDs: [CaptionWorkflowAlbumStage: String]
+    let captionWorkflowStatusMessage: String?
+    let captionWorkflowCanAutoFill: Bool
 
     @Binding var useDateFilter: Bool
     @Binding var startDate: Date
@@ -56,6 +59,8 @@ struct RunSetupView: View {
     let pickerSupported: Bool
     let pickerUnsupportedReason: String?
     @Binding var pickerIDs: [String]
+    let onCaptionWorkflowAlbumSelectionChanged: (CaptionWorkflowAlbumStage, String?) -> Void
+    let onAutoFillCaptionWorkflowAlbums: () -> Void
 
     @State private var pickerItems: [PhotosPickerItem] = []
 
@@ -104,15 +109,36 @@ struct RunSetupView: View {
 
                 if sourceSelection == .captionWorkflow {
                     VStack(alignment: .leading, spacing: 6) {
-                        Text("Processes these smart albums in order and reloads Photos before each stage:")
+                        Text("Re-queries these configured albums in order and waits briefly if Photos needs time to update the next stage:")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
 
                         ForEach(CaptionWorkflowAlbumStage.allCases, id: \.rawValue) { stage in
-                            Text(stage.rawValue)
-                                .font(.footnote)
-                                .foregroundStyle(.secondary)
+                            Picker(stage.rawValue, selection: Binding(get: {
+                                captionWorkflowStageAlbumIDs[stage] ?? ""
+                            }, set: { value in
+                                onCaptionWorkflowAlbumSelectionChanged(stage, value.isEmpty ? nil : value)
+                            })) {
+                                Text("Choose an album").tag("")
+                                ForEach(albums) { album in
+                                    Text(album.itemCount >= 0 ? "\(album.name) (\(album.itemCount))" : album.name)
+                                        .tag(album.id)
+                                }
+                            }
                         }
+
+                        if let captionWorkflowStatusMessage {
+                            Text(captionWorkflowStatusMessage)
+                                .font(.footnote)
+                                .foregroundStyle(captionWorkflowStatusMessage.contains("Needs repair") || captionWorkflowStatusMessage.contains("different album")
+                                    ? .orange
+                                    : .secondary)
+                        }
+
+                        Button("Auto-Fill By Stage Names") {
+                            onAutoFillCaptionWorkflowAlbums()
+                        }
+                        .disabled(!captionWorkflowCanAutoFill)
                     }
                 }
             }

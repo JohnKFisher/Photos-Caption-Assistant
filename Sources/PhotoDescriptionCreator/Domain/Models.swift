@@ -7,11 +7,50 @@ public enum ScopeSource: Sendable, Equatable {
     case captionWorkflow
 }
 
-public enum CaptionWorkflowAlbumStage: String, CaseIterable, Sendable {
+public enum CaptionWorkflowAlbumStage: String, CaseIterable, Sendable, Codable {
     case priorityCaptioning = "0 - Priority Captioning"
     case noCaptionNewPhotos = "1 - No Caption - New Photos"
     case noCaptionAll = "2 - No Caption - All"
     case olderCaptionLogic = "3 - Older Caption Logic"
+}
+
+public struct CaptionWorkflowAlbumAssignment: Sendable, Equatable, Codable, Identifiable {
+    public let stage: CaptionWorkflowAlbumStage
+    public let albumID: String
+    public let albumName: String
+
+    public var id: CaptionWorkflowAlbumStage { stage }
+
+    public init(stage: CaptionWorkflowAlbumStage, albumID: String, albumName: String) {
+        self.stage = stage
+        self.albumID = albumID
+        self.albumName = albumName
+    }
+}
+
+public struct CaptionWorkflowConfiguration: Sendable, Equatable, Codable {
+    public let assignments: [CaptionWorkflowAlbumAssignment]
+
+    public init(assignments: [CaptionWorkflowAlbumAssignment]) {
+        var uniqueAssignments: [CaptionWorkflowAlbumAssignment] = []
+        var seenStages = Set<CaptionWorkflowAlbumStage>()
+        for stage in CaptionWorkflowAlbumStage.allCases {
+            guard let assignment = assignments.first(where: { $0.stage == stage }) else {
+                continue
+            }
+            guard seenStages.insert(stage).inserted else { continue }
+            uniqueAssignments.append(assignment)
+        }
+        self.assignments = uniqueAssignments
+    }
+
+    public func assignment(for stage: CaptionWorkflowAlbumStage) -> CaptionWorkflowAlbumAssignment? {
+        assignments.first { $0.stage == stage }
+    }
+
+    public var isComplete: Bool {
+        CaptionWorkflowAlbumStage.allCases.allSatisfy { assignment(for: $0) != nil }
+    }
 }
 
 public struct CaptureDateRange: Sendable, Equatable {
@@ -134,19 +173,22 @@ public struct RunOptions: Sendable, Equatable {
     public let traversalOrder: RunTraversalOrder
     public let overwriteAppOwnedSameOrNewer: Bool
     public let alwaysOverwriteExternalMetadata: Bool
+    public let captionWorkflowConfiguration: CaptionWorkflowConfiguration?
 
     public init(
         source: ScopeSource,
         optionalCaptureDateRange: CaptureDateRange?,
         traversalOrder: RunTraversalOrder = .photosOrderFast,
         overwriteAppOwnedSameOrNewer: Bool,
-        alwaysOverwriteExternalMetadata: Bool = false
+        alwaysOverwriteExternalMetadata: Bool = false,
+        captionWorkflowConfiguration: CaptionWorkflowConfiguration? = nil
     ) {
         self.source = source
         self.optionalCaptureDateRange = optionalCaptureDateRange
         self.traversalOrder = traversalOrder
         self.overwriteAppOwnedSameOrNewer = overwriteAppOwnedSameOrNewer
         self.alwaysOverwriteExternalMetadata = alwaysOverwriteExternalMetadata
+        self.captionWorkflowConfiguration = captionWorkflowConfiguration
     }
 }
 
