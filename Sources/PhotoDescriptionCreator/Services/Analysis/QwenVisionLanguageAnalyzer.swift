@@ -73,20 +73,23 @@ public struct QwenVisionLanguageAnalyzer: PreparedInputAnalyzer {
         self.jpegCompression = min(max(jpegCompression, 0.5), 0.95)
     }
 
-    public func analyze(mediaURL: URL, kind: MediaKind) async throws -> GeneratedMetadata {
-        let preparedPayload = try await prepareAnalysis(mediaURL: mediaURL, kind: kind)
+    public func analyze(input: AnalysisInput, kind: MediaKind) async throws -> GeneratedMetadata {
+        let preparedPayload = try await prepareAnalysis(input: input, kind: kind)
         return try await analyze(preparedPayload: preparedPayload)
     }
 
-    public func prepareAnalysis(mediaURL: URL, kind: MediaKind) async throws -> PreparedAnalysisPayload {
+    public func prepareAnalysis(input: AnalysisInput, kind: MediaKind) async throws -> PreparedAnalysisPayload {
         let imageData: [Data]
         let prompt: String
 
         switch kind {
         case .photo:
-            imageData = [try jpegData(from: mediaURL)]
+            imageData = [try jpegData(from: input)]
             prompt = Self.photoPrompt
         case .video:
+            guard case let .fileURL(mediaURL) = input else {
+                throw QwenAnalyzerError.invalidResponse("Video analysis requires a file-backed input.")
+            }
             let candidateFrames = try await frameSampler.sampledFrames(
                 from: mediaURL,
                 progresses: Self.videoCandidateProgresses
@@ -388,6 +391,15 @@ public struct QwenVisionLanguageAnalyzer: PreparedInputAnalyzer {
         return totalDifference / (Double(count) * 255.0)
     }
 
+    private func jpegData(from input: AnalysisInput) throws -> Data {
+        switch input {
+        case let .fileURL(imageURL):
+            return try jpegData(from: imageURL)
+        case let .photoPreviewJPEGData(data):
+            return try jpegData(fromImageData: data)
+        }
+    }
+
     private func jpegData(from imageURL: URL) throws -> Data {
         if let image = NSImage(contentsOf: imageURL),
            let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil)
@@ -396,6 +408,10 @@ public struct QwenVisionLanguageAnalyzer: PreparedInputAnalyzer {
         }
 
         let rawData = try Data(contentsOf: imageURL)
+        return try jpegData(fromImageData: rawData)
+    }
+
+    private func jpegData(fromImageData rawData: Data) throws -> Data {
         if let bitmap = NSBitmapImageRep(data: rawData), let cgImage = bitmap.cgImage
         {
             return try encodeJPEG(from: cgImage)

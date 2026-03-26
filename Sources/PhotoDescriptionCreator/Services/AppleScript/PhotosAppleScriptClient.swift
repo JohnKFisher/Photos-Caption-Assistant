@@ -4,7 +4,7 @@ import Darwin
 import Foundation
 import Photos
 
-public actor PhotosAppleScriptClient: PhotosWriter, PhotosProcessMonitoring, PhotosLifecycleControlling, PhotoPreviewSource, IncrementalPhotosWriter, BatchMetadataPhotosWriter, BatchWritePhotosWriter, AlbumListingPhotosSource {
+public actor PhotosAppleScriptClient: PhotosWriter, PhotosProcessMonitoring, PhotosLifecycleControlling, PhotoPreviewSource, PhotoPreviewDataSource, IncrementalPhotosWriter, BatchMetadataPhotosWriter, BatchWritePhotosWriter, AlbumListingPhotosSource {
     private struct UncheckedExportSession: @unchecked Sendable {
         let rawValue: AVAssetExportSession
     }
@@ -734,6 +734,14 @@ public actor PhotosAppleScriptClient: PhotosWriter, PhotosProcessMonitoring, Pho
     }
 
     public func photoPreviewToTemporaryURL(id: String, maxPixelSize: Int) async throws -> URL? {
+        guard let data = try await photoPreviewJPEGData(id: id, maxPixelSize: maxPixelSize) else {
+            return nil
+        }
+
+        return writePreviewImageDataToTemporaryURL(data, assetID: id)
+    }
+
+    public func photoPreviewJPEGData(id: String, maxPixelSize: Int) async throws -> Data? {
         let identifiers = photoIdentifierCandidates(from: id)
         guard let asset = resolveAsset(identifierCandidates: identifiers, mediaType: .image) else {
             return nil
@@ -759,7 +767,7 @@ public actor PhotosAppleScriptClient: PhotosWriter, PhotosProcessMonitoring, Pho
             return nil
         }
 
-        return writePreviewImageToTemporaryURL(image, assetID: id)
+        return previewJPEGData(from: image)
     }
 
     public func isPhotosAppRunning() async -> Bool {
@@ -1490,7 +1498,7 @@ public actor PhotosAppleScriptClient: PhotosWriter, PhotosProcessMonitoring, Pho
         }
     }
 
-    private func writePreviewImageToTemporaryURL(_ image: NSImage, assetID: String) -> URL? {
+    private func previewJPEGData(from image: NSImage) -> Data? {
         guard
             let tiffData = image.tiffRepresentation,
             let bitmap = NSBitmapImageRep(data: tiffData),
@@ -1498,6 +1506,11 @@ public actor PhotosAppleScriptClient: PhotosWriter, PhotosProcessMonitoring, Pho
         else {
             return nil
         }
+
+        return jpegData
+    }
+
+    private func writePreviewImageDataToTemporaryURL(_ jpegData: Data, assetID: String) -> URL? {
 
         let previewRoot = fileManager.temporaryDirectory
             .appendingPathComponent("PhotoDescriptionCreatorPreviews", isDirectory: true)

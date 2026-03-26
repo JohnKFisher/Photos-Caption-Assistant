@@ -316,12 +316,17 @@ public struct PreparedAnalysisPayload: Sendable, Equatable {
     }
 }
 
+public enum AnalysisInput: Sendable, Equatable {
+    case fileURL(URL)
+    case photoPreviewJPEGData(Data)
+}
+
 public protocol Analyzer: Sendable {
-    func analyze(mediaURL: URL, kind: MediaKind) async throws -> GeneratedMetadata
+    func analyze(input: AnalysisInput, kind: MediaKind) async throws -> GeneratedMetadata
 }
 
 public protocol PreparedInputAnalyzer: Analyzer {
-    func prepareAnalysis(mediaURL: URL, kind: MediaKind) async throws -> PreparedAnalysisPayload
+    func prepareAnalysis(input: AnalysisInput, kind: MediaKind) async throws -> PreparedAnalysisPayload
     func analyze(preparedPayload: PreparedAnalysisPayload) async throws -> GeneratedMetadata
 }
 
@@ -349,6 +354,10 @@ public protocol PhotosLifecycleControlling: Sendable {
 
 public protocol PhotoPreviewSource: Sendable {
     func photoPreviewToTemporaryURL(id: String, maxPixelSize: Int) async throws -> URL?
+}
+
+public protocol PhotoPreviewDataSource: Sendable {
+    func photoPreviewJPEGData(id: String, maxPixelSize: Int) async throws -> Data?
 }
 
 public protocol IncrementalPhotosWriter: PhotosWriter {

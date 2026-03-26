@@ -134,7 +134,12 @@ private actor RunTimingRecorder {
 }
 
 protocol PreviewRendering: Sendable {
-    func persistPreviewFile(from inputURL: URL, fallbackFilename: String, kind: MediaKind) async -> URL?
+    func persistPreviewFile(
+        from input: AnalysisInput,
+        assetID: String,
+        fallbackFilename: String,
+        kind: MediaKind
+    ) async -> URL?
 }
 
 actor DefaultPreviewRenderer: PreviewRendering {
@@ -144,7 +149,12 @@ actor DefaultPreviewRenderer: PreviewRendering {
         self.videoFrameSampler = videoFrameSampler
     }
 
-    func persistPreviewFile(from inputURL: URL, fallbackFilename: String, kind: MediaKind) async -> URL? {
+    func persistPreviewFile(
+        from input: AnalysisInput,
+        assetID _: String,
+        fallbackFilename: String,
+        kind: MediaKind
+    ) async -> URL? {
         let fileManager = FileManager.default
         let previewRoot = fileManager.temporaryDirectory
             .appendingPathComponent("PhotoDescriptionCreatorLastCompleted", isDirectory: true)
@@ -152,25 +162,32 @@ actor DefaultPreviewRenderer: PreviewRendering {
         do {
             try fileManager.createDirectory(at: previewRoot, withIntermediateDirectories: true)
 
-            if kind == .video,
-               let extractedFrameDestination = await persistVideoPreviewFrame(
-                   from: inputURL,
-                   previewRoot: previewRoot
-               )
-            {
-                return extractedFrameDestination
+            switch input {
+            case let .fileURL(inputURL):
+                if kind == .video,
+                   let extractedFrameDestination = await persistVideoPreviewFrame(
+                       from: inputURL,
+                       previewRoot: previewRoot
+                   )
+                {
+                    return extractedFrameDestination
+                }
+
+                let inputExtension = inputURL.pathExtension
+                let fallbackExtension = (fallbackFilename as NSString).pathExtension
+                let pathExtension = inputExtension.isEmpty ? fallbackExtension : inputExtension
+                let filename = pathExtension.isEmpty
+                    ? "last-completed-\(UUID().uuidString)"
+                    : "last-completed-\(UUID().uuidString).\(pathExtension)"
+                let destination = previewRoot.appendingPathComponent(filename)
+
+                try fileManager.copyItem(at: inputURL, to: destination)
+                return destination
+            case let .photoPreviewJPEGData(data):
+                let destination = previewRoot.appendingPathComponent("last-completed-\(UUID().uuidString).jpg")
+                try data.write(to: destination, options: [.atomic])
+                return destination
             }
-
-            let inputExtension = inputURL.pathExtension
-            let fallbackExtension = (fallbackFilename as NSString).pathExtension
-            let pathExtension = inputExtension.isEmpty ? fallbackExtension : inputExtension
-            let filename = pathExtension.isEmpty
-                ? "last-completed-\(UUID().uuidString)"
-                : "last-completed-\(UUID().uuidString).\(pathExtension)"
-            let destination = previewRoot.appendingPathComponent(filename)
-
-            try fileManager.copyItem(at: inputURL, to: destination)
-            return destination
         } catch {
             return nil
         }
@@ -277,7 +294,7 @@ public final class RunCoordinator {
 
     private struct AnalysisJobResult: Sendable {
         let asset: MediaAsset
-        let inputURL: URL?
+        let input: AnalysisInput?
         let generated: GeneratedMetadata?
         let errorMessage: String?
     }
@@ -285,7 +302,7 @@ public final class RunCoordinator {
     private struct PreparationJobResult: Sendable {
         let index: Int
         let asset: MediaAsset
-        let inputURL: URL?
+        let input: AnalysisInput?
         let preparedPayload: PreparedAnalysisPayload?
         let errorMessage: String?
     }
@@ -293,8 +310,37 @@ public final class RunCoordinator {
     private struct PendingWrite: Sendable {
         let asset: MediaAsset
         let sourceContext: String
-        let inputURL: URL
+        let input: AnalysisInput
         let generated: GeneratedMetadata
+    }
+
+    private actor AsyncSemaphore {
+        private var permits: Int
+        private var waiters: [CheckedContinuation<Void, Never>] = []
+
+        init(permits: Int) {
+            self.permits = max(1, permits)
+        }
+
+        func acquire() async {
+            if permits > 0 {
+                permits -= 1
+                return
+            }
+
+            await withCheckedContinuation { continuation in
+                waiters.append(continuation)
+            }
+        }
+
+        func release() {
+            if let waiter = waiters.first {
+                waiters.removeFirst()
+                waiter.resume(returning: ())
+            } else {
+                permits += 1
+            }
+        }
     }
 
     private actor PreparedInputChannel {
@@ -781,7 +827,8 @@ public final class RunCoordinator {
 
                 let previewStart = DispatchTime.now().uptimeNanoseconds
                 let previewFileURL = await previewRenderer.persistPreviewFile(
-                    from: write.inputURL,
+                    from: write.input,
+                    assetID: write.asset.id,
                     fallbackFilename: write.asset.filename,
                     kind: write.asset.kind
                 )
@@ -801,7 +848,7 @@ public final class RunCoordinator {
                     )
                 )
 
-                Self.cleanupTemporaryInput(at: write.inputURL)
+                Self.cleanupAnalysisInput(write.input)
             }
 
             pendingPreviewTasks.append(task)
@@ -879,67 +926,9 @@ public final class RunCoordinator {
                     recordFailedAsset(write.asset)
                     callbacks.onProgress(progress)
                     markAssetProcessed(write.asset.id)
-                    Self.cleanupTemporaryInput(at: write.inputURL)
+                    Self.cleanupAnalysisInput(write.input)
                 }
             }
-        }
-
-        func runAnalysisJobs(
-            for assets: [MediaAsset],
-            onOrderedResult: @escaping (AnalysisJobResult) async -> Void
-        ) async {
-            guard !assets.isEmpty else { return }
-            let writer = photosWriter
-            let analysisEngine = analyzer
-            let pipelineDepth = max(1, analysisConcurrency + prepareAheadLimit)
-            let preparedInputs = PreparedInputChannel()
-            let analyzedResults = AnalysisResultChannel()
-
-            let producerTask = Task(priority: .userInitiated) {
-                await Self.producePreparedInputs(
-                    from: assets,
-                    photosWriter: writer,
-                    preparedAnalyzer: preparedAnalyzer,
-                    timingRecorder: timingRecorder,
-                    maxInFlight: pipelineDepth,
-                    channel: preparedInputs
-                )
-            }
-
-            let analysisTask = Task(priority: .userInitiated) {
-                await withTaskGroup(of: Void.self) { group in
-                    for _ in 0..<analysisConcurrency {
-                        group.addTask(priority: .userInitiated) {
-                            while let prepared = await preparedInputs.receive() {
-                                let analyzed = await Self.analyzePreparedInput(
-                                    prepared,
-                                    analyzer: analysisEngine,
-                                    preparedAnalyzer: preparedAnalyzer,
-                                    timingRecorder: timingRecorder
-                                )
-                                await analyzedResults.send(analyzed)
-                            }
-                        }
-                    }
-                }
-                await analyzedResults.finish()
-            }
-
-            var bufferedResults: [Int: AnalysisJobResult] = [:]
-            var nextIndexToEmit = 0
-            while let (index, result) = await analyzedResults.receive() {
-                bufferedResults[index] = result
-                while let readyResult = bufferedResults.removeValue(forKey: nextIndexToEmit) {
-                    await onOrderedResult(readyResult)
-                    nextIndexToEmit += 1
-                    if nextIndexToEmit >= assets.count {
-                        break
-                    }
-                }
-            }
-
-            _ = await producerTask.result
-            _ = await analysisTask.result
         }
 
         func processAssets(
@@ -969,69 +958,17 @@ public final class RunCoordinator {
                 _ windowAssets: [MediaAsset],
                 prefetchedMetadata: [String: ExistingMetadataState]
             ) async {
-                var assetsToAnalyze: [MediaAsset] = []
-                assetsToAnalyze.reserveCapacity(windowAssets.count)
-
-                for asset in windowAssets {
-                    if isCancelled {
-                        break
-                    }
-
-                    do {
-                        let existing: ExistingMetadataState
-                        if let prefetched = prefetchedMetadata[asset.id] {
-                            existing = prefetched
-                        } else {
-                            existing = try await measureOnMain(.metadataRead) {
-                                try await photosWriter.readMetadata(id: asset.id)
-                            }
-                        }
-
-                        let decision = OverwritePolicy.decide(
-                            context: OverwriteContext(
-                                existing: existing,
-                                targetLogicVersion: logicVersion,
-                                targetEngine: targetEngine,
-                                overwriteAppOwnedSameOrNewer: options.overwriteAppOwnedSameOrNewer
-                            )
-                        )
-
-                        let shouldWrite: Bool
-                        switch decision {
-                        case .write:
-                            shouldWrite = true
-                        case .requiresPerPhotoConfirmation:
-                            if options.alwaysOverwriteExternalMetadata {
-                                shouldWrite = true
-                            } else {
-                                shouldWrite = await callbacks.confirmExternalOverwrite(asset, existing)
-                            }
-                        case .skip:
-                            shouldWrite = false
-                        }
-
-                        if shouldWrite {
-                            assetsToAnalyze.append(asset)
-                        } else {
-                            progress.processed += 1
-                            progress.skipped += 1
-                            callbacks.onProgress(progress)
-                            markAssetProcessed(asset.id)
-                        }
-                    } catch {
-                        progress.processed += 1
-                        progress.failed += 1
-                        recordError("\(asset.filename): \(error.localizedDescription)")
-                        recordFailedAsset(asset)
-                        callbacks.onProgress(progress)
-                        markAssetProcessed(asset.id)
-                    }
-                }
-
-                guard !assetsToAnalyze.isEmpty else { return }
-
                 var pendingWrites: [PendingWrite] = []
                 pendingWrites.reserveCapacity(analysisConcurrency + prepareAheadLimit + 1)
+                let pipelineDepth = max(1, analysisConcurrency + prepareAheadLimit)
+                let preparationSemaphore = AsyncSemaphore(permits: pipelineDepth)
+                let analysisSemaphore = AsyncSemaphore(permits: analysisConcurrency)
+                let analyzedResults = AnalysisResultChannel()
+                let writer = photosWriter
+                let analysisEngine = analyzer
+                let preparedAnalysisEngine = preparedAnalyzer
+                let recorder = timingRecorder
+                var nextAnalysisIndex = 0
 
                 func nextWriteChunkSize(for readyCount: Int) -> Int {
                     let untilRestart = max(1, nextPhotosRestartAtChanged - progress.changed)
@@ -1049,22 +986,22 @@ public final class RunCoordinator {
                     }
                 }
 
-                await runAnalysisJobs(for: assetsToAnalyze) { result in
+                func handleOrderedResult(_ result: AnalysisJobResult) async {
                     if let generated = result.generated,
-                       let inputURL = result.inputURL
+                       let input = result.input
                     {
                         pendingWrites.append(
                             PendingWrite(
                                 asset: result.asset,
                                 sourceContext: sourceContext,
-                                inputURL: inputURL,
+                                input: input,
                                 generated: generated
                             )
                         )
                         await flushPendingWrites()
                     } else {
-                        if let inputURL = result.inputURL {
-                            Self.cleanupTemporaryInput(at: inputURL)
+                        if let input = result.input {
+                            Self.cleanupAnalysisInput(input)
                         }
                         progress.processed += 1
                         progress.failed += 1
@@ -1075,6 +1012,109 @@ public final class RunCoordinator {
                         markAssetProcessed(result.asset.id)
                     }
                 }
+
+                let consumerTask = Task { @MainActor in
+                    var bufferedResults: [Int: AnalysisJobResult] = [:]
+                    var nextIndexToEmit = 0
+
+                    while let completed = await analyzedResults.receive() {
+                        bufferedResults[completed.0] = completed.1
+
+                        while let readyResult = bufferedResults.removeValue(forKey: nextIndexToEmit) {
+                            await handleOrderedResult(readyResult)
+                            nextIndexToEmit += 1
+                        }
+                    }
+
+                    await flushPendingWrites()
+                }
+
+                await withTaskGroup(of: Void.self) { group in
+                    func scheduleAnalysis(for asset: MediaAsset) {
+                        let index = nextAnalysisIndex
+                        nextAnalysisIndex += 1
+
+                        group.addTask(priority: .userInitiated) {
+                            await preparationSemaphore.acquire()
+                            let prepared = await Self.prepareAnalysisInput(
+                                index: index,
+                                asset: asset,
+                                photosWriter: writer,
+                                preparedAnalyzer: preparedAnalysisEngine,
+                                timingRecorder: recorder
+                            )
+                            await preparationSemaphore.release()
+                            await analysisSemaphore.acquire()
+                            let analyzed = await Self.analyzePreparedInput(
+                                prepared,
+                                analyzer: analysisEngine,
+                                preparedAnalyzer: preparedAnalysisEngine,
+                                timingRecorder: recorder
+                            )
+                            await analysisSemaphore.release()
+                            await analyzedResults.send(analyzed)
+                        }
+                    }
+
+                    for asset in windowAssets {
+                        if isCancelled {
+                            break
+                        }
+
+                        do {
+                            let existing: ExistingMetadataState
+                            if let prefetched = prefetchedMetadata[asset.id] {
+                                existing = prefetched
+                            } else {
+                                existing = try await measureOnMain(.metadataRead) {
+                                    try await photosWriter.readMetadata(id: asset.id)
+                                }
+                            }
+
+                            let decision = OverwritePolicy.decide(
+                                context: OverwriteContext(
+                                    existing: existing,
+                                    targetLogicVersion: logicVersion,
+                                    targetEngine: targetEngine,
+                                    overwriteAppOwnedSameOrNewer: options.overwriteAppOwnedSameOrNewer
+                                )
+                            )
+
+                            let shouldWrite: Bool
+                            switch decision {
+                            case .write:
+                                shouldWrite = true
+                            case .requiresPerPhotoConfirmation:
+                                if options.alwaysOverwriteExternalMetadata {
+                                    shouldWrite = true
+                                } else {
+                                    shouldWrite = await callbacks.confirmExternalOverwrite(asset, existing)
+                                }
+                            case .skip:
+                                shouldWrite = false
+                            }
+
+                            if shouldWrite {
+                                scheduleAnalysis(for: asset)
+                            } else {
+                                progress.processed += 1
+                                progress.skipped += 1
+                                callbacks.onProgress(progress)
+                                markAssetProcessed(asset.id)
+                            }
+                        } catch {
+                            progress.processed += 1
+                            progress.failed += 1
+                            recordError("\(asset.filename): \(error.localizedDescription)")
+                            recordFailedAsset(asset)
+                            callbacks.onProgress(progress)
+                            markAssetProcessed(asset.id)
+                        }
+                    }
+                }
+
+                await analyzedResults.finish()
+                _ = await consumerTask.value
             }
 
             var windowStart = 0
@@ -1083,7 +1123,9 @@ public final class RunCoordinator {
                 assetArray.count
             )
             var currentWindowAssets = Array(assetArray[windowStart..<firstWindowEnd])
-            var currentPrefetchedMetadata = await prefetchMetadata(for: currentWindowAssets)
+            // Keep the active window streaming by reading overwrite metadata on demand.
+            // Later windows still use the existing batch prefetch path off the critical path.
+            var currentPrefetchedMetadata: [String: ExistingMetadataState] = [:]
 
             while !isCancelled && !currentWindowAssets.isEmpty {
                 let nextWindowStart = windowStart + currentWindowAssets.count
@@ -1120,7 +1162,7 @@ public final class RunCoordinator {
                 windowStart = nextWindowStart
                 currentWindowAssets = nextWindowAssets
                 currentPrefetchedMetadata = didRestartPhotos
-                    ? await prefetchMetadata(for: currentWindowAssets)
+                    ? [:]
                     : nextPrefetchedMetadata
             }
         }
@@ -1888,51 +1930,12 @@ public final class RunCoordinator {
         return lhs.id < rhs.id
     }
 
-    private nonisolated static func cleanupTemporaryInput(at exportURL: URL) {
+    private nonisolated static func cleanupAnalysisInput(_ input: AnalysisInput) {
+        guard case let .fileURL(exportURL) = input else {
+            return
+        }
         let parent = exportURL.deletingLastPathComponent()
         try? FileManager.default.removeItem(at: parent)
-    }
-
-    private nonisolated static func producePreparedInputs(
-        from assets: [MediaAsset],
-        photosWriter: PhotosWriter,
-        preparedAnalyzer: (any PreparedInputAnalyzer)?,
-        timingRecorder: RunTimingRecorder,
-        maxInFlight: Int,
-        channel: PreparedInputChannel
-    ) async {
-        await withTaskGroup(of: PreparationJobResult.self) { group in
-            var nextIndex = 0
-
-            func schedulePreparation(_ index: Int) {
-                let asset = assets[index]
-                group.addTask(priority: .userInitiated) {
-                    await Self.prepareAnalysisInput(
-                        index: index,
-                        asset: asset,
-                        photosWriter: photosWriter,
-                        preparedAnalyzer: preparedAnalyzer,
-                        timingRecorder: timingRecorder
-                    )
-                }
-            }
-
-            let initialCount = min(maxInFlight, assets.count)
-            for _ in 0..<initialCount {
-                schedulePreparation(nextIndex)
-                nextIndex += 1
-            }
-
-            while let prepared = await group.next() {
-                await channel.send(prepared)
-                if nextIndex < assets.count {
-                    schedulePreparation(nextIndex)
-                    nextIndex += 1
-                }
-            }
-        }
-
-        await channel.finish()
     }
 
     private nonisolated static func prepareAnalysisInput(
@@ -1942,22 +1945,22 @@ public final class RunCoordinator {
         preparedAnalyzer: (any PreparedInputAnalyzer)?,
         timingRecorder: RunTimingRecorder
     ) async -> PreparationJobResult {
-        var inputURL: URL?
+        var input: AnalysisInput?
         var preparedPayload: PreparedAnalysisPayload?
 
         do {
-            inputURL = try await measureStage(.assetAcquire, recorder: timingRecorder) {
-                try await acquireAnalysisInputURL(for: asset, photosWriter: photosWriter)
+            input = try await measureStage(.assetAcquire, recorder: timingRecorder) {
+                try await acquireAnalysisInput(for: asset, photosWriter: photosWriter)
             }
-            if let preparedAnalyzer, let inputURL {
+            if let preparedAnalyzer, let input {
                 preparedPayload = try await measureStage(.analysisPrepare, recorder: timingRecorder) {
-                    try await preparedAnalyzer.prepareAnalysis(mediaURL: inputURL, kind: asset.kind)
+                    try await preparedAnalyzer.prepareAnalysis(input: input, kind: asset.kind)
                 }
             }
             return PreparationJobResult(
                 index: index,
                 asset: asset,
-                inputURL: inputURL,
+                input: input,
                 preparedPayload: preparedPayload,
                 errorMessage: nil
             )
@@ -1965,7 +1968,7 @@ public final class RunCoordinator {
             return PreparationJobResult(
                 index: index,
                 asset: asset,
-                inputURL: inputURL,
+                input: input,
                 preparedPayload: preparedPayload,
                 errorMessage: error.localizedDescription
             )
@@ -1978,10 +1981,10 @@ public final class RunCoordinator {
         preparedAnalyzer: (any PreparedInputAnalyzer)?,
         timingRecorder: RunTimingRecorder
     ) async -> (Int, AnalysisJobResult) {
-        guard let inputURL = prepared.inputURL else {
+        guard let input = prepared.input else {
             let result = AnalysisJobResult(
                 asset: prepared.asset,
-                inputURL: nil,
+                input: nil,
                 generated: nil,
                 errorMessage: prepared.errorMessage ?? "Analysis input was unavailable."
             )
@@ -1998,12 +2001,12 @@ public final class RunCoordinator {
                 }
             } else {
                 generated = try await measureStage(.analyze, recorder: timingRecorder) {
-                    try await analyzer.analyze(mediaURL: inputURL, kind: prepared.asset.kind)
+                    try await analyzer.analyze(input: input, kind: prepared.asset.kind)
                 }
             }
             let result = AnalysisJobResult(
                 asset: prepared.asset,
-                inputURL: inputURL,
+                input: input,
                 generated: generated,
                 errorMessage: nil
             )
@@ -2011,7 +2014,7 @@ public final class RunCoordinator {
         } catch {
             let result = AnalysisJobResult(
                 asset: prepared.asset,
-                inputURL: inputURL,
+                input: input,
                 generated: nil,
                 errorMessage: error.localizedDescription
             )
@@ -2019,21 +2022,31 @@ public final class RunCoordinator {
         }
     }
 
-    private nonisolated static func acquireAnalysisInputURL(
+    private nonisolated static func acquireAnalysisInput(
         for asset: MediaAsset,
         photosWriter: PhotosWriter
-    ) async throws -> URL {
+    ) async throws -> AnalysisInput {
         if asset.kind == .photo,
-           let previewSource = photosWriter as? PhotoPreviewSource,
-           let previewURL = try? await previewSource.photoPreviewToTemporaryURL(
-               id: asset.id,
-               maxPixelSize: Self.photoPreviewMaxPixelSize
-           )
+           let previewDataSource = photosWriter as? PhotoPreviewDataSource
         {
-            return previewURL
+            if let previewData = try? await previewDataSource.photoPreviewJPEGData(
+                id: asset.id,
+                maxPixelSize: Self.photoPreviewMaxPixelSize
+            ) {
+                return .photoPreviewJPEGData(previewData)
+            }
+        } else if asset.kind == .photo,
+                  let previewSource = photosWriter as? PhotoPreviewSource,
+                  let previewURL = try? await previewSource.photoPreviewToTemporaryURL(
+                      id: asset.id,
+                      maxPixelSize: Self.photoPreviewMaxPixelSize
+                  )
+        {
+            return .fileURL(previewURL)
         }
 
-        return try await photosWriter.exportAssetToTemporaryURL(id: asset.id, kind: asset.kind)
+        let exportURL = try await photosWriter.exportAssetToTemporaryURL(id: asset.id, kind: asset.kind)
+        return .fileURL(exportURL)
     }
 
     private nonisolated static func measureStage<T>(

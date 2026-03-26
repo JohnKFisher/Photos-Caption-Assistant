@@ -350,6 +350,38 @@ final class RunCoordinatorTests: XCTestCase {
         XCTAssertEqual(exportRequests, [])
     }
 
+    func testPhotoPreviewPathFeedsAnalyzerFromMemory() async {
+        let asset = MediaAsset(id: "asset-preview", filename: "IMG_preview.jpg", captureDate: Date(), kind: .photo)
+        let metadata = [
+            asset.id: ExistingMetadataState(caption: nil, keywords: [], ownershipTag: nil, isExternal: false)
+        ]
+        let inputRecorder = AnalysisInputRecorder()
+        let writer = MockPhotosWriter(
+            assets: [asset],
+            metadataByID: metadata,
+            previewDataByID: [asset.id: Data([0xFF, 0xD8, 0xFF, 0xD9])]
+        )
+        let coordinator = RunCoordinator(
+            photosWriter: writer,
+            analyzer: RecordingAnalyzer(
+                result: GeneratedMetadata(caption: "caption", keywords: ["k1"]),
+                recorder: inputRecorder
+            ),
+            checkpointInterval: 10_000,
+            photosMemoryCheckInterval: 10_000
+        )
+
+        let summary = await coordinator.run(
+            options: defaultRunOptions(),
+            capabilities: defaultCapabilities(),
+            callbacks: RunCallbacks()
+        )
+
+        let recordedInputs = await inputRecorder.values()
+        XCTAssertEqual(summary.progress.changed, 1)
+        XCTAssertEqual(recordedInputs, ["photo-preview-data"])
+    }
+
     func testPhotoPreviewFallsBackToExportWhenUnavailable() async {
         let asset = MediaAsset(id: "asset-fallback", filename: "IMG_fallback.jpg", captureDate: Date(), kind: .photo)
         let metadata = [
@@ -1069,9 +1101,12 @@ final class RunCoordinatorTests: XCTestCase {
         let batchReadSizes = await writer.batchReadSizesValue()
         let firstWriteAfterEnumeratePages = await writer.firstWriteAfterEnumeratePageCountValue()
         let countCalls = await writer.countCallCountValue()
+        let prefetchedAssetCount = batchReadSizes.reduce(0, +)
+        let minimumExpectedPrefetchedAssets = max(0, assets.count - (32 * 3))
         XCTAssertEqual(summary.progress.changed, assets.count)
         XCTAssertFalse(batchReadSizes.isEmpty)
-        XCTAssertEqual(batchReadSizes.reduce(0, +), assets.count)
+        XCTAssertGreaterThanOrEqual(prefetchedAssetCount, minimumExpectedPrefetchedAssets)
+        XCTAssertLessThan(prefetchedAssetCount, assets.count)
         XCTAssertTrue(batchReadSizes.allSatisfy { $0 <= 32 })
         XCTAssertEqual(firstWriteAfterEnumeratePages, 3)
         XCTAssertEqual(countCalls, 1)
@@ -1256,6 +1291,54 @@ final class RunCoordinatorTests: XCTestCase {
         XCTAssertNotNil(exportEnd)
         XCTAssertLessThan(exportStart!, analyzeEnd!)
         XCTAssertGreaterThan(exportEnd!, analyzeStart!)
+    }
+
+    func testStreamingMetadataGatingStartsAssetAcquireBeforeWindowMetadataFinishes() async {
+        let assets = makeAssets(count: 3)
+        let metadata = Dictionary(uniqueKeysWithValues: assets.map { asset in
+            (asset.id, ExistingMetadataState(caption: nil, keywords: [], ownershipTag: nil, isExternal: false))
+        })
+        let timeline = TimelineRecorder()
+        let previewData = Dictionary(uniqueKeysWithValues: assets.map { asset in
+            (asset.id, Data(asset.id.utf8))
+        })
+        let writer = MockPhotosWriter(
+            assets: assets,
+            metadataByID: metadata,
+            previewDataByID: previewData,
+            metadataReadDelayByID: [
+                "asset-1": 180_000_000,
+                "asset-2": 180_000_000
+            ],
+            timelineRecorder: timeline
+        )
+        let analyzerState = PreparedOverlapAnalyzerState(
+            result: GeneratedMetadata(caption: "caption", keywords: ["k1"]),
+            preparationDelayNanoseconds: 20_000_000,
+            analysisDelayNanoseconds: 10_000_000,
+            timelineRecorder: timeline
+        )
+        let coordinator = RunCoordinator(
+            photosWriter: writer,
+            analyzer: PreparedOverlapAnalyzer(state: analyzerState),
+            analysisConcurrency: 1,
+            prepareAheadLimit: 1
+        )
+
+        let summary = await coordinator.run(
+            options: defaultRunOptions(),
+            capabilities: defaultCapabilities(),
+            callbacks: RunCallbacks()
+        )
+
+        let firstPrepareStart = await timeline.timestamp(for: "prepare-start:asset-0")
+        let lastMetadataReadEnd = await timeline.timestamp(for: "metadata-read-end:asset-2")
+
+        XCTAssertEqual(summary.progress.changed, 3)
+        XCTAssertEqual(summary.progress.failed, 0)
+        XCTAssertNotNil(firstPrepareStart)
+        XCTAssertNotNil(lastMetadataReadEnd)
+        XCTAssertLessThan(firstPrepareStart!, lastMetadataReadEnd!)
     }
 
     func testPreparedAnalyzerBuildsNextPayloadDuringCurrentAnalysis() async {
@@ -2228,8 +2311,8 @@ private actor ContentionAwareAnalyzerState {
 private struct ContentionAwareAnalyzer: Analyzer {
     let state: ContentionAwareAnalyzerState
 
-    func analyze(mediaURL: URL, kind: MediaKind) async throws -> GeneratedMetadata {
-        let assetID = mediaURL.deletingPathExtension().lastPathComponent
+    func analyze(input: AnalysisInput, kind _: MediaKind) async throws -> GeneratedMetadata {
+        let assetID = analysisInputAssetID(input)
         let (delayNanoseconds, result) = await state.begin(assetID: assetID)
         try await Task.sleep(nanoseconds: delayNanoseconds)
         await state.end(assetID: assetID)
@@ -2286,13 +2369,13 @@ private actor PreparedOverlapAnalyzerState {
 private struct PreparedOverlapAnalyzer: PreparedInputAnalyzer {
     let state: PreparedOverlapAnalyzerState
 
-    func analyze(mediaURL: URL, kind: MediaKind) async throws -> GeneratedMetadata {
-        let payload = try await prepareAnalysis(mediaURL: mediaURL, kind: kind)
+    func analyze(input: AnalysisInput, kind: MediaKind) async throws -> GeneratedMetadata {
+        let payload = try await prepareAnalysis(input: input, kind: kind)
         return try await analyze(preparedPayload: payload)
     }
 
-    func prepareAnalysis(mediaURL: URL, kind: MediaKind) async throws -> PreparedAnalysisPayload {
-        let assetID = mediaURL.deletingPathExtension().lastPathComponent
+    func prepareAnalysis(input: AnalysisInput, kind: MediaKind) async throws -> PreparedAnalysisPayload {
+        let assetID = analysisInputAssetID(input)
         let delayNanoseconds = await state.beginPreparation(assetID: assetID)
         try await Task.sleep(nanoseconds: delayNanoseconds)
         await state.endPreparation(assetID: assetID)
@@ -2317,17 +2400,27 @@ private actor MockPreviewRenderer: PreviewRendering {
         self.timelineRecorder = timelineRecorder
     }
 
-    func persistPreviewFile(from inputURL: URL, fallbackFilename: String, kind: MediaKind) async -> URL? {
-        let assetID = inputURL.deletingPathExtension().lastPathComponent
+    func persistPreviewFile(
+        from input: AnalysisInput,
+        assetID: String,
+        fallbackFilename: String,
+        kind _: MediaKind
+    ) async -> URL? {
         await timelineRecorder?.record("preview-start:\(assetID)")
         if delayNanoseconds > 0 {
             try? await Task.sleep(nanoseconds: delayNanoseconds)
         }
 
         let fallbackExtension = (fallbackFilename as NSString).pathExtension
-        let pathExtension = inputURL.pathExtension.isEmpty
-            ? (fallbackExtension.isEmpty ? "jpg" : fallbackExtension)
-            : inputURL.pathExtension
+        let pathExtension: String
+        switch input {
+        case let .fileURL(inputURL):
+            pathExtension = inputURL.pathExtension.isEmpty
+                ? (fallbackExtension.isEmpty ? "jpg" : fallbackExtension)
+                : inputURL.pathExtension
+        case .photoPreviewJPEGData:
+            pathExtension = "jpg"
+        }
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("pdc-tests-rendered-preview", isDirectory: true)
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -2376,10 +2469,23 @@ private actor PromptRecorder {
 
 }
 
-private actor MockPhotosWriter: PhotosWriter, PhotosProcessMonitoring, PhotosLifecycleControlling, PhotoPreviewSource, BatchMetadataPhotosWriter, BatchWritePhotosWriter, IncrementalPhotosWriter, AlbumListingPhotosSource {
+private actor AnalysisInputRecorder {
+    private var valuesStorage: [String] = []
+
+    func record(_ value: String) {
+        valuesStorage.append(value)
+    }
+
+    func values() -> [String] {
+        valuesStorage
+    }
+}
+
+private actor MockPhotosWriter: PhotosWriter, PhotosProcessMonitoring, PhotosLifecycleControlling, PhotoPreviewSource, PhotoPreviewDataSource, BatchMetadataPhotosWriter, BatchWritePhotosWriter, IncrementalPhotosWriter, AlbumListingPhotosSource {
     private let assets: [MediaAsset]
     private let photosResidentMemoryBytesValue: UInt64?
     private let previewDataByID: [String: Data]
+    private let metadataReadDelayByID: [String: UInt64]
     private let enumerateTimeoutWhenLimitExceeds: Int?
     private let exportDelayNanoseconds: UInt64
     private let exportDelayByID: [String: UInt64]
@@ -2417,6 +2523,7 @@ private actor MockPhotosWriter: PhotosWriter, PhotosProcessMonitoring, PhotosLif
         metadataByID: [String: ExistingMetadataState],
         photosResidentMemoryBytes: UInt64? = nil,
         previewDataByID: [String: Data] = [:],
+        metadataReadDelayByID: [String: UInt64] = [:],
         enumerateTimeoutWhenLimitExceeds: Int? = nil,
         exportDelayNanoseconds: UInt64 = 0,
         exportDelayByID: [String: UInt64] = [:],
@@ -2433,6 +2540,7 @@ private actor MockPhotosWriter: PhotosWriter, PhotosProcessMonitoring, PhotosLif
         self.metadataByID = metadataByID
         self.photosResidentMemoryBytesValue = photosResidentMemoryBytes
         self.previewDataByID = previewDataByID
+        self.metadataReadDelayByID = metadataReadDelayByID
         self.enumerateTimeoutWhenLimitExceeds = enumerateTimeoutWhenLimitExceeds
         self.exportDelayNanoseconds = exportDelayNanoseconds
         self.exportDelayByID = exportDelayByID
@@ -2515,7 +2623,12 @@ private actor MockPhotosWriter: PhotosWriter, PhotosProcessMonitoring, PhotosLif
     }
 
     func readMetadata(id: String) async throws -> ExistingMetadataState {
-        metadataByID[id] ?? ExistingMetadataState(caption: nil, keywords: [], ownershipTag: nil, isExternal: false)
+        await timelineRecorder?.record("metadata-read-start:\(id)")
+        if let delayNanoseconds = metadataReadDelayByID[id], delayNanoseconds > 0 {
+            try await Task.sleep(nanoseconds: delayNanoseconds)
+        }
+        await timelineRecorder?.record("metadata-read-end:\(id)")
+        return metadataByID[id] ?? ExistingMetadataState(caption: nil, keywords: [], ownershipTag: nil, isExternal: false)
     }
 
     func count(scope: ScopeSource) async throws -> Int {
@@ -2634,9 +2747,7 @@ private actor MockPhotosWriter: PhotosWriter, PhotosProcessMonitoring, PhotosLif
     }
 
     func photoPreviewToTemporaryURL(id: String, maxPixelSize: Int) async throws -> URL? {
-        previewRequests.append(id)
-        previewRequestedPixelSizes.append(maxPixelSize)
-        guard let data = previewDataByID[id] else {
+        guard let data = try await photoPreviewJPEGData(id: id, maxPixelSize: maxPixelSize) else {
             return nil
         }
 
@@ -2647,6 +2758,12 @@ private actor MockPhotosWriter: PhotosWriter, PhotosProcessMonitoring, PhotosLif
         let fileURL = root.appendingPathComponent("\(id).jpg")
         try data.write(to: fileURL, options: [.atomic])
         return fileURL
+    }
+
+    func photoPreviewJPEGData(id: String, maxPixelSize: Int) async throws -> Data? {
+        previewRequests.append(id)
+        previewRequestedPixelSizes.append(maxPixelSize)
+        return previewDataByID[id]
     }
 
     func isPhotosAppRunning() async -> Bool {
@@ -2741,8 +2858,23 @@ private actor MockPhotosWriter: PhotosWriter, PhotosProcessMonitoring, PhotosLif
 private struct MockAnalyzer: Analyzer {
     let result: GeneratedMetadata
 
-    func analyze(mediaURL: URL, kind: MediaKind) async throws -> GeneratedMetadata {
+    func analyze(input _: AnalysisInput, kind _: MediaKind) async throws -> GeneratedMetadata {
         result
+    }
+}
+
+private struct RecordingAnalyzer: Analyzer {
+    let result: GeneratedMetadata
+    let recorder: AnalysisInputRecorder
+
+    func analyze(input: AnalysisInput, kind _: MediaKind) async throws -> GeneratedMetadata {
+        switch input {
+        case .fileURL:
+            await recorder.record("file-url")
+        case .photoPreviewJPEGData:
+            await recorder.record("photo-preview-data")
+        }
+        return result
     }
 }
 
@@ -2755,12 +2887,24 @@ private struct ConditionalFailAnalyzer: Analyzer {
         self.successResult = successResult
     }
 
-    func analyze(mediaURL: URL, kind: MediaKind) async throws -> GeneratedMetadata {
-        let stem = mediaURL.deletingPathExtension().lastPathComponent
+    func analyze(input: AnalysisInput, kind _: MediaKind) async throws -> GeneratedMetadata {
+        let stem = analysisInputAssetID(input)
         if failedAssetIDs.contains(stem) {
             throw NSError(domain: "test", code: 1, userInfo: [NSLocalizedDescriptionKey: "intentional failure"])
         }
         return successResult
+    }
+}
+
+private func analysisInputAssetID(_ input: AnalysisInput) -> String {
+    switch input {
+    case let .fileURL(url):
+        return url.deletingPathExtension().lastPathComponent
+    case let .photoPreviewJPEGData(data):
+        if let text = String(data: data, encoding: .utf8), !text.isEmpty {
+            return text
+        }
+        return "photo-preview"
     }
 }
 
