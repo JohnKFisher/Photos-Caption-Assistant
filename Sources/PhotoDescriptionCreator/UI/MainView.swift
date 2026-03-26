@@ -218,6 +218,7 @@ final class AppViewModel: ObservableObject {
     @Published var recentRunErrors: [String] = []
     @Published var isImmersivePreviewPresented = false
     @Published var ollamaStatusMessage = "Checking Qwen 2.5VL 7B availability..."
+    @Published var benchmarkStatusMessage: String?
     @Published var resumablePendingCount = 0
 
     @Published var pendingConflictPrompt: ConflictPromptData?
@@ -247,10 +248,12 @@ final class AppViewModel: ObservableObject {
     private let runResumeStore = RunResumeStore()
     private let captionWorkflowConfigurationStore = CaptionWorkflowConfigurationStore()
     private lazy var capabilityProbe = CapabilityProbe(photosClient: photosClient, ollamaManager: ollamaManager)
+    private lazy var scanBenchmarkRunner = PhotoLibraryScanBenchmarkRunner(appleScriptClient: photosClient)
     private lazy var coordinator = RunCoordinator(
         photosWriter: photosClient,
         analyzer: QwenVisionLanguageAnalyzer()
     )
+    @Published private(set) var isRunningScanBenchmark = false
 
     func loadInitialData() async {
         capabilities = await capabilityProbe.probe()
@@ -498,6 +501,41 @@ final class AppViewModel: ObservableObject {
         guard !isCancelRequested else { return }
         isCancelRequested = true
         coordinator.cancel()
+    }
+
+    func runScanBenchmarkFromMenu() async {
+        guard !isRunning, !isPreparingModel, !isRunningScanBenchmark else { return }
+
+        isRunningScanBenchmark = true
+        benchmarkStatusMessage = "Running PhotoKit scan benchmark..."
+        defer {
+            isRunningScanBenchmark = false
+        }
+
+        do {
+            let outcome = try await scanBenchmarkRunner.run()
+            switch outcome {
+            case let .completed(run):
+                benchmarkStatusMessage = "Scan benchmark report: \(run.reportURL.lastPathComponent)"
+                let summaries = run.report.scopes.map(\.summaryLine).joined(separator: "\n")
+                showMessage(
+                    title: "Scan Benchmark Complete",
+                    message: "Report saved to:\n\(run.reportURL.path)\n\n\(summaries)"
+                )
+            case let .skipped(reason):
+                benchmarkStatusMessage = "Scan benchmark skipped."
+                showMessage(
+                    title: "Scan Benchmark Skipped",
+                    message: reason
+                )
+            }
+        } catch {
+            benchmarkStatusMessage = "Scan benchmark failed."
+            showMessage(
+                title: "Scan Benchmark Failed",
+                message: error.localizedDescription
+            )
+        }
     }
 
     func resolveConflictPrompt(overwrite: Bool) {
@@ -1096,7 +1134,7 @@ final class AppViewModel: ObservableObject {
 }
 
 struct MainView: View {
-    @StateObject private var viewModel = AppViewModel()
+    @ObservedObject var viewModel: AppViewModel
     @State private var immersiveAutoEnteredFullScreen = false
 
     var body: some View {
@@ -1290,6 +1328,18 @@ struct MainView: View {
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
+
+            if let benchmarkStatusMessage = viewModel.benchmarkStatusMessage {
+                HStack(spacing: 8) {
+                    if viewModel.isRunningScanBenchmark {
+                        SwiftUI.ProgressView()
+                            .controlSize(.small)
+                    }
+                    Text(benchmarkStatusMessage)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            }
         }
     }
 
@@ -1333,5 +1383,20 @@ struct MainView: View {
             return main
         }
         return NSApp.windows.first(where: { $0.isVisible })
+    }
+}
+
+struct DiagnosticCommands: Commands {
+    @ObservedObject var viewModel: AppViewModel
+
+    var body: some Commands {
+        CommandMenu("Diagnostics") {
+            Button(viewModel.isRunningScanBenchmark ? "Running Scan Benchmark..." : "Run Scan Benchmark") {
+                Task {
+                    await viewModel.runScanBenchmarkFromMenu()
+                }
+            }
+            .disabled(viewModel.isRunning || viewModel.isPreparingModel || viewModel.isRunningScanBenchmark)
+        }
     }
 }
