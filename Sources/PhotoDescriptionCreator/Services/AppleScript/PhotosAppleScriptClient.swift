@@ -1,9 +1,14 @@
+@preconcurrency import AVFoundation
 import AppKit
 import Darwin
 import Foundation
 import Photos
 
 public actor PhotosAppleScriptClient: PhotosWriter, PhotosProcessMonitoring, PhotosLifecycleControlling, PhotoPreviewSource, IncrementalPhotosWriter, BatchMetadataPhotosWriter, BatchWritePhotosWriter, AlbumListingPhotosSource {
+    private struct UncheckedExportSession: @unchecked Sendable {
+        let rawValue: AVAssetExportSession
+    }
+
     private enum ScriptTimeout {
         static let enumerateLibrary: TimeInterval = 900
         static let enumerateNarrowScope: TimeInterval = 180
@@ -16,6 +21,9 @@ public actor PhotosAppleScriptClient: PhotosWriter, PhotosProcessMonitoring, Pho
         static let writeMetadataBatchBase: TimeInterval = 25
         static let exportPhotoAsset: TimeInterval = 120
         static let exportVideoAsset: TimeInterval = 300
+        static let requestVideoAsset: TimeInterval = 900
+        static let prepareVideoExportSession: TimeInterval = 60
+        static let exportPreparedVideoAsset: TimeInterval = 300
         static let capabilityProbe: TimeInterval = 15
         static let listAlbums: TimeInterval = 120
         static let memoryProbe: TimeInterval = 5
@@ -645,6 +653,20 @@ public actor PhotosAppleScriptClient: PhotosWriter, PhotosProcessMonitoring, Pho
     }
 
     public func exportAssetToTemporaryURL(id: String, kind: MediaKind) async throws -> URL {
+        if kind == .video {
+            do {
+                return try await exportVideoAssetToTemporaryURLViaPhotosFramework(id: id)
+            } catch {
+                if !Self.shouldFallbackToAppleScriptAfterFrameworkVideoAcquireFailure(error) {
+                    throw error
+                }
+            }
+        }
+
+        return try exportAssetToTemporaryURLViaAppleScript(id: id, kind: kind)
+    }
+
+    private func exportAssetToTemporaryURLViaAppleScript(id: String, kind: MediaKind) throws -> URL {
         let exportRoot = fileManager.temporaryDirectory
             .appendingPathComponent("PhotoDescriptionCreatorExports", isDirectory: true)
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -680,9 +702,40 @@ public actor PhotosAppleScriptClient: PhotosWriter, PhotosProcessMonitoring, Pho
         return exportedFile
     }
 
+    private func exportVideoAssetToTemporaryURLViaPhotosFramework(id: String) async throws -> URL {
+        let identifiers = photoIdentifierCandidates(from: id)
+        guard let asset = resolveAsset(identifierCandidates: identifiers, mediaType: .video) else {
+            throw PhotosAppleScriptError.scriptFailed(message: "Photos video asset could not be resolved for id: \(id).")
+        }
+
+        let options = PHVideoRequestOptions()
+        options.deliveryMode = .highQualityFormat
+        options.version = .current
+        options.isNetworkAccessAllowed = true
+
+        let requestedAsset = try await requestVideoAsset(
+            for: asset,
+            options: options,
+            timeoutSeconds: ScriptTimeout.requestVideoAsset
+        )
+
+        if let urlAsset = requestedAsset as? AVURLAsset,
+           urlAsset.url.isFileURL,
+           let stagedURL = try? stageVideoAssetFile(from: urlAsset.url, assetID: id)
+        {
+            return stagedURL
+        }
+
+        return try await exportRequestedVideoAsset(
+            asset,
+            options: options,
+            assetID: id
+        )
+    }
+
     public func photoPreviewToTemporaryURL(id: String, maxPixelSize: Int) async throws -> URL? {
         let identifiers = photoIdentifierCandidates(from: id)
-        guard let asset = resolvePhotoAsset(identifierCandidates: identifiers) else {
+        guard let asset = resolveAsset(identifierCandidates: identifiers, mediaType: .image) else {
             return nil
         }
         guard asset.mediaType == .image else {
@@ -977,22 +1030,25 @@ public actor PhotosAppleScriptClient: PhotosWriter, PhotosProcessMonitoring, Pho
         return candidates
     }
 
-    private func resolvePhotoAsset(identifierCandidates: [String]) -> PHAsset? {
+    private func resolveAsset(
+        identifierCandidates: [String],
+        mediaType: PHAssetMediaType? = nil
+    ) -> PHAsset? {
         guard !identifierCandidates.isEmpty else {
             return nil
         }
 
         let directFetch = PHAsset.fetchAssets(withLocalIdentifiers: identifierCandidates, options: nil)
-        if let directMatch = directFetch.firstObject {
+        if let directMatch = firstMatchingAsset(in: directFetch, mediaType: mediaType) {
             return directMatch
         }
 
         for candidate in identifierCandidates where !candidate.contains("/") {
             let options = PHFetchOptions()
-            options.fetchLimit = 1
+            options.fetchLimit = 5
             options.predicate = NSPredicate(format: "localIdentifier BEGINSWITH %@", "\(candidate)/")
             let prefixFetch = PHAsset.fetchAssets(with: options)
-            if let prefixMatch = prefixFetch.firstObject {
+            if let prefixMatch = firstMatchingAsset(in: prefixFetch, mediaType: mediaType) {
                 return prefixMatch
             }
         }
@@ -1010,7 +1066,7 @@ public actor PhotosAppleScriptClient: PhotosWriter, PhotosProcessMonitoring, Pho
             guard seen.insert(id).inserted else { continue }
 
             let candidates = photoIdentifierCandidates(from: id)
-            guard let asset = resolvePhotoAsset(identifierCandidates: candidates),
+            guard let asset = resolveAsset(identifierCandidates: candidates),
                   let modificationDate = asset.modificationDate
             else {
                 continue
@@ -1019,6 +1075,25 @@ public actor PhotosAppleScriptClient: PhotosWriter, PhotosProcessMonitoring, Pho
         }
 
         return datesByID
+    }
+
+    private func firstMatchingAsset(
+        in result: PHFetchResult<PHAsset>,
+        mediaType: PHAssetMediaType?
+    ) -> PHAsset? {
+        guard let mediaType else {
+            return result.firstObject
+        }
+
+        var matched: PHAsset?
+        result.enumerateObjects { asset, _, stop in
+            guard asset.mediaType == mediaType else {
+                return
+            }
+            matched = asset
+            stop.pointee = true
+        }
+        return matched
     }
 
     enum PreviewRequestDecision: Equatable {
@@ -1059,6 +1134,31 @@ public actor PhotosAppleScriptClient: PhotosWriter, PhotosProcessMonitoring, Pho
             ScriptTimeout.exportPhotoAsset
         case .video:
             ScriptTimeout.exportVideoAsset
+        }
+    }
+
+    static func preferredVideoExportFileType(from supportedTypes: [AVFileType]) -> AVFileType? {
+        for candidate in [AVFileType.mov, .mp4, .m4v] where supportedTypes.contains(candidate) {
+            return candidate
+        }
+        return supportedTypes.first
+    }
+
+    static func shouldFallbackToAppleScriptAfterFrameworkVideoAcquireFailure(_ error: Error) -> Bool {
+        guard let photosError = error as? PhotosAppleScriptError else {
+            return true
+        }
+
+        switch photosError {
+        case let .scriptTimedOut(operation, _):
+            let normalizedOperation = operation.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            return ![
+                "download video asset",
+                "prepare video export session",
+                "export video asset"
+            ].contains(normalizedOperation)
+        case .scriptFailed, .noExportedFileFound:
+            return true
         }
     }
 
@@ -1114,6 +1214,279 @@ public actor PhotosAppleScriptClient: PhotosWriter, PhotosProcessMonitoring, Pho
                     resumeOnce(nil)
                 }
             }
+        }
+    }
+
+    private func requestVideoAsset(
+        for asset: PHAsset,
+        options: PHVideoRequestOptions,
+        timeoutSeconds: TimeInterval
+    ) async throws -> AVAsset {
+        try await withCheckedThrowingContinuation { continuation in
+            let manager = PHImageManager.default()
+            let lock = NSLock()
+            var didResume = false
+            var requestID: PHImageRequestID = PHInvalidImageRequestID
+
+            func resumeOnce(with result: Result<AVAsset, Error>) {
+                lock.lock()
+                guard !didResume else {
+                    lock.unlock()
+                    return
+                }
+                didResume = true
+                let activeRequestID = requestID
+                lock.unlock()
+
+                if activeRequestID != PHInvalidImageRequestID {
+                    manager.cancelImageRequest(activeRequestID)
+                }
+
+                switch result {
+                case let .success(asset):
+                    continuation.resume(returning: asset)
+                case let .failure(error):
+                    continuation.resume(throwing: error)
+                }
+            }
+
+            let timeoutWork = DispatchWorkItem {
+                resumeOnce(
+                    with: .failure(
+                        PhotosAppleScriptError.scriptTimedOut(
+                            operation: "download video asset",
+                            timeoutSeconds: Int(timeoutSeconds.rounded())
+                        )
+                    )
+                )
+            }
+            DispatchQueue.global(qos: .utility).asyncAfter(
+                deadline: .now() + max(1, timeoutSeconds),
+                execute: timeoutWork
+            )
+
+            requestID = manager.requestAVAsset(forVideo: asset, options: options) { avAsset, _, info in
+                if ((info?[PHImageCancelledKey] as? NSNumber)?.boolValue) == true {
+                    timeoutWork.cancel()
+                    resumeOnce(
+                        with: .failure(
+                            PhotosAppleScriptError.scriptFailed(message: "Video request was cancelled.")
+                        )
+                    )
+                    return
+                }
+
+                if let error = info?[PHImageErrorKey] as? Error {
+                    timeoutWork.cancel()
+                    resumeOnce(with: .failure(error))
+                    return
+                }
+
+                guard let avAsset else {
+                    timeoutWork.cancel()
+                    let isInCloud = ((info?[PHImageResultIsInCloudKey] as? NSNumber)?.boolValue) ?? false
+                    let message = isInCloud
+                        ? "Video is still in iCloud after requesting a download."
+                        : "Photos did not provide a video asset."
+                    resumeOnce(with: .failure(PhotosAppleScriptError.scriptFailed(message: message)))
+                    return
+                }
+
+                timeoutWork.cancel()
+                resumeOnce(with: .success(avAsset))
+            }
+        }
+    }
+
+    private func exportRequestedVideoAsset(
+        _ asset: PHAsset,
+        options: PHVideoRequestOptions,
+        assetID: String
+    ) async throws -> URL {
+        for presetName in [AVAssetExportPresetPassthrough, AVAssetExportPresetHighestQuality] {
+            guard let exportSession = try await requestVideoExportSession(
+                for: asset,
+                options: options,
+                presetName: presetName,
+                timeoutSeconds: ScriptTimeout.prepareVideoExportSession
+            ) else {
+                continue
+            }
+
+            guard let outputFileType = Self.preferredVideoExportFileType(from: exportSession.rawValue.supportedFileTypes) else {
+                continue
+            }
+
+            let outputURL = try makeTemporaryVideoOutputURL(
+                assetID: assetID,
+                fileExtension: Self.fileExtension(for: outputFileType)
+            )
+
+            do {
+                return try await exportVideoAsset(
+                    using: exportSession,
+                    outputURL: outputURL,
+                    outputFileType: outputFileType,
+                    timeoutSeconds: ScriptTimeout.exportPreparedVideoAsset
+                )
+            } catch {
+                try? fileManager.removeItem(at: outputURL.deletingLastPathComponent())
+                throw error
+            }
+        }
+
+        throw PhotosAppleScriptError.scriptFailed(message: "Photos could not prepare a compatible video export session.")
+    }
+
+    private func requestVideoExportSession(
+        for asset: PHAsset,
+        options: PHVideoRequestOptions,
+        presetName: String,
+        timeoutSeconds: TimeInterval
+    ) async throws -> UncheckedExportSession? {
+        try await withCheckedThrowingContinuation { continuation in
+            let manager = PHImageManager.default()
+            let lock = NSLock()
+            var didResume = false
+            var requestID: PHImageRequestID = PHInvalidImageRequestID
+
+            func resumeOnce(with result: Result<UncheckedExportSession?, Error>) {
+                lock.lock()
+                guard !didResume else {
+                    lock.unlock()
+                    return
+                }
+                didResume = true
+                let activeRequestID = requestID
+                lock.unlock()
+
+                if activeRequestID != PHInvalidImageRequestID {
+                    manager.cancelImageRequest(activeRequestID)
+                }
+
+                switch result {
+                case let .success(exportSession):
+                    continuation.resume(returning: exportSession)
+                case let .failure(error):
+                    continuation.resume(throwing: error)
+                }
+            }
+
+            let timeoutWork = DispatchWorkItem {
+                resumeOnce(
+                    with: .failure(
+                        PhotosAppleScriptError.scriptTimedOut(
+                            operation: "prepare video export session",
+                            timeoutSeconds: Int(timeoutSeconds.rounded())
+                        )
+                    )
+                )
+            }
+            DispatchQueue.global(qos: .utility).asyncAfter(
+                deadline: .now() + max(1, timeoutSeconds),
+                execute: timeoutWork
+            )
+
+            requestID = manager.requestExportSession(
+                forVideo: asset,
+                options: options,
+                exportPreset: presetName
+            ) { exportSession, info in
+                if ((info?[PHImageCancelledKey] as? NSNumber)?.boolValue) == true {
+                    timeoutWork.cancel()
+                    resumeOnce(
+                        with: .failure(
+                            PhotosAppleScriptError.scriptFailed(message: "Video export-session request was cancelled.")
+                        )
+                    )
+                    return
+                }
+
+                if let error = info?[PHImageErrorKey] as? Error {
+                    timeoutWork.cancel()
+                    resumeOnce(with: .failure(error))
+                    return
+                }
+
+                timeoutWork.cancel()
+                let wrappedSession = exportSession.map { UncheckedExportSession(rawValue: $0) }
+                resumeOnce(with: .success(wrappedSession))
+            }
+        }
+    }
+
+    private func exportVideoAsset(
+        using exportSession: UncheckedExportSession,
+        outputURL: URL,
+        outputFileType: AVFileType,
+        timeoutSeconds: TimeInterval
+    ) async throws -> URL {
+        let sendableSession = exportSession
+        sendableSession.rawValue.shouldOptimizeForNetworkUse = false
+
+        let timeoutNanoseconds = UInt64(max(1, (timeoutSeconds * 1_000_000_000).rounded()))
+
+        return try await withThrowingTaskGroup(of: URL.self) { group in
+            group.addTask {
+                try await withTaskCancellationHandler(operation: {
+                    try await sendableSession.rawValue.export(to: outputURL, as: outputFileType)
+                    return outputURL
+                }, onCancel: {
+                    sendableSession.rawValue.cancelExport()
+                })
+            }
+
+            group.addTask {
+                try await Task.sleep(nanoseconds: timeoutNanoseconds)
+                throw PhotosAppleScriptError.scriptTimedOut(
+                    operation: "export video asset",
+                    timeoutSeconds: Int(timeoutSeconds.rounded())
+                )
+            }
+
+            let result = try await group.next()!
+            group.cancelAll()
+            return result
+        }
+    }
+
+    private func stageVideoAssetFile(from sourceURL: URL, assetID: String) throws -> URL {
+        let pathExtension = sourceURL.pathExtension.isEmpty ? "mov" : sourceURL.pathExtension
+        let outputURL = try makeTemporaryVideoOutputURL(assetID: assetID, fileExtension: pathExtension)
+        do {
+            try fileManager.copyItem(at: sourceURL, to: outputURL)
+            return outputURL
+        } catch {
+            try? fileManager.removeItem(at: outputURL.deletingLastPathComponent())
+            throw error
+        }
+    }
+
+    private func makeTemporaryVideoOutputURL(assetID: String, fileExtension: String) throws -> URL {
+        let exportRoot = fileManager.temporaryDirectory
+            .appendingPathComponent("PhotoDescriptionCreatorVideoExports", isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try fileManager.createDirectory(at: exportRoot, withIntermediateDirectories: true)
+
+        let sanitizedID = assetID
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: ":", with: "_")
+        let basename = sanitizedID.isEmpty ? "video" : sanitizedID
+        let normalizedExtension = fileExtension.trimmingCharacters(in: .whitespacesAndNewlines)
+        let filename = normalizedExtension.isEmpty ? basename : "\(basename).\(normalizedExtension)"
+        return exportRoot.appendingPathComponent(filename)
+    }
+
+    private static func fileExtension(for fileType: AVFileType) -> String {
+        switch fileType {
+        case .mov:
+            return "mov"
+        case .mp4:
+            return "mp4"
+        case .m4v:
+            return "m4v"
+        default:
+            return "mov"
         }
     }
 

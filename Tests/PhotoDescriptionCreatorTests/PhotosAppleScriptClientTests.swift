@@ -97,6 +97,33 @@ final class PhotosAppleScriptClientTests: XCTestCase {
         XCTAssertEqual(PhotosAppleScriptClient.exportAssetTimeout(for: .video), 300)
     }
 
+    func testPreferredVideoExportFileTypePrefersCommonFormats() {
+        let preferred = PhotosAppleScriptClient.preferredVideoExportFileType(
+            from: [AVFileType.m4v, .mp4]
+        )
+
+        XCTAssertEqual(preferred, .mp4)
+    }
+
+    func testFrameworkVideoAcquireTimeoutDoesNotFallbackToAppleScript() {
+        let error = PhotosAppleScriptError.scriptTimedOut(
+            operation: "download video asset",
+            timeoutSeconds: 900
+        )
+
+        XCTAssertFalse(
+            PhotosAppleScriptClient.shouldFallbackToAppleScriptAfterFrameworkVideoAcquireFailure(error)
+        )
+    }
+
+    func testFrameworkVideoAcquireNonTimeoutFailureFallsBackToAppleScript() {
+        let error = PhotosAppleScriptError.scriptFailed(message: "Video request was cancelled.")
+
+        XCTAssertTrue(
+            PhotosAppleScriptClient.shouldFallbackToAppleScriptAfterFrameworkVideoAcquireFailure(error)
+        )
+    }
+
     func testWaitForConditionReturnsTrueBeforeTimeout() async {
         let result = await PhotosAppleScriptClient.waitForCondition(
             timeoutSeconds: 0.05,
