@@ -46,6 +46,10 @@ actor ExperimentalPhotoKitScanReader {
         return assets
     }
 
+    func canResolveAlbum(id: String) async -> Bool {
+        resolveAlbumCollection(id: id) != nil
+    }
+
     static func identifierCandidates(from rawID: String) -> [String] {
         let trimmed = rawID.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return [] }

@@ -82,6 +82,7 @@ enum PhotoLibraryScanBenchmarkOutcome {
 struct PhotoLibraryScanBenchmarkCompletedRun {
     let report: PhotoKitScanBenchmarkReport
     let reportURL: URL
+    let notices: [String]
 }
 
 actor PhotoLibraryScanBenchmarkRunner {
@@ -121,7 +122,11 @@ actor PhotoLibraryScanBenchmarkRunner {
 
         await reportProgress("Checking benchmark scopes...", using: progressHandler)
         var scopePlans: [PhotoLibraryBenchmarkScopePlan] = [.library]
-        if let albumScope = try await discoverAlbumScope(configuration: configuration) {
+        let discoveredAlbumScope = try await discoverAlbumScope(configuration: configuration)
+        if let notice = discoveredAlbumScope.notice {
+            await reportProgress(notice, using: progressHandler)
+        }
+        if let albumScope = discoveredAlbumScope.scope {
             scopePlans.append(albumScope)
             await reportProgress(
                 "Benchmarking whole library plus album “\(albumScope.label)” (\(configuration.sampleDescription)).",
@@ -143,7 +148,8 @@ actor PhotoLibraryScanBenchmarkRunner {
         return .completed(
             PhotoLibraryScanBenchmarkCompletedRun(
                 report: report,
-                reportURL: reportURL
+                reportURL: reportURL,
+                notices: discoveredAlbumScope.notice.map { [$0] } ?? []
             )
         )
     }
@@ -489,28 +495,44 @@ actor PhotoLibraryScanBenchmarkRunner {
 
     private func discoverAlbumScope(
         configuration: PhotoLibraryScanBenchmarkConfiguration
-    ) async throws -> PhotoLibraryBenchmarkScopePlan? {
+    ) async throws -> PhotoLibraryBenchmarkScopeDiscovery {
         if let configuredAlbumID = configuration.configuredAlbumID {
-            return PhotoLibraryBenchmarkScopePlan(
+            let configuredScope = PhotoLibraryBenchmarkScopePlan(
                 label: configuration.configuredAlbumName ?? "Configured Album",
                 description: "album(\(configuredAlbumID))",
                 scope: .album(id: configuredAlbumID)
             )
+            guard await photoKitReader.canResolveAlbum(id: configuredAlbumID) else {
+                return PhotoLibraryBenchmarkScopeDiscovery(
+                    scope: nil,
+                    notice: "Skipping configured album benchmark because PhotoKit could not resolve album id \(configuredAlbumID)."
+                )
+            }
+            return PhotoLibraryBenchmarkScopeDiscovery(scope: configuredScope, notice: nil)
         }
 
         let albums = try await appleScriptClient.listUserAlbums()
         for album in albums.prefix(10) {
             let count = try await appleScriptClient.count(scope: .album(id: album.id))
             if count > 0 {
-                return PhotoLibraryBenchmarkScopePlan(
-                    label: album.name,
-                    description: "album(\(album.id))",
-                    scope: .album(id: album.id)
+                guard await photoKitReader.canResolveAlbum(id: album.id) else {
+                    continue
+                }
+                return PhotoLibraryBenchmarkScopeDiscovery(
+                    scope: PhotoLibraryBenchmarkScopePlan(
+                        label: album.name,
+                        description: "album(\(album.id))",
+                        scope: .album(id: album.id)
+                    ),
+                    notice: nil
                 )
             }
         }
 
-        return nil
+        return PhotoLibraryBenchmarkScopeDiscovery(
+            scope: nil,
+            notice: "Skipping album benchmark because no AppleScript album in the sampled set could be resolved by the experimental PhotoKit reader."
+        )
     }
 
     private func writeReport(_ report: PhotoKitScanBenchmarkReport) throws -> URL {
@@ -603,6 +625,11 @@ private struct PhotoLibraryBenchmarkScopePlan {
         description: "library",
         scope: .library
     )
+}
+
+private struct PhotoLibraryBenchmarkScopeDiscovery {
+    let scope: PhotoLibraryBenchmarkScopePlan?
+    let notice: String?
 }
 
 private struct PhotoLibraryBenchmarkTimedValue<T> {

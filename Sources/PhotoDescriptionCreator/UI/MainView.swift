@@ -534,10 +534,17 @@ final class AppViewModel: ObservableObject {
             switch outcome {
             case let .completed(run):
                 benchmarkStatusMessage = "Scan benchmark report: \(run.reportURL.lastPathComponent)"
+                let noticeText = run.notices.joined(separator: "\n")
                 let summaries = run.report.scopes.map(\.summaryLine).joined(separator: "\n")
                 showMessage(
                     title: "Scan Benchmark Complete",
-                    message: "Report saved to:\n\(run.reportURL.path)\n\n\(summaries)"
+                    message: [
+                        "Report saved to:\n\(run.reportURL.path)",
+                        noticeText.isEmpty ? nil : noticeText,
+                        summaries
+                    ]
+                    .compactMap { $0 }
+                    .joined(separator: "\n\n")
                 )
             case let .skipped(reason):
                 benchmarkStatusMessage = "Scan benchmark skipped."

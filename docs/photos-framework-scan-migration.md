@@ -41,6 +41,7 @@
 - Default test suite keeps the benchmark skipped.
 - The app now exposes an app-hosted benchmark entry under `Diagnostics > Run Scan Benchmark`.
 - The app-hosted benchmark now requests Photos access if needed and defaults to the first `1000` assets per scope so large libraries finish in a reasonable time.
+- If the optional album sample cannot be mapped from the AppleScript album ID to a PhotoKit collection, the benchmark now reports that and continues with the whole-library comparison instead of aborting.
 - Prefer the app-hosted path on this machine, because it uses the existing `Photo Description Creator.app` Photos and Automation permissions.
 - Enable the real-library benchmark with:
 
