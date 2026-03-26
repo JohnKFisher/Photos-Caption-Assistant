@@ -1,10 +1,10 @@
 # Photo Description Creator
 
-Current version/build: 2.4 (6)
+Current version/build: 2.4 (9)
 Current description logic version: 3.0.0
 
 Current overall status:
-The current source tree builds as version 2.4 build 6 with description logic 3.0.0. The current durable known-good anchor is the March 22, 2026 caption-workflow baseline listed below.
+The current source tree builds as version 2.4 build 9 with description logic 3.0.0. The current durable known-good anchor is the March 26, 2026 fast-scan pipeline baseline listed below.
 
 What is working now:
 - Local photo and video analysis through Ollama with the `qwen2.5vl:7b` model.
@@ -20,8 +20,11 @@ What is working now:
 - Future builds from this source baseline now embed the current prompt files and use prompt logic 3.0.0.
 - Launch-time capability checks now surface denied Photos automation immediately so unattended restart runs are less likely to stall later on a hidden permission prompt.
 - Video analysis now selects three ordered key frames from a larger candidate set using time coverage plus lightweight visual-difference scoring.
+- Cloud-backed videos now try a Photos-framework acquire/export path before falling back to AppleScript, so longer iCloud movies are less likely to die at the old fixed AppleScript export timeout.
 - The run pipeline now defaults to one in-flight LLM analysis with bounded prepare-ahead overlap so the next asset can be readied without competing model calls.
 - Analyzer-ready payloads are now prepared ahead of the LLM handoff when the analyzer supports it, so image encoding and video frame packaging can overlap with the current analysis.
+- Fast photo analysis now keeps the preview JPEG in memory until analysis completes instead of writing a temp file and reading it back immediately.
+- Ordered overwrite gating now starts acquisition/analysis as soon as each active-window asset clears metadata checks, instead of waiting for the whole active window to finish eligibility gating first.
 - Completion preview rendering is now deferred off the metadata-write critical path with a small bounded backlog.
 - The immersive preview now shows the same run counters as the main progress view, includes source context for each completed item, and uses backlog-aware `30s / 10s / sampled` display timing without slowing the processing pipeline.
 - The cancel button now switches to `Canceling` after a cancel request is acknowledged while the current stage drains safely.
@@ -42,9 +45,10 @@ Known limitations and trust warnings:
 - The `Caption Workflow` source now depends on saved queue-item album mappings; if a selected album is deleted or recreated under a new ID, that queue item must be repaired in the setup UI before the run can start.
 - The `Caption Workflow` source re-queries each configured queue item and may briefly wait/retry when Photos is slow to update the next smart album, so queue handoffs are a little more defensive than the normal fast library/album modes.
 - The `Caption Workflow` fast-start path now trades a little more queue-refresh overhead for earlier visible progress; ordered traversal modes still use the slower full-queue snapshot path.
+- Ordered active-window scans now stream earlier, but metadata writes still flush in batches and later windows still rely on the existing bounded metadata prefetch machinery.
 - If the immersive preview backlog grows past 60 queued items, it samples the queue to stay reasonably current instead of showing every completed image in strict order.
 - Video-analysis throughput may vary modestly with clip format because key-frame selection now evaluates a larger candidate set before sending frames to the model.
-- Metadata writes still happen after each analyzed window, so the pipeline is only partially streamed end to end even though preview generation now overlaps later writes.
+- Metadata writes still happen after each analyzed chunk, so the pipeline is only partially streamed end to end even though acquisition, preparation, analysis, and preview generation overlap more than before.
 - The internal metadata ownership logic version in code is currently separate from the app marketing version.
 - The logic version major bump to 3.0.0 will cause previously app-owned 2.x metadata to be treated as older and eligible for overwrite under the usual ownership rules.
 - This repo started a fresh baseline on March 14, 2026; earlier rollback points should be treated cautiously.
@@ -67,4 +71,4 @@ Recommended next priorities:
 - Add a small, repeatable smoke-test workflow for known-good verification before future anchors.
 
 Most recent durable known-good anchor:
-- `known-good/20260322-v2-4-caption-workflow-fast-start`
+- `known-good/20260326-v2-4-fast-scan-pipeline`
