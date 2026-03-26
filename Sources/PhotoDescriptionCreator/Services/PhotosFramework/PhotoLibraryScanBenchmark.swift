@@ -2,6 +2,9 @@ import Foundation
 import Photos
 
 struct PhotoLibraryScanBenchmarkConfiguration: Sendable, Equatable {
+    static let defaultPageSizes = [250, 128, 64]
+    static let defaultMaxItems = 1000
+
     let pageSizes: [Int]
     let warmIterations: Int
     let maxItems: Int?
@@ -16,17 +19,17 @@ struct PhotoLibraryScanBenchmarkConfiguration: Sendable, Equatable {
         configuredAlbumName: String? = nil
     ) {
         let normalizedPageSizes = pageSizes.filter { $0 > 0 }
-        self.pageSizes = normalizedPageSizes.isEmpty ? [250, 128, 64] : normalizedPageSizes
+        self.pageSizes = normalizedPageSizes.isEmpty ? Self.defaultPageSizes : normalizedPageSizes
         self.warmIterations = max(0, warmIterations)
         self.maxItems = maxItems.flatMap { $0 > 0 ? $0 : nil }
         self.configuredAlbumID = Self.normalized(configuredAlbumID)
         self.configuredAlbumName = Self.normalized(configuredAlbumName)
     }
 
-    static let appHostedDefault = PhotoLibraryScanBenchmarkConfiguration()
+    static let appHostedDefault = PhotoLibraryScanBenchmarkConfiguration(maxItems: defaultMaxItems)
 
     static func fromEnvironment(_ environment: [String: String]) -> PhotoLibraryScanBenchmarkConfiguration {
-        let rawPageSizes = environment["PDC_BENCHMARK_PAGE_SIZES"] ?? "250,128,64"
+        let rawPageSizes = environment["PDC_BENCHMARK_PAGE_SIZES"] ?? defaultPageSizes.map(String.init).joined(separator: ",")
         let parsedPageSizes = rawPageSizes
             .split(separator: ",")
             .compactMap { Int($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
@@ -34,10 +37,17 @@ struct PhotoLibraryScanBenchmarkConfiguration: Sendable, Equatable {
         return PhotoLibraryScanBenchmarkConfiguration(
             pageSizes: parsedPageSizes,
             warmIterations: Int(environment["PDC_BENCHMARK_WARM_ITERATIONS"] ?? "1") ?? 1,
-            maxItems: Int(environment["PDC_BENCHMARK_MAX_ITEMS"] ?? ""),
+            maxItems: maxItems(from: environment["PDC_BENCHMARK_MAX_ITEMS"]),
             configuredAlbumID: environment["PDC_BENCHMARK_ALBUM_ID"],
             configuredAlbumName: environment["PDC_BENCHMARK_ALBUM_NAME"]
         )
+    }
+
+    var sampleDescription: String {
+        if let maxItems {
+            return "first \(maxItems) assets per scope"
+        }
+        return "full scope"
     }
 
     private static func normalized(_ value: String?) -> String? {
@@ -45,6 +55,22 @@ struct PhotoLibraryScanBenchmarkConfiguration: Sendable, Equatable {
             return nil
         }
         return trimmed
+    }
+
+    private static func maxItems(from rawValue: String?) -> Int? {
+        guard let normalized = normalized(rawValue) else {
+            return defaultMaxItems
+        }
+
+        switch normalized.lowercased() {
+        case "full", "all", "none", "unlimited":
+            return nil
+        default:
+            guard let parsed = Int(normalized) else {
+                return defaultMaxItems
+            }
+            return parsed > 0 ? parsed : nil
+        }
     }
 }
 
@@ -59,6 +85,8 @@ struct PhotoLibraryScanBenchmarkCompletedRun {
 }
 
 actor PhotoLibraryScanBenchmarkRunner {
+    typealias ProgressHandler = @Sendable (String) async -> Void
+
     private let appleScriptClient: PhotosAppleScriptClient
     private let photoKitReader: ExperimentalPhotoKitScanReader
     private let fileManager: FileManager
@@ -74,25 +102,42 @@ actor PhotoLibraryScanBenchmarkRunner {
     }
 
     func run(
-        configuration: PhotoLibraryScanBenchmarkConfiguration = .appHostedDefault
+        configuration: PhotoLibraryScanBenchmarkConfiguration = .appHostedDefault,
+        progressHandler: ProgressHandler? = nil
     ) async throws -> PhotoLibraryScanBenchmarkOutcome {
         let authorizationStatus = PHPhotoLibrary.authorizationStatus(for: .readWrite)
         guard authorizationStatus == .authorized || authorizationStatus == .limited else {
             return .skipped("Photos library access is unavailable for this process (status=\(authorizationStatus.rawValue)).")
         }
 
+        await reportProgress(
+            "Preparing scan benchmark (\(configuration.sampleDescription))...",
+            using: progressHandler
+        )
+
         guard await appleScriptClient.verifyAutomationAccess() else {
             return .skipped("Photos automation access is unavailable for this process.")
         }
 
+        await reportProgress("Checking benchmark scopes...", using: progressHandler)
         var scopePlans: [PhotoLibraryBenchmarkScopePlan] = [.library]
         if let albumScope = try await discoverAlbumScope(configuration: configuration) {
             scopePlans.append(albumScope)
+            await reportProgress(
+                "Benchmarking whole library plus album “\(albumScope.label)” (\(configuration.sampleDescription)).",
+                using: progressHandler
+            )
+        } else {
+            await reportProgress(
+                "Benchmarking whole library only (\(configuration.sampleDescription)).",
+                using: progressHandler
+            )
         }
 
         let report = try await buildReport(
             scopePlans: scopePlans,
-            configuration: configuration
+            configuration: configuration,
+            progressHandler: progressHandler
         )
         let reportURL = try writeReport(report)
         return .completed(
@@ -105,7 +150,8 @@ actor PhotoLibraryScanBenchmarkRunner {
 
     private func buildReport(
         scopePlans: [PhotoLibraryBenchmarkScopePlan],
-        configuration: PhotoLibraryScanBenchmarkConfiguration
+        configuration: PhotoLibraryScanBenchmarkConfiguration,
+        progressHandler: ProgressHandler?
     ) async throws -> PhotoKitScanBenchmarkReport {
         let backends = [
             PhotoLibraryBenchmarkBackend(
@@ -130,7 +176,8 @@ actor PhotoLibraryScanBenchmarkRunner {
                 try await benchmarkScope(
                     scopePlan: scopePlan,
                     configuration: configuration,
-                    backends: backends
+                    backends: backends,
+                    progressHandler: progressHandler
                 )
             )
         }
@@ -147,17 +194,26 @@ actor PhotoLibraryScanBenchmarkRunner {
     private func benchmarkScope(
         scopePlan: PhotoLibraryBenchmarkScopePlan,
         configuration: PhotoLibraryScanBenchmarkConfiguration,
-        backends: [PhotoLibraryBenchmarkBackend]
+        backends: [PhotoLibraryBenchmarkBackend],
+        progressHandler: ProgressHandler?
     ) async throws -> PhotoKitScanBenchmarkScopeReport {
         var countMeasurements: [String: PhotoKitScanBenchmarkOperationMeasurement<Int>] = [:]
         var firstAssetMeasurements: [String: PhotoKitScanBenchmarkOperationMeasurement<Int>] = [:]
         var firstPageMeasurements: [String: PhotoKitScanBenchmarkOperationMeasurement<Int>] = [:]
 
         for backend in backends {
+            await reportProgress(
+                "\(scopePlan.label): \(backend.name) count...",
+                using: progressHandler
+            )
             countMeasurements[backend.name] = try await measureCount(
                 backend: backend,
                 scope: scopePlan.scope,
                 warmIterations: configuration.warmIterations
+            )
+            await reportProgress(
+                "\(scopePlan.label): \(backend.name) first asset...",
+                using: progressHandler
             )
             firstAssetMeasurements[backend.name] = try await measureEnumerateCall(
                 backend: backend,
@@ -165,6 +221,10 @@ actor PhotoLibraryScanBenchmarkRunner {
                 offset: 0,
                 limit: 1,
                 warmIterations: configuration.warmIterations
+            )
+            await reportProgress(
+                "\(scopePlan.label): \(backend.name) first page (\(configuration.pageSizes[0]))...",
+                using: progressHandler
             )
             firstPageMeasurements[backend.name] = try await measureEnumerateCall(
                 backend: backend,
@@ -179,19 +239,31 @@ actor PhotoLibraryScanBenchmarkRunner {
         var fullScanMeasurements: [String: PhotoKitScanBenchmarkFullScanMeasurement] = [:]
 
         for (index, pageSize) in configuration.pageSizes.enumerated() {
+            await reportProgress(
+                "\(scopePlan.label): AppleScript parity scan page size \(pageSize) (\(progressLimitText(configuration.maxItems))).",
+                using: progressHandler
+            )
             let appleScriptScan = try await scanAllAssets(
                 backend: backends[0],
                 scope: scopePlan.scope,
                 pageSize: pageSize,
                 warmIterations: index == 0 ? configuration.warmIterations : 0,
-                maxItems: configuration.maxItems
+                maxItems: configuration.maxItems,
+                scopeLabel: scopePlan.label,
+                progressHandler: progressHandler
+            )
+            await reportProgress(
+                "\(scopePlan.label): PhotoKit parity scan page size \(pageSize) (\(progressLimitText(configuration.maxItems))).",
+                using: progressHandler
             )
             let photoKitScan = try await scanAllAssets(
                 backend: backends[1],
                 scope: scopePlan.scope,
                 pageSize: pageSize,
                 warmIterations: index == 0 ? configuration.warmIterations : 0,
-                maxItems: configuration.maxItems
+                maxItems: configuration.maxItems,
+                scopeLabel: scopePlan.label,
+                progressHandler: progressHandler
             )
 
             if index == 0 {
@@ -310,13 +382,17 @@ actor PhotoLibraryScanBenchmarkRunner {
         scope: ScopeSource,
         pageSize: Int,
         warmIterations: Int,
-        maxItems: Int?
+        maxItems: Int?,
+        scopeLabel: String,
+        progressHandler: ProgressHandler?
     ) async throws -> PhotoLibraryBenchmarkScanResult {
         let cold = try await measureFullScan(
             backend: backend,
             scope: scope,
             pageSize: pageSize,
-            maxItems: maxItems
+            maxItems: maxItems,
+            scopeLabel: scopeLabel,
+            progressHandler: progressHandler
         )
 
         var warmSeconds: [Double] = []
@@ -325,7 +401,9 @@ actor PhotoLibraryScanBenchmarkRunner {
                 backend: backend,
                 scope: scope,
                 pageSize: pageSize,
-                maxItems: maxItems
+                maxItems: maxItems,
+                scopeLabel: scopeLabel,
+                progressHandler: nil
             )
             warmSeconds.append(warm.measurement.coldSeconds)
         }
@@ -347,7 +425,9 @@ actor PhotoLibraryScanBenchmarkRunner {
         backend: PhotoLibraryBenchmarkBackend,
         scope: ScopeSource,
         pageSize: Int,
-        maxItems: Int?
+        maxItems: Int?,
+        scopeLabel: String,
+        progressHandler: ProgressHandler?
     ) async throws -> PhotoLibraryBenchmarkScanResult {
         let memoryBefore = currentResidentMemoryBytes()
         let started = DispatchTime.now().uptimeNanoseconds
@@ -355,6 +435,7 @@ actor PhotoLibraryScanBenchmarkRunner {
         var assets: [MediaAsset] = []
         var offset = 0
         var timeoutCount = 0
+        let progressInterval = max(1, min(pageSize, maxItems ?? pageSize))
 
         while true {
             do {
@@ -364,8 +445,18 @@ actor PhotoLibraryScanBenchmarkRunner {
                 }
                 assets.append(contentsOf: page)
                 offset += page.count
+                if !assets.isEmpty, assets.count % progressInterval == 0 || page.count < pageSize {
+                    await reportProgress(
+                        "\(scopeLabel): \(backend.name) scanned \(assets.count)\(progressLimitSuffix(maxItems))...",
+                        using: progressHandler
+                    )
+                }
                 if let maxItems, assets.count >= maxItems {
                     assets = Array(assets.prefix(maxItems))
+                    await reportProgress(
+                        "\(scopeLabel): \(backend.name) reached cap at \(assets.count) assets.",
+                        using: progressHandler
+                    )
                     break
                 }
             } catch {
@@ -472,6 +563,27 @@ actor PhotoLibraryScanBenchmarkRunner {
             return nil
         }
         return kilobytes * 1024
+    }
+
+    private func reportProgress(
+        _ message: String,
+        using progressHandler: ProgressHandler?
+    ) async {
+        await progressHandler?(message)
+    }
+
+    private func progressLimitText(_ maxItems: Int?) -> String {
+        if let maxItems {
+            return "first \(maxItems)"
+        }
+        return "full scope"
+    }
+
+    private func progressLimitSuffix(_ maxItems: Int?) -> String {
+        if let maxItems {
+            return " of ~\(maxItems)"
+        }
+        return ""
     }
 }
 

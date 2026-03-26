@@ -1,4 +1,5 @@
 import AppKit
+import Photos
 import SwiftUI
 
 private enum VersionDisplay {
@@ -507,13 +508,29 @@ final class AppViewModel: ObservableObject {
         guard !isRunning, !isPreparingModel, !isRunningScanBenchmark else { return }
 
         isRunningScanBenchmark = true
-        benchmarkStatusMessage = "Running PhotoKit scan benchmark..."
+        benchmarkStatusMessage = "Preparing scan benchmark..."
         defer {
             isRunningScanBenchmark = false
         }
 
         do {
-            let outcome = try await scanBenchmarkRunner.run()
+            let authorizationStatus = await requestPhotoLibraryAccessIfNeeded()
+            guard authorizationStatus == .authorized || authorizationStatus == .limited else {
+                benchmarkStatusMessage = "Scan benchmark skipped."
+                showMessage(
+                    title: "Scan Benchmark Skipped",
+                    message: "Photos library access was not granted (status=\(authorizationStatus.rawValue))."
+                )
+                return
+            }
+
+            let configuration = PhotoLibraryScanBenchmarkConfiguration.appHostedDefault
+            benchmarkStatusMessage = "Running scan benchmark on the \(configuration.sampleDescription)..."
+            let outcome = try await scanBenchmarkRunner.run(configuration: configuration) { [weak self] message in
+                await MainActor.run {
+                    self?.benchmarkStatusMessage = message
+                }
+            }
             switch outcome {
             case let .completed(run):
                 benchmarkStatusMessage = "Scan benchmark report: \(run.reportURL.lastPathComponent)"
@@ -535,6 +552,20 @@ final class AppViewModel: ObservableObject {
                 title: "Scan Benchmark Failed",
                 message: error.localizedDescription
             )
+        }
+    }
+
+    private func requestPhotoLibraryAccessIfNeeded() async -> PHAuthorizationStatus {
+        let currentStatus = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+        guard currentStatus == .notDetermined else {
+            return currentStatus
+        }
+
+        benchmarkStatusMessage = "Waiting for Photos library access..."
+        return await withCheckedContinuation { continuation in
+            PHPhotoLibrary.requestAuthorization(for: .readWrite) { status in
+                continuation.resume(returning: status)
+            }
         }
     }
 

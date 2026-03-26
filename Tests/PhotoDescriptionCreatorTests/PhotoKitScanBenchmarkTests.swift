@@ -4,6 +4,19 @@ import XCTest
 @testable import PhotoDescriptionCreator
 
 final class PhotoKitScanBenchmarkTests: XCTestCase {
+    func testBenchmarkEnvironmentDefaultsToCappedSample() {
+        let configuration = PhotoLibraryScanBenchmarkConfiguration.fromEnvironment([:])
+        XCTAssertEqual(configuration.maxItems, PhotoLibraryScanBenchmarkConfiguration.defaultMaxItems)
+        XCTAssertEqual(configuration.pageSizes, PhotoLibraryScanBenchmarkConfiguration.defaultPageSizes)
+    }
+
+    func testBenchmarkEnvironmentAllowsFullScanOverride() {
+        let configuration = PhotoLibraryScanBenchmarkConfiguration.fromEnvironment([
+            "PDC_BENCHMARK_MAX_ITEMS": "full"
+        ])
+        XCTAssertNil(configuration.maxItems)
+    }
+
     func testExperimentalPhotoKitReaderRejectsUnsupportedScopes() async {
         let reader = ExperimentalPhotoKitScanReader()
 

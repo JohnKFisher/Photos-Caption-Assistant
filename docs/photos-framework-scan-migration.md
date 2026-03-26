@@ -40,6 +40,7 @@
 ## Running The Benchmark
 - Default test suite keeps the benchmark skipped.
 - The app now exposes an app-hosted benchmark entry under `Diagnostics > Run Scan Benchmark`.
+- The app-hosted benchmark now requests Photos access if needed and defaults to the first `1000` assets per scope so large libraries finish in a reasonable time.
 - Prefer the app-hosted path on this machine, because it uses the existing `Photo Description Creator.app` Photos and Automation permissions.
 - Enable the real-library benchmark with:
 
@@ -60,3 +61,4 @@ PDC_RUN_PHOTOS_SCAN_BENCHMARK=1 swift test --filter PhotoKitScanBenchmarkTests/t
 - The experimental PhotoKit path must never silently replace the current path in this phase.
 - If parity drifts, treat the report as evidence for further design work, not as approval to flip behavior.
 - If the plain `swift test` route lacks Photos permission, run the same benchmark from the app menu instead of changing the default app behavior.
+- For explicit deep runs, set `PDC_BENCHMARK_MAX_ITEMS=full` (or another positive integer) when using the test harness.
