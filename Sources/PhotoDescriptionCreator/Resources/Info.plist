@@ -13,7 +13,7 @@
 	<key>CFBundleShortVersionString</key>
 	<string>2.4</string>
 	<key>CFBundleVersion</key>
-	<string>13</string>
+	<string>14</string>
 	<key>NSAppleEventsUsageDescription</key>
 	<string>Photo Description Creator needs automation access to update captions and keywords in Photos.</string>
 	<key>NSPhotoLibraryUsageDescription</key>

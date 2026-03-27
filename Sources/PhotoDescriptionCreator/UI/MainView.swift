@@ -250,6 +250,7 @@ final class AppViewModel: ObservableObject {
     private var immersivePreviewTask: Task<Void, Never>?
     private var immersiveLastPreviewPresentedAt: Date?
     private var retainedPreviewFileURLs: Set<URL> = []
+    private var lastScanBenchmarkReport: PhotoKitScanBenchmarkReport?
 
     private let photosClient = PhotosAppleScriptClient()
     private let ollamaManager = OllamaManager()
@@ -542,6 +543,7 @@ final class AppViewModel: ObservableObject {
             }
             switch outcome {
             case let .completed(run):
+                lastScanBenchmarkReport = run.report
                 benchmarkStatusMessage = "Scan benchmark report: \(run.reportURL.lastPathComponent)"
                 let noticeText = run.notices.joined(separator: "\n")
                 let summaries = run.report.scopes.map(\.summaryLine).joined(separator: "\n")
@@ -569,6 +571,24 @@ final class AppViewModel: ObservableObject {
                 message: error.localizedDescription
             )
         }
+    }
+
+    func prefillIdentityProbeFromLatestBenchmark() {
+        let preferredScope = lastScanBenchmarkReport?.scopes.first(where: { $0.scopeLabel == "Whole Library" })
+            ?? lastScanBenchmarkReport?.scopes.first
+        guard let preferredScope,
+              preferredScope.identityProof.samples.count >= 2
+        else {
+            showMessage(
+                title: "No Benchmark IDs Available",
+                message: "Run the scan benchmark first, then use the sampled IDs listed in the Diagnostics section."
+            )
+            return
+        }
+
+        identityProbeSacrificialAssetID = preferredScope.identityProof.samples[0].requestedPhotoKitID
+        identityProbeControlAssetID = preferredScope.identityProof.samples[1].requestedPhotoKitID
+        identityProbeStatusMessage = "Prefilled write-probe IDs from the latest benchmark sample."
     }
 
     func runIdentityWriteProbeFromMenu() async {
@@ -664,6 +684,22 @@ final class AppViewModel: ObservableObject {
             configuredAlbumID: benchmarkAlbumOverrideID,
             configuredAlbumName: benchmarkAlbumOverrideName
         )
+    }
+
+    fileprivate var benchmarkSampleIDsText: String? {
+        guard let report = lastScanBenchmarkReport else { return nil }
+
+        let sections = report.scopes.compactMap { scope -> String? in
+            let ids = scope.identityProof.samples.prefix(12).map(\.requestedPhotoKitID)
+            guard !ids.isEmpty else { return nil }
+            let body = ids.enumerated().map { index, id in
+                "\(index + 1). \(id)"
+            }.joined(separator: "\n")
+            return "\(scope.scopeLabel)\n\(body)"
+        }
+
+        guard !sections.isEmpty else { return nil }
+        return sections.joined(separator: "\n\n")
     }
 
     private func requestPhotoLibraryAccessIfNeeded() async -> PHAuthorizationStatus {
@@ -1553,6 +1589,34 @@ struct MainView: View {
                             .textFieldStyle(.roundedBorder)
                     }
                 }
+
+                if let benchmarkSampleIDsText = viewModel.benchmarkSampleIDsText {
+                    HStack {
+                        Text("Latest Benchmark Sample IDs")
+                            .font(.caption.weight(.semibold))
+                        Spacer()
+                        Button("Use First Two For Write Probe") {
+                            viewModel.prefillIdentityProbeFromLatestBenchmark()
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(viewModel.isRunningScanBenchmark || viewModel.isRunningIdentityWriteProbe)
+                    }
+
+                    ScrollView {
+                        Text(benchmarkSampleIDsText)
+                            .font(.system(.footnote, design: .monospaced))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .textSelection(.enabled)
+                    }
+                    .frame(minHeight: 120, maxHeight: 180)
+                    .padding(10)
+                    .background(Color.secondary.opacity(0.08))
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                } else {
+                    Text("Run the scan benchmark once and the latest sampled IDs will appear here for copy/paste.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
             }
             .padding(.top, 4)
         }
@@ -1617,6 +1681,11 @@ struct DiagnosticCommands: Commands {
                 Task {
                     await viewModel.runIdentityWriteProbeFromMenu()
                 }
+            }
+            .disabled(viewModel.isRunning || viewModel.isPreparingModel || viewModel.isRunningScanBenchmark || viewModel.isRunningIdentityWriteProbe)
+
+            Button("Use Latest Benchmark IDs For Write Probe") {
+                viewModel.prefillIdentityProbeFromLatestBenchmark()
             }
             .disabled(viewModel.isRunning || viewModel.isPreparingModel || viewModel.isRunningScanBenchmark || viewModel.isRunningIdentityWriteProbe)
         }
