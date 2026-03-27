@@ -289,7 +289,8 @@ final class AppViewModel: ObservableObject {
 
     func refreshAlbums() async {
         do {
-            albums = try await photosClient.listUserAlbums()
+            let listedAlbums = try await photosClient.listUserAlbums()
+            albums = await photoKitIncrementalScanSource.withResolvedPlainAlbumCounts(listedAlbums)
             await reconcileCaptionWorkflowSelections(persistChanges: true)
         } catch {
             showMessage(title: "Album Load Failed", message: error.localizedDescription)

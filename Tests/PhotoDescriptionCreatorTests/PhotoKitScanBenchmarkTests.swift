@@ -356,6 +356,17 @@ private actor FakeAppleScriptDiagnosticsClient: PhotoLibraryDiagnosticsAppleScri
         return inspection
     }
 
+    func inspectResolvedMediaItems(ids: [String]) async -> [String: PhotoLibraryResolvedMediaItem] {
+        var result: [String: PhotoLibraryResolvedMediaItem] = [:]
+        result.reserveCapacity(ids.count)
+        for id in ids {
+            if let inspection = inspections[id] {
+                result[id] = inspection
+            }
+        }
+        return result
+    }
+
     func readMetadata(id: String) async throws -> ExistingMetadataState {
         metadata[id] ?? ExistingMetadataState(caption: nil, keywords: [], ownershipTag: nil, isExternal: false)
     }
@@ -454,5 +465,16 @@ private actor FakePhotoKitDiagnosticsReader: PhotoLibraryDiagnosticsPhotoKitAcce
 
     func inspectAsset(id: String) async -> PhotoLibraryResolvedMediaItem? {
         inspections[id]
+    }
+
+    func inspectAssets(ids: [String]) async -> [String: PhotoLibraryResolvedMediaItem] {
+        var result: [String: PhotoLibraryResolvedMediaItem] = [:]
+        result.reserveCapacity(ids.count)
+        for id in ids {
+            if let inspection = inspections[id] {
+                result[id] = inspection
+            }
+        }
+        return result
     }
 }

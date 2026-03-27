@@ -337,6 +337,9 @@ actor PhotoLibraryScanBenchmarkRunner {
         var captureDateParityCount = 0
         var acquisitionVerifiedCount = 0
         var writePathSafeCount = 0
+        let sampleIDs = samples.map(\.id)
+        let photoKitInspections = await photoKitReader.inspectAssets(ids: sampleIDs)
+        let appleInspections = await appleScriptClient.inspectResolvedMediaItems(ids: sampleIDs)
 
         for (index, asset) in samples.enumerated() {
             if index < acquisitionLimit || index == 0 || index == samples.count - 1 {
@@ -346,7 +349,7 @@ actor PhotoLibraryScanBenchmarkRunner {
                 )
             }
 
-            guard let photoKitInspection = await photoKitReader.inspectAsset(id: asset.id) else {
+            guard let photoKitInspection = photoKitInspections[asset.id] else {
                 unresolvedAssetIDs.append(asset.id)
                 identitySamples.append(
                     PhotoLibraryIdentitySample(
@@ -367,7 +370,7 @@ actor PhotoLibraryScanBenchmarkRunner {
                 continue
             }
 
-            let appleInspection = try? await appleScriptClient.inspectResolvedMediaItem(id: asset.id)
+            let appleInspection = appleInspections[asset.id]
             let canonicalIDMatch = appleInspection.map { photoKitInspection.matchesIdentity(of: $0) } ?? false
             let filenameMatch = appleInspection?.filename == photoKitInspection.filename
             let mediaKindMatch = appleInspection?.kind == photoKitInspection.kind

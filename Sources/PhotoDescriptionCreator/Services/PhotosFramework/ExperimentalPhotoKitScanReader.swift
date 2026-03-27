@@ -50,6 +50,28 @@ actor ExperimentalPhotoKitScanReader {
         resolveAlbumCollection(id: id) != nil
     }
 
+    func withResolvedPlainAlbumCounts(_ albums: [AlbumSummary]) async -> [AlbumSummary] {
+        guard !albums.isEmpty else {
+            return []
+        }
+
+        let assetFetchOptions = PHFetchOptions()
+        assetFetchOptions.includeHiddenAssets = includeHiddenAssets
+        assetFetchOptions.wantsIncrementalChangeDetails = false
+
+        return albums.map { album in
+            guard let collection = resolveAlbumCollection(id: album.id) else {
+                return album
+            }
+
+            return AlbumSummary(
+                id: album.id,
+                name: album.name,
+                itemCount: PHAsset.fetchAssets(in: collection, options: assetFetchOptions).count
+            )
+        }
+    }
+
     func canHandleIncrementalScan(scope: ScopeSource) async -> Bool {
         switch scope {
         case .library:
@@ -73,6 +95,19 @@ actor ExperimentalPhotoKitScanReader {
             captureDate: asset.creationDate ?? asset.modificationDate,
             kind: mediaKind(for: asset)
         )
+    }
+
+    func inspectAssets(ids: [String]) async -> [String: PhotoLibraryResolvedMediaItem] {
+        var inspections: [String: PhotoLibraryResolvedMediaItem] = [:]
+        inspections.reserveCapacity(ids.count)
+
+        for id in ids {
+            if let inspection = await inspectAsset(id: id) {
+                inspections[id] = inspection
+            }
+        }
+
+        return inspections
     }
 
     static func identifierCandidates(from rawID: String) -> [String] {

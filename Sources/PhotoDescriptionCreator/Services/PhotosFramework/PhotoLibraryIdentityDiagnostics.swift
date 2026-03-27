@@ -7,6 +7,7 @@ protocol PhotoLibraryDiagnosticsAppleScriptAccessing: Sendable {
     func listUserAlbums() async throws -> [AlbumSummary]
     func verifyAutomationAccess() async -> Bool
     func inspectResolvedMediaItem(id: String) async throws -> PhotoLibraryResolvedMediaItem
+    func inspectResolvedMediaItems(ids: [String]) async -> [String: PhotoLibraryResolvedMediaItem]
     func readMetadata(id: String) async throws -> ExistingMetadataState
     func writeMetadata(id: String, caption: String, keywords: [String]) async throws
     func isMediaItem(id: String, inAlbumID: String) async throws -> Bool
@@ -19,6 +20,7 @@ protocol PhotoLibraryDiagnosticsPhotoKitAccessing: Sendable {
     func enumerate(scope: ScopeSource, offset: Int, limit: Int) async throws -> [MediaAsset]
     func canResolveAlbum(id: String) async -> Bool
     func inspectAsset(id: String) async -> PhotoLibraryResolvedMediaItem?
+    func inspectAssets(ids: [String]) async -> [String: PhotoLibraryResolvedMediaItem]
 }
 
 enum PhotoLibraryIdentityResolutionStrategy: String, Codable, Sendable {

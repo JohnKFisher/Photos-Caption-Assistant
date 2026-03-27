@@ -693,6 +693,19 @@ public actor PhotosAppleScriptClient: PhotosWriter, PhotosProcessMonitoring, Pho
         )
     }
 
+    func inspectResolvedMediaItems(ids: [String]) async -> [String: PhotoLibraryResolvedMediaItem] {
+        var inspections: [String: PhotoLibraryResolvedMediaItem] = [:]
+        inspections.reserveCapacity(ids.count)
+
+        for id in ids {
+            if let inspection = try? await inspectResolvedMediaItem(id: id) {
+                inspections[id] = inspection
+            }
+        }
+
+        return inspections
+    }
+
     func isMediaItem(id: String, inAlbumID: String) async throws -> Bool {
         let script = """
         \(baseIdentifierHelperAppleScript)

@@ -79,6 +79,8 @@ PDC_RUN_PHOTOS_SCAN_BENCHMARK=1 swift test --filter PhotoKitScanBenchmarkTests/t
   - caption-workflow stage resolution
   - Photos lifecycle/readiness handling
   - export/acquire behavior
+- The app now also uses PhotoKit read-only helpers to enrich normal album-list counts when a listed album can be resolved as a plain album, while leaving unresolved or smart-album entries on the existing AppleScript listing data.
+- The diagnostics/benchmark path now supports batch read-only asset inspection helpers on both backends so identity proofing can reuse a single preloaded inspection set instead of re-resolving every sample ad hoc.
 
 ## Interpretation Notes
 - This phase measures scan/count behavior only.
