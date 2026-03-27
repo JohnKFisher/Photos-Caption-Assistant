@@ -428,6 +428,7 @@ public final class RunCoordinator {
     private let analyzer: Analyzer
     private let videoFrameSampler: VideoFrameSampler
     private let previewRenderer: any PreviewRendering
+    private let incrementalScanSource: (any ScopedIncrementalScanSource)?
     private let logicVersion: LogicVersion
     private let photosRestartInterval: Int
     private let photosMemoryCheckInterval: Int
@@ -443,6 +444,7 @@ public final class RunCoordinator {
     public convenience init(
         photosWriter: PhotosWriter,
         analyzer: Analyzer,
+        incrementalScanSource: (any ScopedIncrementalScanSource)? = nil,
         videoFrameSampler: VideoFrameSampler = VideoFrameSampler(),
         logicVersion: LogicVersion = .current,
         checkpointInterval: Int = 500,
@@ -458,6 +460,7 @@ public final class RunCoordinator {
         self.init(
             photosWriter: photosWriter,
             analyzer: analyzer,
+            incrementalScanSource: incrementalScanSource,
             videoFrameSampler: videoFrameSampler,
             logicVersion: logicVersion,
             checkpointInterval: checkpointInterval,
@@ -476,6 +479,7 @@ public final class RunCoordinator {
     init(
         photosWriter: PhotosWriter,
         analyzer: Analyzer,
+        incrementalScanSource: (any ScopedIncrementalScanSource)? = nil,
         videoFrameSampler: VideoFrameSampler = VideoFrameSampler(),
         logicVersion: LogicVersion = .current,
         checkpointInterval: Int = 500,
@@ -491,6 +495,7 @@ public final class RunCoordinator {
     ) {
         self.photosWriter = photosWriter
         self.analyzer = analyzer
+        self.incrementalScanSource = incrementalScanSource
         self.videoFrameSampler = videoFrameSampler
         self.previewRenderer = previewRenderer
         self.logicVersion = logicVersion
@@ -502,6 +507,47 @@ public final class RunCoordinator {
         self.analysisConcurrency = max(1, analysisConcurrency)
         self.prepareAheadLimit = max(0, prepareAheadLimit)
         self.writeBatchSize = max(1, writeBatchSize)
+    }
+
+    private func prefersAlternateIncrementalScan(for options: RunOptions) -> Bool {
+        guard incrementalScanSource != nil else {
+            return false
+        }
+        guard options.optionalCaptureDateRange == nil else {
+            return false
+        }
+
+        switch options.source {
+        case .library, .album:
+            break
+        case .picker, .captionWorkflow:
+            return false
+        }
+
+        switch options.traversalOrder {
+        case .photosOrderFast, .random:
+            return true
+        case .oldestToNewest, .newestToOldest, .cycle:
+            return false
+        }
+    }
+
+    private func preferredIncrementalScanSource(
+        for options: RunOptions
+    ) async -> (any IncrementalScanSource)? {
+        if prefersAlternateIncrementalScan(for: options),
+           let incrementalScanSource
+        {
+            if await incrementalScanSource.canHandleIncrementalScan(scope: options.source) {
+                return incrementalScanSource
+            }
+
+            print(
+                "[RunCoordinator] PhotoKit incremental scan path could not handle \(String(describing: options.source)); using AppleScript incremental scan path."
+            )
+        }
+
+        return photosWriter as? IncrementalPhotosWriter
     }
 
     public func cancel() {
@@ -1713,7 +1759,7 @@ public final class RunCoordinator {
         }
 
         func enumeratePageResilient(
-            incrementalWriter: IncrementalPhotosWriter,
+            incrementalWriter: any IncrementalScanSource,
             scope: ScopeSource,
             offset: Int,
             preferredLimit: Int
@@ -1755,7 +1801,7 @@ public final class RunCoordinator {
         let isFastTraversal = options.traversalOrder == .photosOrderFast
 
         if options.optionalCaptureDateRange == nil,
-           let incrementalWriter = photosWriter as? IncrementalPhotosWriter {
+           let incrementalWriter = await preferredIncrementalScanSource(for: options) {
             do {
                 if isFastTraversal {
                     var offset = 0
@@ -1824,7 +1870,7 @@ public final class RunCoordinator {
             }
         } else {
             if !isFastTraversal,
-               let incrementalWriter = photosWriter as? IncrementalPhotosWriter,
+               let incrementalWriter = await preferredIncrementalScanSource(for: options),
                let totalCount = try? await incrementalWriter.count(scope: options.source),
                !(await promptForSlowOrderedRunIfNeeded(totalCount: totalCount)) {
                 return await makeSummary()

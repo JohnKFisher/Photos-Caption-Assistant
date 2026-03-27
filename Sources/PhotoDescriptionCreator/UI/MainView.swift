@@ -253,6 +253,7 @@ final class AppViewModel: ObservableObject {
     private var lastScanBenchmarkReport: PhotoKitScanBenchmarkReport?
 
     private let photosClient = PhotosAppleScriptClient()
+    private let photoKitIncrementalScanSource = ExperimentalPhotoKitScanReader()
     private let ollamaManager = OllamaManager()
     private let runResumeStore = RunResumeStore()
     private let captionWorkflowConfigurationStore = CaptionWorkflowConfigurationStore()
@@ -261,7 +262,8 @@ final class AppViewModel: ObservableObject {
     private lazy var identityWriteProbeRunner = PhotoLibraryIdentityWriteProbeRunner(appleScriptClient: photosClient)
     private lazy var coordinator = RunCoordinator(
         photosWriter: photosClient,
-        analyzer: QwenVisionLanguageAnalyzer()
+        analyzer: QwenVisionLanguageAnalyzer(),
+        incrementalScanSource: photoKitIncrementalScanSource
     )
     @Published private(set) var isRunningScanBenchmark = false
     @Published private(set) var isRunningIdentityWriteProbe = false

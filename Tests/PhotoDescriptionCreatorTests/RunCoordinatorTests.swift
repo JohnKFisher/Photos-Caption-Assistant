@@ -1024,6 +1024,143 @@ final class RunCoordinatorTests: XCTestCase {
         XCTAssertEqual(countCalls, 0)
     }
 
+    func testFastLibraryTraversalUsesAlternateIncrementalScanSourceWhenSafe() async {
+        let assets = makeAssets(count: 620)
+        let metadata = Dictionary(uniqueKeysWithValues: assets.map { asset in
+            (asset.id, ExistingMetadataState(caption: nil, keywords: [], ownershipTag: nil, isExternal: false))
+        })
+
+        let writer = MockPhotosWriter(assets: assets, metadataByID: metadata)
+        let alternateScanSource = MockScopedIncrementalScanSource(assets: assets)
+        let coordinator = RunCoordinator(
+            photosWriter: writer,
+            analyzer: MockAnalyzer(result: GeneratedMetadata(caption: "fast", keywords: ["k"])),
+            incrementalScanSource: alternateScanSource,
+            checkpointInterval: 1000
+        )
+
+        let summary = await coordinator.run(
+            options: RunOptions(
+                source: .library,
+                optionalCaptureDateRange: nil,
+                traversalOrder: .photosOrderFast,
+                overwriteAppOwnedSameOrNewer: false
+            ),
+            capabilities: AppCapabilities(
+                photosAutomationAvailable: true,
+                qwenModelAvailable: true,
+                pickerCapability: .supported
+            ),
+            callbacks: RunCallbacks(
+                onProgress: { _ in },
+                confirmExternalOverwrite: { _, _ in false },
+                confirmContinueAfterCheckpoint: { _ in true }
+            )
+        )
+
+        let primaryPageCalls = await writer.enumeratePageCallCountValue()
+        let alternatePageCalls = await alternateScanSource.enumeratePageCallCountValue()
+        let alternateCountCalls = await alternateScanSource.countCallCountValue()
+        XCTAssertEqual(summary.progress.changed, assets.count)
+        XCTAssertEqual(primaryPageCalls, 0)
+        XCTAssertGreaterThan(alternatePageCalls, 0)
+        XCTAssertEqual(alternateCountCalls, 0)
+    }
+
+    func testDateSensitiveTraversalKeepsPrimaryIncrementalScanPath() async {
+        let assets = makeAssets(count: 80)
+        let metadata = Dictionary(uniqueKeysWithValues: assets.map { asset in
+            (asset.id, ExistingMetadataState(caption: nil, keywords: [], ownershipTag: nil, isExternal: false))
+        })
+
+        let writer = MockPhotosWriter(assets: assets, metadataByID: metadata)
+        let alternateScanSource = MockScopedIncrementalScanSource(assets: assets)
+        let coordinator = RunCoordinator(
+            photosWriter: writer,
+            analyzer: MockAnalyzer(result: GeneratedMetadata(caption: "ordered", keywords: ["k"])),
+            incrementalScanSource: alternateScanSource,
+            checkpointInterval: 1000
+        )
+
+        let summary = await coordinator.run(
+            options: RunOptions(
+                source: .library,
+                optionalCaptureDateRange: nil,
+                traversalOrder: .oldestToNewest,
+                overwriteAppOwnedSameOrNewer: false
+            ),
+            capabilities: AppCapabilities(
+                photosAutomationAvailable: true,
+                qwenModelAvailable: true,
+                pickerCapability: .supported
+            ),
+            callbacks: RunCallbacks(
+                onProgress: { _ in },
+                confirmExternalOverwrite: { _, _ in false },
+                confirmContinueAfterCheckpoint: { _ in true }
+            )
+        )
+
+        let primaryPageCalls = await writer.enumeratePageCallCountValue()
+        let primaryCountCalls = await writer.countCallCountValue()
+        let alternatePageCalls = await alternateScanSource.enumeratePageCallCountValue()
+        let alternateCountCalls = await alternateScanSource.countCallCountValue()
+        XCTAssertEqual(summary.progress.changed, assets.count)
+        XCTAssertGreaterThan(primaryPageCalls, 0)
+        XCTAssertGreaterThan(primaryCountCalls, 0)
+        XCTAssertEqual(alternatePageCalls, 0)
+        XCTAssertEqual(alternateCountCalls, 0)
+    }
+
+    func testUnresolvableAlbumFallsBackToPrimaryIncrementalScanPath() async {
+        let assets = makeAssets(count: 10)
+        let metadata = Dictionary(uniqueKeysWithValues: assets.map { asset in
+            (asset.id, ExistingMetadataState(caption: nil, keywords: [], ownershipTag: nil, isExternal: false))
+        })
+        let albumID = "album-1"
+
+        let writer = MockPhotosWriter(
+            assets: assets,
+            metadataByID: metadata,
+            albumAssetIDsByID: [albumID: assets.map(\.id)]
+        )
+        let alternateScanSource = MockScopedIncrementalScanSource(
+            assets: assets,
+            supportedAlbumIDs: []
+        )
+        let coordinator = RunCoordinator(
+            photosWriter: writer,
+            analyzer: MockAnalyzer(result: GeneratedMetadata(caption: "album", keywords: ["k"])),
+            incrementalScanSource: alternateScanSource,
+            checkpointInterval: 1000
+        )
+
+        let summary = await coordinator.run(
+            options: RunOptions(
+                source: .album(id: albumID),
+                optionalCaptureDateRange: nil,
+                traversalOrder: .photosOrderFast,
+                overwriteAppOwnedSameOrNewer: false
+            ),
+            capabilities: AppCapabilities(
+                photosAutomationAvailable: true,
+                qwenModelAvailable: true,
+                pickerCapability: .supported
+            ),
+            callbacks: RunCallbacks(
+                onProgress: { _ in },
+                confirmExternalOverwrite: { _, _ in false },
+                confirmContinueAfterCheckpoint: { _ in true }
+            )
+        )
+
+        let primaryPageCalls = await writer.enumeratePageCallCountValue()
+        let alternatePageCalls = await alternateScanSource.enumeratePageCallCountValue()
+        XCTAssertEqual(summary.progress.changed, assets.count)
+        XCTAssertGreaterThan(primaryPageCalls, 0)
+        XCTAssertEqual(alternatePageCalls, 0)
+    }
+
     func testFastTraversalRetriesEnumeratePageWithSmallerLimitAfterTimeout() async {
         let assets = makeAssets(count: 300)
         let metadata = Dictionary(uniqueKeysWithValues: assets.map { asset in
@@ -2478,6 +2615,76 @@ private actor AnalysisInputRecorder {
 
     func values() -> [String] {
         valuesStorage
+    }
+}
+
+private actor MockScopedIncrementalScanSource: ScopedIncrementalScanSource {
+    private let assets: [MediaAsset]
+    private let supportedAlbumIDs: Set<String>
+    private let supportsLibrary: Bool
+    private let albumAssetIDsByID: [String: [String]]
+    private(set) var countCallCount = 0
+    private(set) var enumeratePageCallCount = 0
+
+    init(
+        assets: [MediaAsset],
+        supportedAlbumIDs: Set<String> = [],
+        supportsLibrary: Bool = true,
+        albumAssetIDsByID: [String: [String]] = [:]
+    ) {
+        self.assets = assets
+        self.supportedAlbumIDs = supportedAlbumIDs
+        self.supportsLibrary = supportsLibrary
+        self.albumAssetIDsByID = albumAssetIDsByID
+    }
+
+    func canHandleIncrementalScan(scope: ScopeSource) async -> Bool {
+        switch scope {
+        case .library:
+            return supportsLibrary
+        case let .album(id):
+            return supportedAlbumIDs.contains(id)
+        case .picker, .captionWorkflow:
+            return false
+        }
+    }
+
+    func count(scope: ScopeSource) async throws -> Int {
+        countCallCount += 1
+        return try selectedAssets(for: scope).count
+    }
+
+    func enumerate(scope: ScopeSource, offset: Int, limit: Int) async throws -> [MediaAsset] {
+        enumeratePageCallCount += 1
+        let selected = try selectedAssets(for: scope)
+        guard offset < selected.count, limit > 0 else { return [] }
+        let end = min(offset + limit, selected.count)
+        return Array(selected[offset..<end])
+    }
+
+    func countCallCountValue() async -> Int {
+        countCallCount
+    }
+
+    func enumeratePageCallCountValue() async -> Int {
+        enumeratePageCallCount
+    }
+
+    private func selectedAssets(for scope: ScopeSource) throws -> [MediaAsset] {
+        switch scope {
+        case .library:
+            return assets
+        case let .album(id):
+            guard let assetIDs = albumAssetIDsByID[id] else {
+                throw ExperimentalPhotoKitScanError.albumNotFound(id)
+            }
+            let assetsByID = Dictionary(uniqueKeysWithValues: assets.map { ($0.id, $0) })
+            return assetIDs.compactMap { assetsByID[$0] }
+        case .picker:
+            throw ExperimentalPhotoKitScanError.unsupportedScope("picker")
+        case .captionWorkflow:
+            throw ExperimentalPhotoKitScanError.unsupportedScope("captionWorkflow")
+        }
     }
 }
 

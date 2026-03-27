@@ -50,6 +50,17 @@ actor ExperimentalPhotoKitScanReader {
         resolveAlbumCollection(id: id) != nil
     }
 
+    func canHandleIncrementalScan(scope: ScopeSource) async -> Bool {
+        switch scope {
+        case .library:
+            return true
+        case let .album(id):
+            return await canResolveAlbum(id: id)
+        case .picker, .captionWorkflow:
+            return false
+        }
+    }
+
     func inspectAsset(id: String) async -> PhotoLibraryResolvedMediaItem? {
         guard let asset = resolveAsset(id: id) else {
             return nil
@@ -211,3 +222,5 @@ actor ExperimentalPhotoKitScanReader {
         return String(identifier[..<slashIndex])
     }
 }
+
+extension ExperimentalPhotoKitScanReader: ScopedIncrementalScanSource {}

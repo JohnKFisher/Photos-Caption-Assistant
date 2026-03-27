@@ -360,10 +360,16 @@ public protocol PhotoPreviewDataSource: Sendable {
     func photoPreviewJPEGData(id: String, maxPixelSize: Int) async throws -> Data?
 }
 
-public protocol IncrementalPhotosWriter: PhotosWriter {
+public protocol IncrementalScanSource: Sendable {
     func count(scope: ScopeSource) async throws -> Int
     func enumerate(scope: ScopeSource, offset: Int, limit: Int) async throws -> [MediaAsset]
 }
+
+public protocol ScopedIncrementalScanSource: IncrementalScanSource {
+    func canHandleIncrementalScan(scope: ScopeSource) async -> Bool
+}
+
+public protocol IncrementalPhotosWriter: PhotosWriter, IncrementalScanSource {}
 
 public protocol BatchMetadataPhotosWriter: PhotosWriter {
     func readMetadata(ids: [String]) async throws -> [String: ExistingMetadataState]
