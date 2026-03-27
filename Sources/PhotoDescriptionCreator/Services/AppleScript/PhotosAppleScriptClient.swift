@@ -652,6 +652,84 @@ public actor PhotosAppleScriptClient: PhotosWriter, PhotosProcessMonitoring, Pho
         )
     }
 
+    func inspectResolvedMediaItem(id: String) async throws -> PhotoLibraryResolvedMediaItem {
+        let script = """
+        \(mediaItemResolverAppleScript)
+
+        on run argv
+            set targetID to item 1 of argv
+            set targetItem to my resolveMediaItem(targetID)
+            tell application \"Photos\"
+                set resolvedID to id of targetItem
+                set itemFilename to filename of targetItem
+                set itemDateText to \"\"
+                try
+                    set itemDateText to (date of targetItem) as string
+                on error
+                    set itemDateText to \"\"
+                end try
+                return resolvedID & (character id 30) & itemFilename & (character id 30) & itemDateText
+            end tell
+        end run
+        """
+
+        let output = try runAppleScript(
+            script,
+            arguments: [id],
+            timeoutSeconds: ScriptTimeout.readMetadata,
+            operationName: "inspect resolved media item"
+        )
+
+        let parts = output.split(separator: Character(UnicodeScalar(30)), omittingEmptySubsequences: false)
+        let resolvedID = parts.indices.contains(0) ? String(parts[0]) : id
+        let filename = parts.indices.contains(1) ? String(parts[1]) : ""
+        let dateString = parts.indices.contains(2) ? String(parts[2]) : ""
+        return PhotoLibraryResolvedMediaItem(
+            requestedID: id,
+            resolvedID: resolvedID,
+            filename: filename,
+            captureDate: parseDate(dateString),
+            kind: inferMediaKind(from: filename)
+        )
+    }
+
+    func isMediaItem(id: String, inAlbumID: String) async throws -> Bool {
+        let script = """
+        \(baseIdentifierHelperAppleScript)
+
+        on run argv
+            set targetID to item 1 of argv
+            set targetAlbumID to item 2 of argv
+            set baseID to my baseIdentifier(targetID)
+
+            tell application \"Photos\"
+                set targetAlbum to first album whose id is targetAlbumID
+                try
+                    set matchingItem to first media item of targetAlbum whose id is targetID
+                    return \"true\"
+                end try
+                if baseID is not equal to targetID then
+                    try
+                        set matchingItem to first media item of targetAlbum whose id is baseID
+                        return \"true\"
+                    end try
+                end if
+            end tell
+
+            return \"false\"
+        end run
+        """
+
+        let output = try runAppleScript(
+            script,
+            arguments: [id, inAlbumID],
+            timeoutSeconds: ScriptTimeout.readMetadata,
+            operationName: "check album membership"
+        )
+
+        return output.trimmingCharacters(in: .whitespacesAndNewlines) == "true"
+    }
+
     public func exportAssetToTemporaryURL(id: String, kind: MediaKind) async throws -> URL {
         if kind == .video {
             do {

@@ -198,6 +198,12 @@ final class AppViewModel: ObservableObject {
         CaptionWorkflowQueueRowState()
     }
     @Published var captionWorkflowStatusMessage: String?
+    @Published var benchmarkAlbumOverrideID = ""
+    @Published var benchmarkAlbumOverrideName = ""
+    @Published var identityProbeSacrificialAssetID = ""
+    @Published var identityProbeControlAssetID = ""
+    @Published var identityProbeSmartAlbumID = ""
+    @Published var identityProbeSmartAlbumName = ""
 
     @Published var useDateFilter = false
     @Published var startDate = Calendar.current.date(byAdding: .month, value: -1, to: Date()) ?? Date()
@@ -220,6 +226,7 @@ final class AppViewModel: ObservableObject {
     @Published var isImmersivePreviewPresented = false
     @Published var ollamaStatusMessage = "Checking Qwen 2.5VL 7B availability..."
     @Published var benchmarkStatusMessage: String?
+    @Published var identityProbeStatusMessage: String?
     @Published var resumablePendingCount = 0
 
     @Published var pendingConflictPrompt: ConflictPromptData?
@@ -250,11 +257,13 @@ final class AppViewModel: ObservableObject {
     private let captionWorkflowConfigurationStore = CaptionWorkflowConfigurationStore()
     private lazy var capabilityProbe = CapabilityProbe(photosClient: photosClient, ollamaManager: ollamaManager)
     private lazy var scanBenchmarkRunner = PhotoLibraryScanBenchmarkRunner(appleScriptClient: photosClient)
+    private lazy var identityWriteProbeRunner = PhotoLibraryIdentityWriteProbeRunner(appleScriptClient: photosClient)
     private lazy var coordinator = RunCoordinator(
         photosWriter: photosClient,
         analyzer: QwenVisionLanguageAnalyzer()
     )
     @Published private(set) var isRunningScanBenchmark = false
+    @Published private(set) var isRunningIdentityWriteProbe = false
 
     func loadInitialData() async {
         capabilities = await capabilityProbe.probe()
@@ -505,7 +514,7 @@ final class AppViewModel: ObservableObject {
     }
 
     func runScanBenchmarkFromMenu() async {
-        guard !isRunning, !isPreparingModel, !isRunningScanBenchmark else { return }
+        guard !isRunning, !isPreparingModel, !isRunningScanBenchmark, !isRunningIdentityWriteProbe else { return }
 
         isRunningScanBenchmark = true
         benchmarkStatusMessage = "Preparing scan benchmark..."
@@ -524,7 +533,7 @@ final class AppViewModel: ObservableObject {
                 return
             }
 
-            let configuration = PhotoLibraryScanBenchmarkConfiguration.appHostedDefault
+            let configuration = makeScanBenchmarkConfiguration()
             benchmarkStatusMessage = "Running scan benchmark on the \(configuration.sampleDescription)..."
             let outcome = try await scanBenchmarkRunner.run(configuration: configuration) { [weak self] message in
                 await MainActor.run {
@@ -560,6 +569,101 @@ final class AppViewModel: ObservableObject {
                 message: error.localizedDescription
             )
         }
+    }
+
+    func runIdentityWriteProbeFromMenu() async {
+        guard !isRunning, !isPreparingModel, !isRunningScanBenchmark, !isRunningIdentityWriteProbe else { return }
+
+        guard let configuration = PhotoLibraryIdentityWriteProbeConfiguration(
+            sacrificialAssetID: identityProbeSacrificialAssetID,
+            controlAssetID: identityProbeControlAssetID,
+            expectedSmartAlbumID: identityProbeSmartAlbumID,
+            expectedSmartAlbumName: identityProbeSmartAlbumName
+        ) else {
+            showMessage(
+                title: "Identity Write Probe Needs IDs",
+                message: "Enter a sacrificial asset ID and a different control asset ID in the Diagnostics section before running the write probe."
+            )
+            return
+        }
+
+        let confirmationMessage = [
+            "This diagnostics-only probe will temporarily write a sentinel caption and keyword to the sacrificial asset, verify the result, and then restore the original metadata.",
+            "Sacrificial asset: \(configuration.sacrificialAssetID)",
+            "Control asset: \(configuration.controlAssetID)",
+            configuration.expectedSmartAlbumID.map { "Expected smart album handoff: \($0)" }
+        ]
+        .compactMap { $0 }
+        .joined(separator: "\n")
+
+        let confirmed = await requestConfirmation(
+            title: "Run Identity Write Probe?",
+            message: confirmationMessage,
+            confirmLabel: "Run Probe",
+            cancelLabel: "Cancel"
+        )
+        guard confirmed else { return }
+
+        isRunningIdentityWriteProbe = true
+        identityProbeStatusMessage = "Preparing identity write probe..."
+        defer {
+            isRunningIdentityWriteProbe = false
+        }
+
+        do {
+            let authorizationStatus = await requestPhotoLibraryAccessIfNeeded()
+            guard authorizationStatus == .authorized || authorizationStatus == .limited else {
+                identityProbeStatusMessage = "Identity write probe skipped."
+                showMessage(
+                    title: "Identity Write Probe Skipped",
+                    message: "Photos library access was not granted (status=\(authorizationStatus.rawValue))."
+                )
+                return
+            }
+
+            let outcome = try await identityWriteProbeRunner.run(configuration: configuration) { [weak self] message in
+                await MainActor.run {
+                    self?.identityProbeStatusMessage = message
+                }
+            }
+
+            switch outcome {
+            case let .completed(run):
+                identityProbeStatusMessage = "Identity write probe report: \(run.reportURL.lastPathComponent)"
+                showMessage(
+                    title: run.report.overallPass ? "Identity Write Probe Passed" : "Identity Write Probe Failed",
+                    message: [
+                        "Report saved to:\n\(run.reportURL.path)",
+                        run.report.summaryLine,
+                        run.report.failureReasons.isEmpty ? nil : run.report.failureReasons.joined(separator: "\n")
+                    ]
+                    .compactMap { $0 }
+                    .joined(separator: "\n\n")
+                )
+            case let .skipped(reason):
+                identityProbeStatusMessage = "Identity write probe skipped."
+                showMessage(
+                    title: "Identity Write Probe Skipped",
+                    message: reason
+                )
+            }
+        } catch {
+            identityProbeStatusMessage = "Identity write probe failed."
+            showMessage(
+                title: "Identity Write Probe Failed",
+                message: error.localizedDescription
+            )
+        }
+    }
+
+    private func makeScanBenchmarkConfiguration() -> PhotoLibraryScanBenchmarkConfiguration {
+        PhotoLibraryScanBenchmarkConfiguration(
+            pageSizes: PhotoLibraryScanBenchmarkConfiguration.defaultPageSizes,
+            warmIterations: 1,
+            maxItems: PhotoLibraryScanBenchmarkConfiguration.defaultMaxItems,
+            configuredAlbumID: benchmarkAlbumOverrideID,
+            configuredAlbumName: benchmarkAlbumOverrideName
+        )
     }
 
     private func requestPhotoLibraryAccessIfNeeded() async -> PHAuthorizationStatus {
@@ -1223,6 +1327,8 @@ struct MainView: View {
                 )
                 .frame(maxHeight: 330)
 
+                diagnosticsConfigurationView
+
                 ProcessingProgressView(
                     progress: viewModel.progress,
                     performance: viewModel.performance,
@@ -1378,6 +1484,77 @@ struct MainView: View {
                         .foregroundStyle(.secondary)
                 }
             }
+
+            if let identityProbeStatusMessage = viewModel.identityProbeStatusMessage {
+                HStack(spacing: 8) {
+                    if viewModel.isRunningIdentityWriteProbe {
+                        SwiftUI.ProgressView()
+                            .controlSize(.small)
+                    }
+                    Text(identityProbeStatusMessage)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    private var diagnosticsConfigurationView: some View {
+        GroupBox("Diagnostics") {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Benchmark album override is optional. The identity write probe needs explicit sacrificial/control asset IDs and will prompt before writing anything.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+
+                HStack(spacing: 12) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Benchmark Album ID")
+                            .font(.caption.weight(.semibold))
+                        TextField("Optional AppleScript album ID", text: $viewModel.benchmarkAlbumOverrideID)
+                            .textFieldStyle(.roundedBorder)
+                    }
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Benchmark Album Name")
+                            .font(.caption.weight(.semibold))
+                        TextField("Optional album label", text: $viewModel.benchmarkAlbumOverrideName)
+                            .textFieldStyle(.roundedBorder)
+                    }
+                }
+
+                HStack(spacing: 12) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Sacrificial Asset ID")
+                            .font(.caption.weight(.semibold))
+                        TextField("Required for write probe", text: $viewModel.identityProbeSacrificialAssetID)
+                            .textFieldStyle(.roundedBorder)
+                    }
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Control Asset ID")
+                            .font(.caption.weight(.semibold))
+                        TextField("Required for write probe", text: $viewModel.identityProbeControlAssetID)
+                            .textFieldStyle(.roundedBorder)
+                    }
+                }
+
+                HStack(spacing: 12) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Smart Album ID")
+                            .font(.caption.weight(.semibold))
+                        TextField("Optional expected-removal smart album", text: $viewModel.identityProbeSmartAlbumID)
+                            .textFieldStyle(.roundedBorder)
+                    }
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Smart Album Name")
+                            .font(.caption.weight(.semibold))
+                        TextField("Optional label", text: $viewModel.identityProbeSmartAlbumName)
+                            .textFieldStyle(.roundedBorder)
+                    }
+                }
+            }
+            .padding(.top, 4)
         }
     }
 
@@ -1434,7 +1611,14 @@ struct DiagnosticCommands: Commands {
                     await viewModel.runScanBenchmarkFromMenu()
                 }
             }
-            .disabled(viewModel.isRunning || viewModel.isPreparingModel || viewModel.isRunningScanBenchmark)
+            .disabled(viewModel.isRunning || viewModel.isPreparingModel || viewModel.isRunningScanBenchmark || viewModel.isRunningIdentityWriteProbe)
+
+            Button(viewModel.isRunningIdentityWriteProbe ? "Running Identity Write Probe..." : "Run Identity Write Probe") {
+                Task {
+                    await viewModel.runIdentityWriteProbeFromMenu()
+                }
+            }
+            .disabled(viewModel.isRunning || viewModel.isPreparingModel || viewModel.isRunningScanBenchmark || viewModel.isRunningIdentityWriteProbe)
         }
     }
 }

@@ -50,6 +50,20 @@ actor ExperimentalPhotoKitScanReader {
         resolveAlbumCollection(id: id) != nil
     }
 
+    func inspectAsset(id: String) async -> PhotoLibraryResolvedMediaItem? {
+        guard let asset = resolveAsset(id: id) else {
+            return nil
+        }
+
+        return PhotoLibraryResolvedMediaItem(
+            requestedID: id,
+            resolvedID: asset.localIdentifier,
+            filename: preferredFilename(for: asset),
+            captureDate: asset.creationDate ?? asset.modificationDate,
+            kind: mediaKind(for: asset)
+        )
+    }
+
     static func identifierCandidates(from rawID: String) -> [String] {
         let trimmed = rawID.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return [] }
@@ -105,6 +119,28 @@ actor ExperimentalPhotoKitScanReader {
             options.fetchLimit = 5
             options.predicate = NSPredicate(format: "localIdentifier BEGINSWITH %@", "\(candidate)/")
             let prefix = PHAssetCollection.fetchAssetCollections(with: .album, subtype: .any, options: options)
+            if let match = prefix.firstObject {
+                return match
+            }
+        }
+
+        return nil
+    }
+
+    private func resolveAsset(id: String) -> PHAsset? {
+        let candidates = Self.identifierCandidates(from: id)
+        guard !candidates.isEmpty else { return nil }
+
+        let direct = PHAsset.fetchAssets(withLocalIdentifiers: candidates, options: nil)
+        if let match = direct.firstObject {
+            return match
+        }
+
+        for candidate in candidates where !candidate.contains("/") {
+            let options = PHFetchOptions()
+            options.fetchLimit = 5
+            options.predicate = NSPredicate(format: "localIdentifier BEGINSWITH %@", "\(candidate)/")
+            let prefix = PHAsset.fetchAssets(with: options)
             if let match = prefix.firstObject {
                 return match
             }

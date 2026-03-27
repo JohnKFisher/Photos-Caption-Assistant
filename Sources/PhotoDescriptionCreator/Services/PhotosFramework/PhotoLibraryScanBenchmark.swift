@@ -87,26 +87,34 @@ struct PhotoLibraryScanBenchmarkCompletedRun {
 
 actor PhotoLibraryScanBenchmarkRunner {
     typealias ProgressHandler = @Sendable (String) async -> Void
+    private static let identitySampleLimit = 24
+    private static let acquisitionProofSampleLimit = 8
+    private static let acquisitionPreviewPixelSize = 1600
 
-    private let appleScriptClient: PhotosAppleScriptClient
-    private let photoKitReader: ExperimentalPhotoKitScanReader
+    private let appleScriptClient: any PhotoLibraryDiagnosticsAppleScriptAccessing
+    private let photoKitReader: any PhotoLibraryDiagnosticsPhotoKitAccessing
     private let fileManager: FileManager
+    private let authorizationStatusProvider: @Sendable () -> PHAuthorizationStatus
 
     init(
-        appleScriptClient: PhotosAppleScriptClient,
-        photoKitReader: ExperimentalPhotoKitScanReader = ExperimentalPhotoKitScanReader(),
-        fileManager: FileManager = .default
+        appleScriptClient: any PhotoLibraryDiagnosticsAppleScriptAccessing,
+        photoKitReader: any PhotoLibraryDiagnosticsPhotoKitAccessing = ExperimentalPhotoKitScanReader(),
+        fileManager: FileManager = .default,
+        authorizationStatusProvider: @escaping @Sendable () -> PHAuthorizationStatus = {
+            PHPhotoLibrary.authorizationStatus(for: .readWrite)
+        }
     ) {
         self.appleScriptClient = appleScriptClient
         self.photoKitReader = photoKitReader
         self.fileManager = fileManager
+        self.authorizationStatusProvider = authorizationStatusProvider
     }
 
     func run(
         configuration: PhotoLibraryScanBenchmarkConfiguration = .appHostedDefault,
         progressHandler: ProgressHandler? = nil
     ) async throws -> PhotoLibraryScanBenchmarkOutcome {
-        let authorizationStatus = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+        let authorizationStatus = authorizationStatusProvider()
         guard authorizationStatus == .authorized || authorizationStatus == .limited else {
             return .skipped("Photos library access is unavailable for this process (status=\(authorizationStatus.rawValue)).")
         }
@@ -243,6 +251,7 @@ actor PhotoLibraryScanBenchmarkRunner {
 
         var parityByPageSize: [PhotoKitScanBenchmarkPageParityReport] = []
         var fullScanMeasurements: [String: PhotoKitScanBenchmarkFullScanMeasurement] = [:]
+        var referencePhotoKitAssets: [MediaAsset] = []
 
         for (index, pageSize) in configuration.pageSizes.enumerated() {
             await reportProgress(
@@ -275,6 +284,7 @@ actor PhotoLibraryScanBenchmarkRunner {
             if index == 0 {
                 fullScanMeasurements[backends[0].name] = appleScriptScan.measurement
                 fullScanMeasurements[backends[1].name] = photoKitScan.measurement
+                referencePhotoKitAssets = photoKitScan.assets
             }
 
             parityByPageSize.append(
@@ -286,6 +296,15 @@ actor PhotoLibraryScanBenchmarkRunner {
             )
         }
 
+        await reportProgress(
+            "\(scopePlan.label): read-only identity proof on sampled PhotoKit assets...",
+            using: progressHandler
+        )
+        let identityProof = try await makeIdentityProof(
+            sampledAssets: referencePhotoKitAssets,
+            progressHandler: progressHandler
+        )
+
         return PhotoKitScanBenchmarkScopeReport(
             scopeLabel: scopePlan.label,
             scopeDescription: scopePlan.description,
@@ -296,8 +315,179 @@ actor PhotoLibraryScanBenchmarkRunner {
             firstAssetMeasurements: firstAssetMeasurements,
             firstPageMeasurements: firstPageMeasurements,
             fullScanMeasurements: fullScanMeasurements,
-            parityByPageSize: parityByPageSize
+            parityByPageSize: parityByPageSize,
+            identityProof: identityProof
         )
+    }
+
+    private func makeIdentityProof(
+        sampledAssets: [MediaAsset],
+        progressHandler: ProgressHandler?
+    ) async throws -> PhotoLibraryIdentityProofReport {
+        let samples = Array(sampledAssets.prefix(Self.identitySampleLimit))
+        let acquisitionLimit = min(Self.acquisitionProofSampleLimit, samples.count)
+
+        var identitySamples: [PhotoLibraryIdentitySample] = []
+        identitySamples.reserveCapacity(samples.count)
+        var unresolvedAssetIDs: [String] = []
+        var fallbackResolutionCount = 0
+        var canonicalIDParityCount = 0
+        var filenameParityCount = 0
+        var mediaKindParityCount = 0
+        var captureDateParityCount = 0
+        var acquisitionVerifiedCount = 0
+        var writePathSafeCount = 0
+
+        for (index, asset) in samples.enumerated() {
+            if index < acquisitionLimit || index == 0 || index == samples.count - 1 {
+                await reportProgress(
+                    "Identity proof: resolving asset \(index + 1) of \(samples.count)...",
+                    using: progressHandler
+                )
+            }
+
+            guard let photoKitInspection = await photoKitReader.inspectAsset(id: asset.id) else {
+                unresolvedAssetIDs.append(asset.id)
+                identitySamples.append(
+                    PhotoLibraryIdentitySample(
+                        requestedPhotoKitID: asset.id,
+                        photoKitResolvedID: asset.id,
+                        appleScriptResolvedID: nil,
+                        resolutionStrategy: nil,
+                        canonicalIDMatch: false,
+                        filenameMatch: false,
+                        mediaKindMatch: false,
+                        captureDateMatch: false,
+                        writePathResolvable: false,
+                        writePathSafe: false,
+                        acquisitionCheck: nil,
+                        notes: ["PhotoKit could not re-resolve the sampled asset."]
+                    )
+                )
+                continue
+            }
+
+            let appleInspection = try? await appleScriptClient.inspectResolvedMediaItem(id: asset.id)
+            let canonicalIDMatch = appleInspection.map { photoKitInspection.matchesIdentity(of: $0) } ?? false
+            let filenameMatch = appleInspection?.filename == photoKitInspection.filename
+            let mediaKindMatch = appleInspection?.kind == photoKitInspection.kind
+            let captureDateMatch = appleInspection?.captureDate == photoKitInspection.captureDate
+            let writePathResolvable = appleInspection != nil
+            let writePathSafe = writePathResolvable && canonicalIDMatch && filenameMatch && mediaKindMatch
+
+            if !writePathResolvable {
+                unresolvedAssetIDs.append(asset.id)
+            }
+            if appleInspection?.usedFallbackResolution == true {
+                fallbackResolutionCount += 1
+            }
+            if canonicalIDMatch { canonicalIDParityCount += 1 }
+            if filenameMatch { filenameParityCount += 1 }
+            if mediaKindMatch { mediaKindParityCount += 1 }
+            if captureDateMatch { captureDateParityCount += 1 }
+            if writePathSafe { writePathSafeCount += 1 }
+
+            let acquisitionCheck: PhotoLibraryIdentityAcquireCheck?
+            if index < acquisitionLimit {
+                acquisitionCheck = await verifyAcquisitionPath(for: asset)
+                if acquisitionCheck?.verified == true {
+                    acquisitionVerifiedCount += 1
+                }
+            } else {
+                acquisitionCheck = nil
+            }
+
+            var notes: [String] = []
+            if appleInspection?.usedFallbackResolution == true {
+                notes.append("AppleScript resolved the asset using base-ID fallback.")
+            }
+            if !captureDateMatch {
+                notes.append("Capture date drifted between PhotoKit and AppleScript.")
+            }
+            if !writePathResolvable {
+                notes.append("AppleScript could not resolve the PhotoKit asset ID.")
+            } else if !writePathSafe {
+                notes.append("AppleScript resolved the asset, but canonical identity or key fields did not fully match.")
+            }
+
+            identitySamples.append(
+                PhotoLibraryIdentitySample(
+                    requestedPhotoKitID: asset.id,
+                    photoKitResolvedID: photoKitInspection.resolvedID,
+                    appleScriptResolvedID: appleInspection?.resolvedID,
+                    resolutionStrategy: appleInspection?.resolutionStrategy,
+                    canonicalIDMatch: canonicalIDMatch,
+                    filenameMatch: filenameMatch,
+                    mediaKindMatch: mediaKindMatch,
+                    captureDateMatch: captureDateMatch,
+                    writePathResolvable: writePathResolvable,
+                    writePathSafe: writePathSafe,
+                    acquisitionCheck: acquisitionCheck,
+                    notes: notes
+                )
+            )
+        }
+
+        return PhotoLibraryIdentityProofReport(
+            sampledAssetCount: samples.count,
+            acquisitionSampleCount: acquisitionLimit,
+            unresolvedAssetIDs: unresolvedAssetIDs,
+            fallbackResolutionCount: fallbackResolutionCount,
+            canonicalIDParityCount: canonicalIDParityCount,
+            filenameParityCount: filenameParityCount,
+            mediaKindParityCount: mediaKindParityCount,
+            captureDateParityCount: captureDateParityCount,
+            acquisitionVerifiedCount: acquisitionVerifiedCount,
+            writePathSafeCount: writePathSafeCount,
+            samples: identitySamples
+        )
+    }
+
+    private func verifyAcquisitionPath(
+        for asset: MediaAsset
+    ) async -> PhotoLibraryIdentityAcquireCheck {
+        do {
+            switch asset.kind {
+            case .photo:
+                if let previewData = try await appleScriptClient.photoPreviewJPEGData(
+                    id: asset.id,
+                    maxPixelSize: Self.acquisitionPreviewPixelSize
+                ), !previewData.isEmpty {
+                    return PhotoLibraryIdentityAcquireCheck(
+                        verified: true,
+                        method: "photo-preview-jpeg",
+                        errorMessage: nil
+                    )
+                }
+
+                let exportedURL = try await appleScriptClient.exportAssetToTemporaryURL(id: asset.id, kind: .photo)
+                cleanupTemporaryArtifact(at: exportedURL)
+                return PhotoLibraryIdentityAcquireCheck(
+                    verified: true,
+                    method: "photo-export-fallback",
+                    errorMessage: nil
+                )
+            case .video:
+                let exportedURL = try await appleScriptClient.exportAssetToTemporaryURL(id: asset.id, kind: .video)
+                cleanupTemporaryArtifact(at: exportedURL)
+                return PhotoLibraryIdentityAcquireCheck(
+                    verified: true,
+                    method: "video-export",
+                    errorMessage: nil
+                )
+            }
+        } catch {
+            return PhotoLibraryIdentityAcquireCheck(
+                verified: false,
+                method: asset.kind == .photo ? "photo-acquire" : "video-export",
+                errorMessage: error.localizedDescription
+            )
+        }
+    }
+
+    private func cleanupTemporaryArtifact(at url: URL) {
+        let root = url.deletingLastPathComponent()
+        try? fileManager.removeItem(at: root)
     }
 
     private func makeParityReport(
@@ -661,11 +851,14 @@ struct PhotoKitScanBenchmarkScopeReport: Codable, Sendable {
     let firstPageMeasurements: [String: PhotoKitScanBenchmarkOperationMeasurement<Int>]
     let fullScanMeasurements: [String: PhotoKitScanBenchmarkFullScanMeasurement]
     let parityByPageSize: [PhotoKitScanBenchmarkPageParityReport]
+    let identityProof: PhotoLibraryIdentityProofReport
 
     var summaryLine: String {
         let countText = countParity ? "count-match" : "count-mismatch"
-        let parityText = parityByPageSize.allSatisfy(\.fullyMatches) ? "page-parity-ok" : "page-parity-drift"
-        return "[PhotoKitScanBenchmark] \(scopeLabel): \(countText), \(parityText)"
+        let orderText = parityByPageSize.allSatisfy(\.fullyMatches) ? "order-parity-ok" : "order-parity-drift"
+        let identityText = identityProof.writePathSafe ? "identity-safe" : "identity-drift"
+        let captureDateText = identityProof.captureDateDriftDetected ? "capture-date-drift" : "capture-date-ok"
+        return "[PhotoKitScanBenchmark] \(scopeLabel): \(countText), \(identityText), \(orderText), \(captureDateText)"
     }
 }
 
