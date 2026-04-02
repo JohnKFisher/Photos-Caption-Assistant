@@ -1,10 +1,10 @@
 # Photo Description Creator
 
-Current version/build: 2.4 (9)
+Current version/build: 3.0.0 (1)
 Current description logic version: 3.0.0
 
 Current overall status:
-The current source tree builds as version 2.4 build 9 with description logic 3.0.0. The current durable known-good anchor is the March 26, 2026 fast-scan pipeline baseline listed below.
+The current source tree builds as version 3.0.0 build 1 with description logic 3.0.0. The current durable known-good anchor is the March 26, 2026 fast-scan pipeline baseline listed below.
 
 What is working now:
 - Local photo and video analysis through Ollama with the `qwen2.5vl:7b` model.

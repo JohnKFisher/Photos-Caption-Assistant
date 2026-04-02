@@ -1317,6 +1317,7 @@ final class AppViewModel: ObservableObject {
 struct MainView: View {
     @ObservedObject var viewModel: AppViewModel
     @State private var immersiveAutoEnteredFullScreen = false
+    @State private var isDiagnosticsExpanded = false
 
     var body: some View {
         ZStack {
@@ -1539,89 +1540,92 @@ struct MainView: View {
     }
 
     private var diagnosticsConfigurationView: some View {
-        GroupBox("Diagnostics") {
-            VStack(alignment: .leading, spacing: 12) {
-                Text("Benchmark album override is optional. The identity write probe needs explicit sacrificial/control asset IDs and will prompt before writing anything.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-
-                HStack(spacing: 12) {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("Benchmark Album ID")
-                            .font(.caption.weight(.semibold))
-                        TextField("Optional AppleScript album ID", text: $viewModel.benchmarkAlbumOverrideID)
-                            .textFieldStyle(.roundedBorder)
-                    }
-
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("Benchmark Album Name")
-                            .font(.caption.weight(.semibold))
-                        TextField("Optional album label", text: $viewModel.benchmarkAlbumOverrideName)
-                            .textFieldStyle(.roundedBorder)
-                    }
-                }
-
-                HStack(spacing: 12) {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("Sacrificial Asset ID")
-                            .font(.caption.weight(.semibold))
-                        TextField("Required for write probe", text: $viewModel.identityProbeSacrificialAssetID)
-                            .textFieldStyle(.roundedBorder)
-                    }
-
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("Control Asset ID")
-                            .font(.caption.weight(.semibold))
-                        TextField("Required for write probe", text: $viewModel.identityProbeControlAssetID)
-                            .textFieldStyle(.roundedBorder)
-                    }
-                }
-
-                HStack(spacing: 12) {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("Smart Album ID")
-                            .font(.caption.weight(.semibold))
-                        TextField("Optional expected-removal smart album", text: $viewModel.identityProbeSmartAlbumID)
-                            .textFieldStyle(.roundedBorder)
-                    }
-
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("Smart Album Name")
-                            .font(.caption.weight(.semibold))
-                        TextField("Optional label", text: $viewModel.identityProbeSmartAlbumName)
-                            .textFieldStyle(.roundedBorder)
-                    }
-                }
-
-                if let benchmarkSampleIDsText = viewModel.benchmarkSampleIDsText {
-                    HStack {
-                        Text("Latest Benchmark Sample IDs")
-                            .font(.caption.weight(.semibold))
-                        Spacer()
-                        Button("Use First Two For Write Probe") {
-                            viewModel.prefillIdentityProbeFromLatestBenchmark()
-                        }
-                        .buttonStyle(.bordered)
-                        .disabled(viewModel.isRunningScanBenchmark || viewModel.isRunningIdentityWriteProbe)
-                    }
-
-                    ScrollView {
-                        Text(benchmarkSampleIDsText)
-                            .font(.system(.footnote, design: .monospaced))
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .textSelection(.enabled)
-                    }
-                    .frame(minHeight: 120, maxHeight: 180)
-                    .padding(10)
-                    .background(Color.secondary.opacity(0.08))
-                    .clipShape(RoundedRectangle(cornerRadius: 8))
-                } else {
-                    Text("Run the scan benchmark once and the latest sampled IDs will appear here for copy/paste.")
+        GroupBox {
+            DisclosureGroup("Diagnostics", isExpanded: $isDiagnosticsExpanded) {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("Benchmark album override is optional. The identity write probe needs explicit sacrificial/control asset IDs and will prompt before writing anything.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
+
+                    HStack(spacing: 12) {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Benchmark Album ID")
+                                .font(.caption.weight(.semibold))
+                            TextField("Optional AppleScript album ID", text: $viewModel.benchmarkAlbumOverrideID)
+                                .textFieldStyle(.roundedBorder)
+                        }
+
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Benchmark Album Name")
+                                .font(.caption.weight(.semibold))
+                            TextField("Optional album label", text: $viewModel.benchmarkAlbumOverrideName)
+                                .textFieldStyle(.roundedBorder)
+                        }
+                    }
+
+                    HStack(spacing: 12) {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Sacrificial Asset ID")
+                                .font(.caption.weight(.semibold))
+                            TextField("Required for write probe", text: $viewModel.identityProbeSacrificialAssetID)
+                                .textFieldStyle(.roundedBorder)
+                        }
+
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Control Asset ID")
+                                .font(.caption.weight(.semibold))
+                            TextField("Required for write probe", text: $viewModel.identityProbeControlAssetID)
+                                .textFieldStyle(.roundedBorder)
+                        }
+                    }
+
+                    HStack(spacing: 12) {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Smart Album ID")
+                                .font(.caption.weight(.semibold))
+                            TextField("Optional expected-removal smart album", text: $viewModel.identityProbeSmartAlbumID)
+                                .textFieldStyle(.roundedBorder)
+                        }
+
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Smart Album Name")
+                                .font(.caption.weight(.semibold))
+                            TextField("Optional label", text: $viewModel.identityProbeSmartAlbumName)
+                                .textFieldStyle(.roundedBorder)
+                        }
+                    }
+
+                    if let benchmarkSampleIDsText = viewModel.benchmarkSampleIDsText {
+                        HStack {
+                            Text("Latest Benchmark Sample IDs")
+                                .font(.caption.weight(.semibold))
+                            Spacer()
+                            Button("Use First Two For Write Probe") {
+                                viewModel.prefillIdentityProbeFromLatestBenchmark()
+                            }
+                            .buttonStyle(.bordered)
+                            .disabled(viewModel.isRunningScanBenchmark || viewModel.isRunningIdentityWriteProbe)
+                        }
+
+                        ScrollView {
+                            Text(benchmarkSampleIDsText)
+                                .font(.system(.footnote, design: .monospaced))
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .textSelection(.enabled)
+                        }
+                        .frame(minHeight: 120, maxHeight: 180)
+                        .padding(10)
+                        .background(Color.secondary.opacity(0.08))
+                        .clipShape(RoundedRectangle(cornerRadius: 8))
+                    } else {
+                        Text("Run the scan benchmark once and the latest sampled IDs will appear here for copy/paste.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
                 }
+                .padding(.top, 12)
             }
-            .padding(.top, 4)
+            .animation(.default, value: isDiagnosticsExpanded)
         }
     }
 
