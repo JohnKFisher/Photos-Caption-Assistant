@@ -183,6 +183,7 @@ final class AppViewModel: ObservableObject {
     @Published var selectedAlbumID: String?
     @Published var pickerIDs: [String] = []
     @Published var albums: [AlbumSummary] = []
+    @Published private(set) var albumLoadState: AlbumLoadState = .loadingNames
     @Published var captionWorkflowQueueRows: [CaptionWorkflowQueueRowState] = (0..<CaptionWorkflowConfiguration.minimumQueueLength).map { _ in
         CaptionWorkflowQueueRowState()
     }
@@ -214,6 +215,7 @@ final class AppViewModel: ObservableObject {
     @Published var immersiveDisplayedItemPreview: CompletedItemPreview?
     @Published var recentRunErrors: [String] = []
     @Published var isImmersivePreviewPresented = false
+    @Published private(set) var isOpeningImmersivePreview = false
     @Published var ollamaStatusMessage = "Checking Qwen 2.5VL 7B availability..."
     @Published var benchmarkStatusMessage: String?
     @Published var identityProbeStatusMessage: String?
@@ -242,6 +244,8 @@ final class AppViewModel: ObservableObject {
     private var retainedPreviewFileURLs: Set<URL> = []
     private var lastScanBenchmarkReport: PhotoKitScanBenchmarkReport?
     private var preflightCountCache: [String: Int] = [:]
+    private var albumRefreshGeneration = 0
+    private var albumCountRefreshTask: Task<Void, Never>?
 
     private let photosClient = PhotosAppleScriptClient()
     private let photoKitIncrementalScanSource = ExperimentalPhotoKitScanReader()
@@ -309,8 +313,11 @@ final class AppViewModel: ObservableObject {
             )
         }
         await loadCaptionWorkflowConfiguration()
-        await refreshAlbums()
+        let albumRefreshTask = Task { @MainActor [weak self] in
+            await self?.refreshAlbums()
+        }
         await loadPersistedRunState()
+        await albumRefreshTask.value
         await refreshRunPreflightCount()
     }
 
@@ -325,12 +332,44 @@ final class AppViewModel: ObservableObject {
     }
 
     func refreshAlbums() async {
+        albumRefreshGeneration += 1
+        let refreshGeneration = albumRefreshGeneration
+        let retainedAlbums = albums
+
+        albumCountRefreshTask?.cancel()
+        albumCountRefreshTask = nil
+        albumLoadState = .loadingNames
+
         do {
             let listedAlbums = try await photosClient.listUserAlbums()
-            albums = await photoKitIncrementalScanSource.withResolvedPlainAlbumCounts(listedAlbums)
+            guard refreshGeneration == albumRefreshGeneration else {
+                return
+            }
+
+            albums = listedAlbums
             await reconcileCaptionWorkflowSelections(persistChanges: true)
+
+            guard !listedAlbums.isEmpty else {
+                albumLoadState = .ready
+                return
+            }
+
+            albumLoadState = .loadingCounts
+            albumCountRefreshTask = Task { @MainActor [weak self] in
+                guard let self else { return }
+                let resolvedAlbums = await self.photoKitIncrementalScanSource.withResolvedPlainAlbumCounts(listedAlbums)
+                guard !Task.isCancelled else { return }
+                await self.applyResolvedAlbumCounts(resolvedAlbums, generation: refreshGeneration)
+            }
         } catch {
-            showMessage(title: "Album Load Failed", message: error.localizedDescription)
+            guard refreshGeneration == albumRefreshGeneration else {
+                return
+            }
+
+            if !retainedAlbums.isEmpty {
+                albums = retainedAlbums
+            }
+            albumLoadState = .failed(message: error.localizedDescription)
         }
     }
 
@@ -910,6 +949,7 @@ final class AppViewModel: ObservableObject {
     }
 
     func openImmersivePreview() {
+        isOpeningImmersivePreview = true
         immersiveDisplayedItemPreview = lastCompletedItemPreview
         queuedImmersivePreviews.removeAll()
         immersiveLastPreviewPresentedAt = immersiveDisplayedItemPreview == nil ? nil : Date()
@@ -921,6 +961,7 @@ final class AppViewModel: ObservableObject {
         if isPresented {
             scheduleImmersivePreviewAdvanceIfNeeded()
         } else {
+            isOpeningImmersivePreview = false
             immersivePreviewTask?.cancel()
             immersivePreviewTask = nil
             queuedImmersivePreviews.removeAll()
@@ -999,6 +1040,7 @@ final class AppViewModel: ObservableObject {
     }
 
     private func resetImmersivePreviewState() {
+        isOpeningImmersivePreview = false
         immersivePreviewTask?.cancel()
         immersivePreviewTask = nil
         immersiveDisplayedItemPreview = nil
@@ -1116,6 +1158,20 @@ final class AppViewModel: ObservableObject {
             itemsPerMinute: ratePerMinute,
             etaSeconds: etaSeconds
         )
+    }
+
+    func markImmersivePreviewOpened() {
+        isOpeningImmersivePreview = false
+    }
+
+    private func applyResolvedAlbumCounts(_ resolvedAlbums: [AlbumSummary], generation: Int) async {
+        guard generation == albumRefreshGeneration else {
+            return
+        }
+
+        albums = resolvedAlbums
+        albumLoadState = .ready
+        await reconcileCaptionWorkflowSelections(persistChanges: true)
     }
 
     private func loadPersistedRunState() async {
@@ -1654,6 +1710,7 @@ struct MainView: View {
                                 sourceSelection: $viewModel.sourceSelection,
                                 selectedAlbumID: $viewModel.selectedAlbumID,
                                 albums: viewModel.albums,
+                                albumLoadState: viewModel.albumLoadState,
                                 captionWorkflowQueueRows: viewModel.captionWorkflowQueueRows,
                                 captionWorkflowStatusMessage: viewModel.captionWorkflowStatusMessage,
                                 useDateFilter: $viewModel.useDateFilter,
@@ -1700,6 +1757,7 @@ struct MainView: View {
                                     progress: viewModel.progress,
                                     performance: viewModel.performance,
                                     isRunning: viewModel.isRunning,
+                                    isOpeningImmersivePreview: viewModel.isOpeningImmersivePreview,
                                     statusMessage: viewModel.runStatusMessage,
                                     summary: viewModel.lastSummary,
                                     liveErrors: viewModel.recentRunErrors,
@@ -1745,6 +1803,16 @@ struct MainView: View {
         .onChange(of: viewModel.isImmersivePreviewPresented) { _, isPresented in
             viewModel.handleImmersivePresentationChange(isPresented)
             handleImmersivePresentationChange(isPresented)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didEnterFullScreenNotification)) { notification in
+            guard let window = notification.object as? NSWindow else { return }
+            guard window == currentWindow() else { return }
+            viewModel.markImmersivePreviewOpened()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didExitFullScreenNotification)) { notification in
+            guard let window = notification.object as? NSWindow else { return }
+            guard window == currentWindow() else { return }
+            immersiveAutoEnteredFullScreen = false
         }
         .sheet(item: $viewModel.pendingConflictPrompt) { prompt in
             ConflictPromptView(prompt: prompt) { overwrite in
@@ -1991,6 +2059,7 @@ struct MainView: View {
                 window.toggleFullScreen(nil)
             } else {
                 immersiveAutoEnteredFullScreen = false
+                viewModel.markImmersivePreviewOpened()
             }
             return
         }

@@ -1,10 +1,10 @@
 # Photos Caption Assistant
 
-Current version/build: 3.5.0 (8)
+Current version/build: 3.5.1 (9)
 Current description logic version: 3.0.0
 
 Current overall status:
-The current source tree builds locally as version 3.5.0 build 8 and now includes safer run preflight checks, menu-accessible storage and diagnostics windows, a universal macOS build script, and the new Photos Caption Assistant identity. The core local captioning workflow is working, but this is still a personal hobby app built around Apple Photos automation rather than a polished public-distribution product.
+The current source tree builds locally as version 3.5.1 build 9 and now includes safer run preflight checks, menu-accessible storage and diagnostics windows, a universal macOS build script, and the new Photos Caption Assistant identity. The core local captioning workflow is working, but this is still a personal hobby app built around Apple Photos automation rather than a polished public-distribution product.
 
 What is working now:
 - Local photo and video analysis through Ollama with the `qwen2.5vl:7b` model.
@@ -12,7 +12,10 @@ What is working now:
 - Library, album, picker, and Queued Albums runs.
 - Visible run-summary/preflight UI showing source scope, exact count where practical, overwrite behavior, model status, and local Ollama service status.
 - The main screen now uses a denser two-column workbench layout: card-based setup controls on the left and a compact preview-forward run summary/result pane on the right.
+- Album names now surface before PhotoKit finishes resolving counts, so album-mode controls stop feeling dead on cold launch.
 - The immersive completed-item view now uses a hybrid media layout: roomy landscape items keep the slim top HUD plus low-cover bottom dock, while tighter aspect ratios fall back to a dedicated bottom shelf so the chrome stays fully visible.
+- Aspect-fit immersive media now uses a restrained ambient matte instead of a flat black letterbox, and empty immersive state copy is centered until a completed preview exists.
+- Capture dates now come across from AppleScript as stable local wall-clock timestamps so immersive timestamps match the Mac's local time instead of drifting through the earlier pseudo-epoch conversion.
 - Run Summary now sits beside the main setup controls, while Data & Storage and Diagnostics live in separate windows opened from the menu bar.
 - Safer startup defaults: `Album` is selected by default, and no-prompt overwrite of non-app metadata is off by default.
 - Whole-library runs require explicit confirmation before write work starts.

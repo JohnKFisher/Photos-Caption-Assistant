@@ -130,6 +130,26 @@ final class PhotosAppleScriptClientTests: XCTestCase {
         XCTAssertEqual(parsed?.timeIntervalSince1970 ?? 0, 1_712_104_496, accuracy: 0.001)
     }
 
+    func testParseCaptureDateAcceptsStableLocalTimestampFormat() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = .autoupdatingCurrent
+        let expected = calendar.date(
+            from: DateComponents(
+                timeZone: .autoupdatingCurrent,
+                year: 2026,
+                month: 3,
+                day: 29,
+                hour: 11,
+                minute: 14,
+                second: 0
+            )
+        )
+
+        let parsed = PhotosAppleScriptClient.parseCaptureDate("2026-03-29 11:14:00")
+
+        XCTAssertEqual(parsed, expected)
+    }
+
     func testParseCaptureDateRetainsLegacyLocaleFallback() {
         let formatter = DateFormatter()
         formatter.locale = .autoupdatingCurrent

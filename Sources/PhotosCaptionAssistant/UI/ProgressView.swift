@@ -6,6 +6,7 @@ struct ProcessingProgressView: View {
     let progress: RunProgress
     let performance: RunPerformanceStats
     let isRunning: Bool
+    let isOpeningImmersivePreview: Bool
     let statusMessage: String?
     let summary: RunSummary?
     let liveErrors: [String]
@@ -44,11 +45,20 @@ struct ProcessingProgressView: View {
                         Button {
                             onOpenImmersivePreview?()
                         } label: {
-                            Label("Immersive View", systemImage: "arrow.up.left.and.arrow.down.right")
+                            HStack(spacing: 6) {
+                                if isOpeningImmersivePreview {
+                                    SwiftUI.ProgressView()
+                                        .controlSize(.small)
+                                } else {
+                                    Image(systemName: "arrow.up.left.and.arrow.down.right")
+                                }
+
+                                Text(isOpeningImmersivePreview ? "Opening…" : "Immersive View")
+                            }
                         }
                         .buttonStyle(.bordered)
                         .font(.caption)
-                        .disabled(onOpenImmersivePreview == nil)
+                        .disabled(onOpenImmersivePreview == nil || isOpeningImmersivePreview)
                     }
                 }
 

@@ -36,6 +36,13 @@ enum SourceSelection: String, CaseIterable, Identifiable {
     }
 }
 
+enum AlbumLoadState: Equatable {
+    case loadingNames
+    case loadingCounts
+    case ready
+    case failed(message: String)
+}
+
 private extension RunTraversalOrder {
     var title: String {
         switch self {
@@ -142,6 +149,7 @@ struct RunSetupView: View {
     @Binding var sourceSelection: SourceSelection
     @Binding var selectedAlbumID: String?
     let albums: [AlbumSummary]
+    let albumLoadState: AlbumLoadState
     let captionWorkflowQueueRows: [CaptionWorkflowQueueRowState]
     let captionWorkflowStatusMessage: String?
 
@@ -163,6 +171,44 @@ struct RunSetupView: View {
     let onMoveCaptionWorkflowQueueRowDown: (Int) -> Void
 
     @State private var pickerItems: [PhotosPickerItem] = []
+
+    private var isAlbumNamesLoading: Bool {
+        if case .loadingNames = albumLoadState {
+            return true
+        }
+        return false
+    }
+
+    private var isAlbumCountsLoading: Bool {
+        if case .loadingCounts = albumLoadState {
+            return true
+        }
+        return false
+    }
+
+    private var albumLoadFailureMessage: String? {
+        if case let .failed(message) = albumLoadState {
+            return message
+        }
+        return nil
+    }
+
+    private var hasUsableAlbumList: Bool {
+        !albums.isEmpty
+    }
+
+    private var albumPickerPlaceholder: String {
+        if isAlbumNamesLoading && !hasUsableAlbumList {
+            return "Loading albums…"
+        }
+        if hasUsableAlbumList {
+            return "Choose an album"
+        }
+        if albumLoadFailureMessage != nil {
+            return "Albums unavailable"
+        }
+        return "No albums found"
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -267,32 +313,7 @@ struct RunSetupView: View {
         case .library:
             WorkbenchNotice("Whole-library estimates and confirmation messaging appear in the Run Summary panel.")
         case .album:
-            if albums.isEmpty {
-                WorkbenchNotice(
-                    "No albums are available yet. Reload if Photos just opened.",
-                    fill: WorkbenchPalette.warningFill,
-                    textColor: WorkbenchPalette.warningText
-                )
-            } else {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Album")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(WorkbenchPalette.muted)
-
-                    Picker("Album", selection: Binding(get: {
-                        selectedAlbumID ?? ""
-                    }, set: { value in
-                        selectedAlbumID = value.isEmpty ? nil : value
-                    })) {
-                        Text("Choose an album").tag("")
-                        ForEach(albums) { album in
-                            Text(album.itemCount >= 0 ? "\(album.name) (\(album.itemCount))" : album.name)
-                                .tag(album.id)
-                        }
-                    }
-                    .labelsHidden()
-                }
-            }
+            albumSelectionSection
         case .picker:
             if pickerSupported {
                 VStack(alignment: .leading, spacing: 10) {
@@ -327,6 +348,14 @@ struct RunSetupView: View {
         VStack(alignment: .leading, spacing: 12) {
             WorkbenchNotice("Runs the configured albums in order and validates duplicate or missing selections before start.")
 
+            if let notice = albumLoadingNotice {
+                albumLoadingNoticeView(
+                    text: notice.text,
+                    isWarning: notice.isWarning,
+                    showSpinner: notice.showSpinner
+                )
+            }
+
             ForEach(Array(captionWorkflowQueueRows.enumerated()), id: \.element.id) { index, row in
                 HStack(alignment: .center, spacing: 10) {
                     Text("\(index + 1)")
@@ -349,13 +378,14 @@ struct RunSetupView: View {
                                 .tag(albumID)
                         }
 
-                        Text("Choose an album").tag("")
+                        Text(albumPickerPlaceholder).tag("")
                         ForEach(albums) { album in
-                            Text(album.itemCount >= 0 ? "\(album.name) (\(album.itemCount))" : album.name)
+                            Text(albumLabel(for: album))
                                 .tag(album.id)
                         }
                     }
                     .labelsHidden()
+                    .disabled(!hasUsableAlbumList)
 
                     Spacer(minLength: 0)
 
@@ -424,5 +454,112 @@ struct RunSetupView: View {
         .buttonStyle(.borderless)
         .disabled(disabled)
         .frame(width: 28, height: 28)
+    }
+
+    private var albumSelectionSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Text("Album")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(WorkbenchPalette.muted)
+
+                if isAlbumNamesLoading || isAlbumCountsLoading {
+                    SwiftUI.ProgressView()
+                        .controlSize(.small)
+                }
+            }
+
+            Picker("Album", selection: Binding(get: {
+                selectedAlbumID ?? ""
+            }, set: { value in
+                selectedAlbumID = value.isEmpty ? nil : value
+            })) {
+                Text(albumPickerPlaceholder).tag("")
+                ForEach(albums) { album in
+                    Text(albumLabel(for: album))
+                        .tag(album.id)
+                }
+            }
+            .labelsHidden()
+            .disabled(!hasUsableAlbumList)
+
+            if let notice = albumLoadingNotice {
+                albumLoadingNoticeView(
+                    text: notice.text,
+                    isWarning: notice.isWarning,
+                    showSpinner: notice.showSpinner
+                )
+            }
+        }
+    }
+
+    private var albumLoadingNotice: (text: String, isWarning: Bool, showSpinner: Bool)? {
+        if isAlbumNamesLoading && !hasUsableAlbumList {
+            return (
+                "Loading album names from Photos. The picker will unlock as soon as names arrive.",
+                false,
+                true
+            )
+        }
+
+        if isAlbumCountsLoading && hasUsableAlbumList {
+            return (
+                "Album names are ready. Finishing counts in the background.",
+                false,
+                true
+            )
+        }
+
+        if let message = albumLoadFailureMessage {
+            if hasUsableAlbumList {
+                return (
+                    "Album names are available, but refreshed counts could not be loaded. \(message)",
+                    true,
+                    false
+                )
+            }
+            return ("Album loading failed. \(message)", true, false)
+        }
+
+        if !hasUsableAlbumList {
+            return (
+                "No albums are available yet. Reload if Photos just opened.",
+                true,
+                false
+            )
+        }
+
+        return nil
+    }
+
+    private func albumLoadingNoticeView(
+        text: String,
+        isWarning: Bool,
+        showSpinner: Bool
+    ) -> some View {
+        HStack(alignment: .center, spacing: 8) {
+            if showSpinner {
+                SwiftUI.ProgressView()
+                    .controlSize(.small)
+            } else if isWarning {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.caption)
+                    .foregroundStyle(WorkbenchPalette.warningText)
+            }
+
+            Text(text)
+                .font(.footnote)
+                .foregroundStyle(isWarning ? WorkbenchPalette.warningText : WorkbenchPalette.muted)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(isWarning ? WorkbenchPalette.warningFill : WorkbenchPalette.accentSoft)
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+    }
+
+    private func albumLabel(for album: AlbumSummary) -> String {
+        album.itemCount >= 0 ? "\(album.name) (\(album.itemCount))" : album.name
     }
 }

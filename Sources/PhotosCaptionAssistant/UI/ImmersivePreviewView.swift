@@ -531,8 +531,12 @@ struct ImmersivePreviewView: View {
         _ resolvedMedia: ResolvedMedia,
         layout: ImmersivePreviewLayout
     ) -> some View {
-        Group {
+        ZStack {
             if let image = resolvedMedia.image {
+                if showsAmbientMatte(for: layout) {
+                    ambientMatteLayer(image: image, layout: layout)
+                }
+
                 Image(nsImage: image)
                     .resizable()
                     .aspectRatio(contentMode: layout.mediaSizingMode.contentMode)
@@ -541,8 +545,8 @@ struct ImmersivePreviewView: View {
                     .position(x: layout.mediaRect.midX, y: layout.mediaRect.midY)
             } else {
                 fallbackBackground
-                    .frame(width: layout.mediaRect.width, height: layout.mediaRect.height)
-                    .position(x: layout.mediaRect.midX, y: layout.mediaRect.midY)
+                    .frame(width: layout.mediaContainerRect.width, height: layout.mediaContainerRect.height)
+                    .position(x: layout.mediaContainerRect.midX, y: layout.mediaContainerRect.midY)
             }
         }
     }
@@ -566,8 +570,10 @@ struct ImmersivePreviewView: View {
             Text("Start a run and this view will update live as items complete.")
                 .font(.title3)
                 .foregroundStyle(Color.white.opacity(0.74))
+                .multilineTextAlignment(.center)
         }
         .padding(40)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
     }
 
     private func topBar(
@@ -849,6 +855,66 @@ struct ImmersivePreviewView: View {
                 RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                     .stroke(Self.panelStrokeColor, lineWidth: 1)
             )
+    }
+
+    private func ambientMatteLayer(
+        image: NSImage,
+        layout: ImmersivePreviewLayout
+    ) -> some View {
+        ZStack {
+            Image(nsImage: image)
+                .resizable()
+                .aspectRatio(contentMode: .fill)
+                .frame(
+                    width: layout.mediaContainerRect.width,
+                    height: layout.mediaContainerRect.height
+                )
+                .saturation(0.92)
+                .brightness(-0.08)
+                .scaleEffect(1.08)
+                .blur(radius: 34)
+                .clipped()
+
+            Rectangle()
+                .fill(Color.black.opacity(0.34))
+
+            LinearGradient(
+                colors: [
+                    Color.black.opacity(0.12),
+                    Color.black.opacity(0.34)
+                ],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+
+            RadialGradient(
+                colors: [
+                    Color.white.opacity(0.05),
+                    Color.black.opacity(0.26)
+                ],
+                center: .center,
+                startRadius: 0,
+                endRadius: max(layout.mediaContainerRect.width, layout.mediaContainerRect.height) * 0.72
+            )
+        }
+        .frame(
+            width: layout.mediaContainerRect.width,
+            height: layout.mediaContainerRect.height
+        )
+        .clipped()
+        .position(
+            x: layout.mediaContainerRect.midX,
+            y: layout.mediaContainerRect.midY
+        )
+    }
+
+    private func showsAmbientMatte(for layout: ImmersivePreviewLayout) -> Bool {
+        guard layout.mediaSizingMode == .aspectFit else {
+            return false
+        }
+
+        return abs(layout.mediaContainerRect.width - layout.mediaRect.width) > 1
+            || abs(layout.mediaContainerRect.height - layout.mediaRect.height) > 1
     }
 
     private var integratedCloseButton: some View {

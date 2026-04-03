@@ -1624,6 +1624,30 @@ public actor PhotosAppleScriptClient: PhotosWriter, PhotosProcessMonitoring, Pho
 
     private var baseIdentifierHelperAppleScript: String {
         """
+        on padTwoDigits(inputNumber)
+            set numericValue to inputNumber as integer
+            if numericValue < 10 then
+                return "0" & (numericValue as text)
+            end if
+            return numericValue as text
+        end padTwoDigits
+
+        on monthNumber(inputMonth)
+            if inputMonth is January then return 1
+            if inputMonth is February then return 2
+            if inputMonth is March then return 3
+            if inputMonth is April then return 4
+            if inputMonth is May then return 5
+            if inputMonth is June then return 6
+            if inputMonth is July then return 7
+            if inputMonth is August then return 8
+            if inputMonth is September then return 9
+            if inputMonth is October then return 10
+            if inputMonth is November then return 11
+            if inputMonth is December then return 12
+            return 1
+        end monthNumber
+
         on baseIdentifier(targetID)
             if targetID contains \"/\" then
                 set AppleScript's text item delimiters to \"/\"
@@ -1639,12 +1663,14 @@ public actor PhotosAppleScriptClient: PhotosWriter, PhotosProcessMonitoring, Pho
         on captureDateText(inputDate)
             if inputDate is missing value then return ""
             try
-                set epochDate to current date
-                set year of epochDate to 1970
-                set month of epochDate to January
-                set day of epochDate to 1
-                set time of epochDate to 0
-                return ((inputDate - epochDate) as integer) as text
+                set yearText to (year of inputDate as integer) as text
+                set monthText to my padTwoDigits(my monthNumber(month of inputDate))
+                set dayText to my padTwoDigits(day of inputDate)
+                set secondsSinceMidnight to time of inputDate
+                set hourText to my padTwoDigits(secondsSinceMidnight div 3600)
+                set minuteText to my padTwoDigits((secondsSinceMidnight mod 3600) div 60)
+                set secondText to my padTwoDigits(secondsSinceMidnight mod 60)
+                return yearText & "-" & monthText & "-" & dayText & " " & hourText & ":" & minuteText & ":" & secondText
             on error
                 return ""
             end try
@@ -1717,6 +1743,15 @@ public actor PhotosAppleScriptClient: PhotosWriter, PhotosProcessMonitoring, Pho
         let trimmed = dateString.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             return nil
+        }
+
+        let stableFormatter = DateFormatter()
+        stableFormatter.locale = Locale(identifier: "en_US_POSIX")
+        stableFormatter.calendar = Calendar(identifier: .gregorian)
+        stableFormatter.timeZone = .autoupdatingCurrent
+        stableFormatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
+        if let date = stableFormatter.date(from: trimmed) {
+            return date
         }
 
         if let epochSeconds = TimeInterval(trimmed) {
