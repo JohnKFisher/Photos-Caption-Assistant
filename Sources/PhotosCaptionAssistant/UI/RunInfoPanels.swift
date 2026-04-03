@@ -83,19 +83,17 @@ struct OllamaSetupCardView: View {
     let onRecheckSetup: () -> Void
 
     var body: some View {
-        GroupBox("Ollama Setup") {
+        WorkbenchCard(
+            title: "Ollama Setup",
+            subtitle: "Runs stay local-first, and third-party installation remains explicit."
+        ) {
             VStack(alignment: .leading, spacing: 10) {
-                Text("Caption generation needs a local Ollama install before runs can start.")
-                    .font(.headline)
-
                 Text("The app does not download or install third-party software automatically. When you choose to continue, it opens the official Ollama macOS download page in your browser so you can install it yourself.")
                     .font(.footnote)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(WorkbenchPalette.muted)
                     .fixedSize(horizontal: false, vertical: true)
 
-                Text("1. Open the official download page.\n2. Install Ollama.\n3. Return here and click Re-check Setup.")
-                    .font(.footnote)
-                    .fixedSize(horizontal: false, vertical: true)
+                WorkbenchNotice("1. Open the official download page.\n2. Install Ollama.\n3. Return here and click Re-check Setup.")
 
                 HStack {
                     Button("Open Ollama Download Page", action: onOpenDownloadPage)
@@ -109,7 +107,7 @@ struct OllamaSetupCardView: View {
 
                 Text("Installing Ollama and downloading the qwen2.5vl:7b model are separate steps. The model download stays opt-in and is confirmed later.")
                     .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(WorkbenchPalette.muted)
                     .fixedSize(horizontal: false, vertical: true)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -121,16 +119,19 @@ struct RunPreflightPanelView: View {
     let summary: RunPreflightSummary
 
     var body: some View {
-        GroupBox("Run Summary") {
-            VStack(alignment: .leading, spacing: 10) {
+        WorkbenchCard(
+            title: "Run Summary"
+        ) {
+            VStack(alignment: .leading, spacing: 9) {
                 Text(summary.sourceTitle)
                     .font(.headline)
+                    .foregroundStyle(WorkbenchPalette.text)
 
                 if !summary.sourceDetails.isEmpty {
                     ForEach(summary.sourceDetails, id: \.self) { detail in
                         Text(detail)
                             .font(.footnote)
-                            .foregroundStyle(.secondary)
+                            .foregroundStyle(WorkbenchPalette.muted)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
@@ -153,12 +154,20 @@ struct RunPreflightPanelView: View {
                 if !summary.blockingReasons.isEmpty {
                     Divider()
                     ForEach(summary.blockingReasons, id: \.self) { reason in
-                        callout(text: reason, tint: .orange)
+                        callout(
+                            text: reason,
+                            fill: WorkbenchPalette.warningFill,
+                            textColor: WorkbenchPalette.warningText
+                        )
                     }
                 } else if !summary.confirmationReasons.isEmpty {
                     Divider()
                     ForEach(summary.confirmationReasons, id: \.self) { reason in
-                        callout(text: reason, tint: .yellow)
+                        callout(
+                            text: reason,
+                            fill: WorkbenchPalette.warningFill,
+                            textColor: WorkbenchPalette.warningText
+                        )
                     }
                 }
             }
@@ -168,10 +177,11 @@ struct RunPreflightPanelView: View {
 
     @ViewBuilder
     private func labeledRow(_ title: String, text: String, showSpinner: Bool = false) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
+        HStack(alignment: .top, spacing: 10) {
             Text(title)
                 .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(WorkbenchPalette.muted)
+                .frame(width: 72, alignment: .leading)
 
             HStack(alignment: .top, spacing: 8) {
                 if showSpinner {
@@ -181,19 +191,22 @@ struct RunPreflightPanelView: View {
                 }
                 Text(text)
                     .font(.footnote)
+                    .foregroundStyle(WorkbenchPalette.text)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     @ViewBuilder
-    private func callout(text: String, tint: Color) -> some View {
+    private func callout(text: String, fill: Color, textColor: Color) -> some View {
         Text(text)
             .font(.footnote)
+            .foregroundStyle(textColor)
             .padding(.horizontal, 10)
             .padding(.vertical, 8)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(tint.opacity(0.15))
+            .background(fill)
             .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 }

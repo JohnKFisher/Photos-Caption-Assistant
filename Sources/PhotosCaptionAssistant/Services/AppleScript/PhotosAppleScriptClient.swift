@@ -42,12 +42,9 @@ public actor PhotosAppleScriptClient: PhotosWriter, PhotosProcessMonitoring, Pho
     }
 
     private let fileManager: FileManager
-    private let isoFormatter: ISO8601DateFormatter
 
     public init(fileManager: FileManager = .default) {
         self.fileManager = fileManager
-        self.isoFormatter = ISO8601DateFormatter()
-        self.isoFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
     }
 
     public func enumerate(scope: ScopeSource, dateRange: CaptureDateRange?) async throws -> [MediaAsset] {
@@ -152,7 +149,7 @@ public actor PhotosAppleScriptClient: PhotosWriter, PhotosProcessMonitoring, Pho
                     set itemDate to date of targetItem
                     set itemDateText to ""
                     try
-                        set itemDateText to itemDate as string
+                        set itemDateText to my captureDateText(itemDate)
                     on error
                         set itemDateText to ""
                     end try
@@ -664,7 +661,7 @@ public actor PhotosAppleScriptClient: PhotosWriter, PhotosProcessMonitoring, Pho
                 set itemFilename to filename of targetItem
                 set itemDateText to \"\"
                 try
-                    set itemDateText to (date of targetItem) as string
+                    set itemDateText to my captureDateText(date of targetItem)
                 on error
                     set itemDateText to \"\"
                 end try
@@ -1638,6 +1635,20 @@ public actor PhotosAppleScriptClient: PhotosWriter, PhotosProcessMonitoring, Pho
             end if
             return targetID
         end baseIdentifier
+
+        on captureDateText(inputDate)
+            if inputDate is missing value then return ""
+            try
+                set epochDate to current date
+                set year of epochDate to 1970
+                set month of epochDate to January
+                set day of epochDate to 1
+                set time of epochDate to 0
+                return ((inputDate - epochDate) as integer) as text
+            on error
+                return ""
+            end try
+        end captureDateText
         """
     }
 
@@ -1684,7 +1695,7 @@ public actor PhotosAppleScriptClient: PhotosWriter, PhotosProcessMonitoring, Pho
                 set itemDate to date of targetItem
                 set itemDateText to \"\"
                 try
-                    set itemDateText to itemDate as string
+                    set itemDateText to my captureDateText(itemDate)
                 on error
                     set itemDateText to \"\"
                 end try
@@ -1699,17 +1710,23 @@ public actor PhotosAppleScriptClient: PhotosWriter, PhotosProcessMonitoring, Pho
     }
 
     private func parseDate(_ dateString: String) -> Date? {
+        Self.parseCaptureDate(dateString)
+    }
+
+    static func parseCaptureDate(_ dateString: String) -> Date? {
         let trimmed = dateString.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             return nil
         }
 
-        if let date = isoFormatter.date(from: trimmed) {
-            return date
-        }
-
         if let epochSeconds = TimeInterval(trimmed) {
             return Date(timeIntervalSince1970: epochSeconds)
+        }
+
+        let isoFormatter = ISO8601DateFormatter()
+        isoFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = isoFormatter.date(from: trimmed) {
+            return date
         }
 
         let fallback = ISO8601DateFormatter()
@@ -1767,17 +1784,7 @@ public actor PhotosAppleScriptClient: PhotosWriter, PhotosProcessMonitoring, Pho
 
     private var mediaItemResolverAppleScript: String {
         """
-        on baseIdentifier(targetID)
-            if targetID contains \"/\" then
-                set AppleScript's text item delimiters to \"/\"
-                set idParts to text items of targetID
-                set AppleScript's text item delimiters to \"\"
-                if (count of idParts) > 0 then
-                    return item 1 of idParts
-                end if
-            end if
-            return targetID
-        end baseIdentifier
+        \(baseIdentifierHelperAppleScript)
 
         on resolveMediaItem(targetID)
             set normalizedID to targetID as text

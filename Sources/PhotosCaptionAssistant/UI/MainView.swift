@@ -1625,28 +1625,31 @@ struct MainView: View {
 
     var body: some View {
         ZStack {
-            ScrollView([.vertical, .horizontal]) {
-                VStack(alignment: .leading, spacing: 16) {
-                    HStack(alignment: .top, spacing: 16) {
-                        VStack(alignment: .leading, spacing: 16) {
-                            header
+            mainBackground
+                .ignoresSafeArea()
 
-                            if viewModel.shouldShowOllamaSetupCard {
-                                OllamaSetupCardView(
-                                    isBusy: viewModel.isRunning || viewModel.isPreparingModel,
-                                    onOpenDownloadPage: {
-                                        Task {
-                                            await viewModel.confirmAndOpenOllamaDownloadPage()
-                                        }
-                                    },
-                                    onRecheckSetup: {
-                                        Task {
-                                            await viewModel.recheckOllamaSetup()
-                                        }
+            VStack(spacing: 0) {
+                ScrollView([.vertical, .horizontal]) {
+                    VStack(alignment: .leading, spacing: 18) {
+                        header
+
+                        if viewModel.shouldShowOllamaSetupCard {
+                            OllamaSetupCardView(
+                                isBusy: viewModel.isRunning || viewModel.isPreparingModel,
+                                onOpenDownloadPage: {
+                                    Task {
+                                        await viewModel.confirmAndOpenOllamaDownloadPage()
                                     }
-                                )
-                            }
+                                },
+                                onRecheckSetup: {
+                                    Task {
+                                        await viewModel.recheckOllamaSetup()
+                                    }
+                                }
+                            )
+                        }
 
+                        HStack(alignment: .top, spacing: 18) {
                             RunSetupView(
                                 sourceSelection: $viewModel.sourceSelection,
                                 selectedAlbumID: $viewModel.selectedAlbumID,
@@ -1688,79 +1691,38 @@ struct MainView: View {
                                     }
                                 }
                             )
-                        }
-                        .frame(minWidth: 620, maxWidth: 760, alignment: .topLeading)
+                            .frame(minWidth: 680, maxWidth: 760, alignment: .topLeading)
 
-                        RunPreflightPanelView(summary: viewModel.runPreflightSummary)
-                            .frame(width: 340, alignment: .topLeading)
-                            .padding(.top, 52)
-                    }
+                            VStack(alignment: .leading, spacing: 16) {
+                                RunPreflightPanelView(summary: viewModel.runPreflightSummary)
 
-                    ProcessingProgressView(
-                        progress: viewModel.progress,
-                        performance: viewModel.performance,
-                        isRunning: viewModel.isRunning,
-                        statusMessage: viewModel.runStatusMessage,
-                        summary: viewModel.lastSummary,
-                        liveErrors: viewModel.recentRunErrors,
-                        lastCompletedItemPreview: viewModel.lastCompletedItemPreview,
-                        onOpenImmersivePreview: {
-                            viewModel.openImmersivePreview()
-                        }
-                    )
-
-                    HStack {
-                        Button("Reload Capabilities") {
-                            Task {
-                                await viewModel.loadInitialData()
-                            }
-                        }
-
-                        Spacer()
-
-                        if viewModel.isRunning {
-                            Button(viewModel.isCancelRequested ? "Canceling" : "Cancel Run") {
-                                viewModel.cancelRun()
-                            }
-                            .buttonStyle(.bordered)
-                            .disabled(viewModel.isCancelRequested)
-                        } else {
-                            if viewModel.canResumeSavedRun {
-                                Button("Resume Previous Run (\(viewModel.resumablePendingCount) pending)") {
-                                    Task {
-                                        await viewModel.resumeSavedRun()
+                                ProcessingProgressView(
+                                    progress: viewModel.progress,
+                                    performance: viewModel.performance,
+                                    isRunning: viewModel.isRunning,
+                                    statusMessage: viewModel.runStatusMessage,
+                                    summary: viewModel.lastSummary,
+                                    liveErrors: viewModel.recentRunErrors,
+                                    lastCompletedItemPreview: viewModel.lastCompletedItemPreview,
+                                    onOpenImmersivePreview: {
+                                        viewModel.openImmersivePreview()
                                     }
-                                }
-                                .buttonStyle(.borderedProminent)
-                                .disabled(viewModel.isPreparingModel)
+                                )
                             }
-
-                            if viewModel.canRetryFailedItems {
-                                Button("Retry Failed Items") {
-                                    Task {
-                                        await viewModel.retryFailedItems()
-                                    }
-                                }
-                                .buttonStyle(.bordered)
-                                .disabled(viewModel.isPreparingModel)
-                            }
-
-                            Button("Start Run") {
-                                Task {
-                                    await viewModel.startRun()
-                                }
-                            }
-                            .buttonStyle(.borderedProminent)
-                            .disabled(viewModel.isPreparingModel)
+                            .frame(width: 388, alignment: .topLeading)
                         }
                     }
+                    .padding(20)
+                    .frame(minWidth: 1110, maxWidth: .infinity, alignment: .topLeading)
                 }
-                .padding(20)
-                .frame(minWidth: 980, maxWidth: .infinity, alignment: .topLeading)
+                .allowsHitTesting(!viewModel.isImmersivePreviewPresented)
+                .environment(\.controlActiveState, viewModel.isImmersivePreviewPresented ? .inactive : .key)
+                .zIndex(0)
+
+                actionTray
+                    .allowsHitTesting(!viewModel.isImmersivePreviewPresented)
+                    .environment(\.controlActiveState, viewModel.isImmersivePreviewPresented ? .inactive : .key)
             }
-            .allowsHitTesting(!viewModel.isImmersivePreviewPresented)
-            .environment(\.controlActiveState, viewModel.isImmersivePreviewPresented ? .inactive : .key)
-            .zIndex(0)
 
             if viewModel.isImmersivePreviewPresented {
                 ImmersivePreviewView(
@@ -1814,70 +1776,209 @@ struct MainView: View {
         }
     }
 
+    private var mainBackground: some View {
+        LinearGradient(
+            colors: [
+                Color(red: 0.95, green: 0.97, blue: 0.98),
+                Color(red: 0.92, green: 0.95, blue: 0.97)
+            ],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
+        )
+        .overlay(
+            RadialGradient(
+                colors: [
+                    WorkbenchPalette.accentSoft.opacity(0.55),
+                    Color.clear
+                ],
+                center: .topTrailing,
+                startRadius: 0,
+                endRadius: 520
+            )
+        )
+    }
+
     private var header: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(AppPresentation.appName)
-                .font(.largeTitle.bold())
-
-            HStack(spacing: 12) {
-                Text(VersionDisplay.appVersionLine)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Text(VersionDisplay.logicVersionLine)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            HStack(spacing: 12) {
-                capabilityBadge("Automation", available: viewModel.capabilities.photosAutomationAvailable)
-                capabilityBadge("Qwen 2.5VL 7B", available: viewModel.capabilities.qwenModelAvailable)
-                capabilityBadge("Picker", available: viewModel.pickerSupported)
-            }
-
-            HStack(spacing: 8) {
-                if viewModel.isPreparingModel {
-                    SwiftUI.ProgressView()
-                        .controlSize(.small)
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .top, spacing: 16) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(AppPresentation.appName)
+                        .font(.system(size: 30, weight: .bold, design: .rounded))
+                        .foregroundStyle(WorkbenchPalette.text)
                 }
-                Text(viewModel.ollamaStatusMessage)
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            }
 
-            if let benchmarkStatusMessage = viewModel.benchmarkStatusMessage {
+                Spacer(minLength: 0)
+
                 HStack(spacing: 8) {
-                    if viewModel.isRunningScanBenchmark {
-                        SwiftUI.ProgressView()
-                            .controlSize(.small)
-                    }
-                    Text(benchmarkStatusMessage)
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
+                    capabilityBadge("Automation", available: viewModel.capabilities.photosAutomationAvailable)
+                    capabilityBadge("Qwen 2.5VL 7B", available: viewModel.capabilities.qwenModelAvailable)
+                    capabilityBadge("Picker", available: viewModel.pickerSupported)
                 }
             }
 
-            if let identityProbeStatusMessage = viewModel.identityProbeStatusMessage {
-                HStack(spacing: 8) {
-                    if viewModel.isRunningIdentityWriteProbe {
-                        SwiftUI.ProgressView()
-                            .controlSize(.small)
-                    }
-                    Text(identityProbeStatusMessage)
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
+            HStack(spacing: 10) {
+                detailBadge(VersionDisplay.appVersionLine)
+                detailBadge(VersionDisplay.logicVersionLine)
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                statusLine(text: viewModel.ollamaStatusMessage, isBusy: viewModel.isPreparingModel)
+
+                if let benchmarkStatusMessage = viewModel.benchmarkStatusMessage {
+                    statusLine(text: benchmarkStatusMessage, isBusy: viewModel.isRunningScanBenchmark)
+                }
+
+                if let identityProbeStatusMessage = viewModel.identityProbeStatusMessage {
+                    statusLine(text: identityProbeStatusMessage, isBusy: viewModel.isRunningIdentityWriteProbe)
                 }
             }
         }
+        .padding(20)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 26, style: .continuous)
+                .fill(WorkbenchPalette.surface)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 26, style: .continuous)
+                .strokeBorder(WorkbenchPalette.border, lineWidth: 1)
+        )
+        .shadow(color: .black.opacity(0.04), radius: 10, x: 0, y: 6)
     }
 
     @ViewBuilder
     private func capabilityBadge(_ title: String, available: Bool) -> some View {
         Text("\(title): \(available ? "Available" : "Unavailable")")
-            .font(.caption)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 5)
-            .background(available ? Color.green.opacity(0.18) : Color.orange.opacity(0.2))
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(available ? WorkbenchPalette.accent : WorkbenchPalette.warningText)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .background(available ? WorkbenchPalette.accentSoft : WorkbenchPalette.warningFill)
             .clipShape(Capsule())
+    }
+
+    private func detailBadge(_ text: String) -> some View {
+        Text(text)
+            .font(.caption)
+            .foregroundStyle(WorkbenchPalette.muted)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(WorkbenchPalette.surfaceAlt)
+            .clipShape(Capsule())
+    }
+
+    private func statusLine(text: String, isBusy: Bool) -> some View {
+        HStack(spacing: 8) {
+            if isBusy {
+                SwiftUI.ProgressView()
+                    .controlSize(.small)
+            } else {
+                Circle()
+                    .fill(WorkbenchPalette.accent)
+                    .frame(width: 6, height: 6)
+            }
+
+            Text(text)
+                .font(.footnote)
+                .foregroundStyle(WorkbenchPalette.muted)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var actionTray: some View {
+        HStack(alignment: .center, spacing: 14) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(actionTrayTitle)
+                    .font(.headline)
+                    .foregroundStyle(WorkbenchPalette.text)
+
+                Text(actionTrayDetail)
+                    .font(.footnote)
+                    .foregroundStyle(WorkbenchPalette.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Spacer(minLength: 0)
+
+            Button("Reload") {
+                Task {
+                    await viewModel.loadInitialData()
+                }
+            }
+            .buttonStyle(.bordered)
+
+            if viewModel.isRunning {
+                Button(viewModel.isCancelRequested ? "Canceling" : "Cancel Run") {
+                    viewModel.cancelRun()
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(viewModel.isCancelRequested)
+            } else {
+                if viewModel.canRetryFailedItems {
+                    Button("Retry Failed") {
+                        Task {
+                            await viewModel.retryFailedItems()
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(viewModel.isPreparingModel)
+                }
+
+                if viewModel.canResumeSavedRun {
+                    Button("Resume Previous Run (\(viewModel.resumablePendingCount))") {
+                        Task {
+                            await viewModel.resumeSavedRun()
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(viewModel.isPreparingModel)
+                }
+
+                Button("Start Run") {
+                    Task {
+                        await viewModel.startRun()
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(viewModel.isPreparingModel)
+            }
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 14)
+        .background(
+            Rectangle()
+                .fill(WorkbenchPalette.surface)
+                .shadow(color: .black.opacity(0.05), radius: 8, x: 0, y: -4)
+        )
+        .overlay(alignment: .top) {
+            Divider()
+        }
+    }
+
+    private var actionTrayTitle: String {
+        if viewModel.isRunning {
+            return "Run in progress"
+        }
+        if !viewModel.runPreflightSummary.blockingReasons.isEmpty {
+            return "Needs attention"
+        }
+        if !viewModel.runPreflightSummary.confirmationReasons.isEmpty {
+            return "Ready with confirmation"
+        }
+        return "Ready to run"
+    }
+
+    private var actionTrayDetail: String {
+        if viewModel.isRunning {
+            return viewModel.runStatusMessage ?? "The latest completed item updates here while the run progresses."
+        }
+        if let blocking = viewModel.runPreflightSummary.blockingReasons.first {
+            return blocking
+        }
+        if let confirmation = viewModel.runPreflightSummary.confirmationReasons.first {
+            return confirmation
+        }
+        return "Review the run summary, then start when you're ready."
     }
 
     private func handleImmersivePresentationChange(_ isPresented: Bool) {

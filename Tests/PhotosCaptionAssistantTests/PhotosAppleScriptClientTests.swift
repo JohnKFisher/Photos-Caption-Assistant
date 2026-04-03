@@ -124,6 +124,26 @@ final class PhotosAppleScriptClientTests: XCTestCase {
         )
     }
 
+    func testParseCaptureDateAcceptsUnixEpochSeconds() {
+        let parsed = PhotosAppleScriptClient.parseCaptureDate("1712104496")
+        XCTAssertNotNil(parsed)
+        XCTAssertEqual(parsed?.timeIntervalSince1970 ?? 0, 1_712_104_496, accuracy: 0.001)
+    }
+
+    func testParseCaptureDateRetainsLegacyLocaleFallback() {
+        let formatter = DateFormatter()
+        formatter.locale = .autoupdatingCurrent
+        formatter.timeZone = .autoupdatingCurrent
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .medium
+
+        let sourceDate = Date(timeIntervalSince1970: 1_712_104_496)
+        let dateText = formatter.string(from: sourceDate)
+        let parsed = PhotosAppleScriptClient.parseCaptureDate(dateText)
+
+        XCTAssertNotNil(parsed)
+    }
+
     func testWaitForConditionReturnsTrueBeforeTimeout() async {
         let result = await PhotosAppleScriptClient.waitForCondition(
             timeoutSeconds: 0.05,

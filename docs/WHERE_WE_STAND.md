@@ -1,16 +1,18 @@
 # Photos Caption Assistant
 
-Current version/build: 3.0.2 (3)
+Current version/build: 3.5.0 (8)
 Current description logic version: 3.0.0
 
 Current overall status:
-The current source tree builds locally as version 3.0.2 build 3 and now includes safer run preflight checks, menu-accessible storage and diagnostics windows, a universal macOS build script, and the new Photos Caption Assistant identity. The core local captioning workflow is working, but this is still a personal hobby app built around Apple Photos automation rather than a polished public-distribution product.
+The current source tree builds locally as version 3.5.0 build 8 and now includes safer run preflight checks, menu-accessible storage and diagnostics windows, a universal macOS build script, and the new Photos Caption Assistant identity. The core local captioning workflow is working, but this is still a personal hobby app built around Apple Photos automation rather than a polished public-distribution product.
 
 What is working now:
 - Local photo and video analysis through Ollama with the `qwen2.5vl:7b` model.
 - Apple Photos metadata reads and writes, including captions, keywords, and app ownership tags.
 - Library, album, picker, and Queued Albums runs.
 - Visible run-summary/preflight UI showing source scope, exact count where practical, overwrite behavior, model status, and local Ollama service status.
+- The main screen now uses a denser two-column workbench layout: card-based setup controls on the left and a compact preview-forward run summary/result pane on the right.
+- The immersive completed-item view now uses a full-bleed photo with a slim top HUD and a low-cover bottom dock instead of the older split artwork/details layout.
 - Run Summary now sits beside the main setup controls, while Data & Storage and Diagnostics live in separate windows opened from the menu bar.
 - Safer startup defaults: `Album` is selected by default, and no-prompt overwrite of non-app metadata is off by default.
 - Whole-library runs require explicit confirmation before write work starts.

@@ -21,6 +21,19 @@ enum SourceSelection: String, CaseIterable, Identifiable {
             return AppPresentation.queuedAlbumsTitle
         }
     }
+
+    var summary: String {
+        switch self {
+        case .library:
+            return "Process the full library. Confirmation still appears before wider or heavier runs."
+        case .album:
+            return "Keep the run tightly scoped by picking a specific album here."
+        case .picker:
+            return "Hand-pick individual photos or videos with the system picker."
+        case .captionWorkflow:
+            return "Run a saved album queue from top to bottom with repair checks before start."
+        }
+    }
 }
 
 private extension RunTraversalOrder {
@@ -37,6 +50,91 @@ private extension RunTraversalOrder {
         case .cycle:
             return "Cycle (oldest,newest,random)"
         }
+    }
+}
+
+enum WorkbenchPalette {
+    static let text = Color(red: 0.09, green: 0.14, blue: 0.18)
+    static let muted = Color(red: 0.38, green: 0.44, blue: 0.49)
+    static let accent = Color(red: 0.29, green: 0.50, blue: 0.65)
+    static let accentSoft = Color(red: 0.91, green: 0.95, blue: 0.98)
+    static let border = Color(red: 0.84, green: 0.88, blue: 0.91)
+    static let surface = Color.white.opacity(0.96)
+    static let surfaceAlt = Color(red: 0.97, green: 0.98, blue: 0.99)
+    static let warningFill = Color(red: 0.97, green: 0.94, blue: 0.81)
+    static let warningText = Color(red: 0.44, green: 0.35, blue: 0.11)
+}
+
+struct WorkbenchCard<Content: View>: View {
+    let title: String
+    let subtitle: String?
+    @ViewBuilder let content: () -> Content
+
+    init(
+        title: String,
+        subtitle: String? = nil,
+        @ViewBuilder content: @escaping () -> Content
+    ) {
+        self.title = title
+        self.subtitle = subtitle
+        self.content = content
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.headline)
+                    .foregroundStyle(WorkbenchPalette.text)
+
+                if let subtitle, !subtitle.isEmpty {
+                    Text(subtitle)
+                        .font(.footnote)
+                        .foregroundStyle(WorkbenchPalette.muted)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            content()
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .fill(WorkbenchPalette.surface)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .strokeBorder(WorkbenchPalette.border, lineWidth: 1)
+        )
+        .shadow(color: .black.opacity(0.035), radius: 8, x: 0, y: 5)
+    }
+}
+
+struct WorkbenchNotice: View {
+    let text: String
+    let fill: Color
+    let textColor: Color
+
+    init(
+        _ text: String,
+        fill: Color = WorkbenchPalette.accentSoft,
+        textColor: Color = WorkbenchPalette.muted
+    ) {
+        self.text = text
+        self.fill = fill
+        self.textColor = textColor
+    }
+
+    var body: some View {
+        Text(text)
+            .font(.footnote)
+            .foregroundStyle(textColor)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(fill)
+            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
     }
 }
 
@@ -67,8 +165,21 @@ struct RunSetupView: View {
     @State private var pickerItems: [PhotosPickerItem] = []
 
     var body: some View {
-        Form {
-            Section("Source") {
+        VStack(alignment: .leading, spacing: 16) {
+            sourceCard
+            secondaryCards
+        }
+        .onChange(of: pickerItems, initial: false) { _, newItems in
+            pickerIDs = newItems.compactMap(\.itemIdentifier)
+        }
+    }
+
+    private var sourceCard: some View {
+        WorkbenchCard(
+            title: "Source",
+            subtitle: sourceSelection.summary
+        ) {
+            VStack(alignment: .leading, spacing: 12) {
                 Picker("Selection", selection: $sourceSelection) {
                     ForEach(SourceSelection.allCases) { source in
                         Text(source.title).tag(source)
@@ -76,7 +187,98 @@ struct RunSetupView: View {
                 }
                 .pickerStyle(.segmented)
 
-                if sourceSelection == .album {
+                sourceConfiguration
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var secondaryCards: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(alignment: .top, spacing: 16) {
+                captureDateCard
+                runRulesCard
+            }
+
+            VStack(alignment: .leading, spacing: 16) {
+                captureDateCard
+                runRulesCard
+            }
+        }
+    }
+
+    private var captureDateCard: some View {
+        WorkbenchCard(
+            title: "Capture Date Filter",
+            subtitle: "Optional scope guardrail before model preparation starts."
+        ) {
+            VStack(alignment: .leading, spacing: 12) {
+                Toggle("Limit by capture date", isOn: $useDateFilter)
+
+                if useDateFilter {
+                    HStack(alignment: .top, spacing: 14) {
+                        dateField(title: "Start", selection: $startDate)
+                        dateField(title: "End", selection: $endDate)
+                    }
+                } else {
+                    WorkbenchNotice("All capture dates in the current source remain eligible.")
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+    }
+
+    private var runRulesCard: some View {
+        WorkbenchCard(
+            title: "Run Rules"
+        ) {
+            VStack(alignment: .leading, spacing: 12) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Processing Order")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(WorkbenchPalette.muted)
+
+                    Picker("Order", selection: $traversalOrder) {
+                        Text(RunTraversalOrder.photosOrderFast.title).tag(RunTraversalOrder.photosOrderFast)
+                        Text(RunTraversalOrder.oldestToNewest.title).tag(RunTraversalOrder.oldestToNewest)
+                        Text(RunTraversalOrder.newestToOldest.title).tag(RunTraversalOrder.newestToOldest)
+                        Text(RunTraversalOrder.random.title).tag(RunTraversalOrder.random)
+                        Text(RunTraversalOrder.cycle.title).tag(RunTraversalOrder.cycle)
+                    }
+                    .labelsHidden()
+                }
+
+                Divider()
+
+                Toggle("Overwrite app-owned same/newer metadata", isOn: $overwriteAppOwnedSameOrNewer)
+                Toggle("Always overwrite non-app metadata (no per-item prompts)", isOn: $alwaysOverwriteExternalMetadata)
+
+                WorkbenchNotice(
+                    "External metadata stays protected unless you widen the overwrite rule and then confirm it at run start."
+                )
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+    }
+
+    @ViewBuilder
+    private var sourceConfiguration: some View {
+        switch sourceSelection {
+        case .library:
+            WorkbenchNotice("Whole-library estimates and confirmation messaging appear in the Run Summary panel.")
+        case .album:
+            if albums.isEmpty {
+                WorkbenchNotice(
+                    "No albums are available yet. Reload if Photos just opened.",
+                    fill: WorkbenchPalette.warningFill,
+                    textColor: WorkbenchPalette.warningText
+                )
+            } else {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Album")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(WorkbenchPalette.muted)
+
                     Picker("Album", selection: Binding(get: {
                         selectedAlbumID ?? ""
                     }, set: { value in
@@ -88,122 +290,139 @@ struct RunSetupView: View {
                                 .tag(album.id)
                         }
                     }
+                    .labelsHidden()
                 }
+            }
+        case .picker:
+            if pickerSupported {
+                VStack(alignment: .leading, spacing: 10) {
+                    PhotosPicker(
+                        selection: $pickerItems,
+                        maxSelectionCount: nil,
+                        matching: .any(of: [.images, .videos]),
+                        photoLibrary: .shared()
+                    ) {
+                        Label("Select Photos or Videos", systemImage: "photo.on.rectangle.angled")
+                    }
 
-                if sourceSelection == .picker {
-                    if pickerSupported {
-                        PhotosPicker(
-                            selection: $pickerItems,
-                            maxSelectionCount: nil,
-                            matching: .any(of: [.images, .videos]),
-                            photoLibrary: .shared()
+                    WorkbenchNotice(
+                        pickerIDs.isEmpty
+                            ? "No picker items selected yet."
+                            : "\(pickerIDs.count) photo or video item(s) selected."
+                    )
+                }
+            } else {
+                WorkbenchNotice(
+                    pickerUnsupportedReason ?? "Picker mode is unavailable on this setup.",
+                    fill: WorkbenchPalette.warningFill,
+                    textColor: WorkbenchPalette.warningText
+                )
+            }
+        case .captionWorkflow:
+            captionWorkflowConfiguration
+        }
+    }
+
+    private var captionWorkflowConfiguration: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            WorkbenchNotice("Runs the configured albums in order and validates duplicate or missing selections before start.")
+
+            ForEach(Array(captionWorkflowQueueRows.enumerated()), id: \.element.id) { index, row in
+                HStack(alignment: .center, spacing: 10) {
+                    Text("\(index + 1)")
+                        .font(.caption.monospacedDigit().weight(.semibold))
+                        .foregroundStyle(WorkbenchPalette.muted)
+                        .frame(width: 24, height: 24)
+                        .background(WorkbenchPalette.accentSoft)
+                        .clipShape(Circle())
+
+                    Picker("", selection: Binding(get: {
+                        row.albumID ?? ""
+                    }, set: { value in
+                        onCaptionWorkflowAlbumSelectionChanged(index, value.isEmpty ? nil : value)
+                    })) {
+                        if let albumID = row.albumID,
+                           !albumID.isEmpty,
+                           !albums.contains(where: { $0.id == albumID })
+                        {
+                            Text("Missing: \(row.savedAlbumName ?? "Unknown Album")")
+                                .tag(albumID)
+                        }
+
+                        Text("Choose an album").tag("")
+                        ForEach(albums) { album in
+                            Text(album.itemCount >= 0 ? "\(album.name) (\(album.itemCount))" : album.name)
+                                .tag(album.id)
+                        }
+                    }
+                    .labelsHidden()
+
+                    Spacer(minLength: 0)
+
+                    HStack(spacing: 4) {
+                        queueButton(systemName: "arrow.up", disabled: index == 0) {
+                            onMoveCaptionWorkflowQueueRowUp(index)
+                        }
+
+                        queueButton(systemName: "arrow.down", disabled: index == captionWorkflowQueueRows.count - 1) {
+                            onMoveCaptionWorkflowQueueRowDown(index)
+                        }
+
+                        queueButton(
+                            systemName: "minus.circle",
+                            disabled: captionWorkflowQueueRows.count <= CaptionWorkflowConfiguration.minimumQueueLength
                         ) {
-                            Text("Select Photos or Videos")
-                        }
-                        Text("Selected IDs: \(pickerIDs.count)")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    } else {
-                        Text(pickerUnsupportedReason ?? "Picker mode is unavailable on this setup.")
-                            .foregroundStyle(.secondary)
-                    }
-                }
-
-                if sourceSelection == .captionWorkflow {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("Runs these selected albums top-to-bottom and waits briefly if Photos needs time to refresh the next queue item:")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-
-                        ForEach(Array(captionWorkflowQueueRows.enumerated()), id: \.element.id) { index, row in
-                            HStack(spacing: 8) {
-                                Picker("", selection: Binding(get: {
-                                    row.albumID ?? ""
-                                }, set: { value in
-                                    onCaptionWorkflowAlbumSelectionChanged(index, value.isEmpty ? nil : value)
-                                })) {
-                                    if let albumID = row.albumID,
-                                       !albumID.isEmpty,
-                                       !albums.contains(where: { $0.id == albumID })
-                                    {
-                                        Text("Missing: \(row.savedAlbumName ?? "Unknown Album")")
-                                            .tag(albumID)
-                                    }
-
-                                    Text("Choose an album").tag("")
-                                    ForEach(albums) { album in
-                                        Text(album.itemCount >= 0 ? "\(album.name) (\(album.itemCount))" : album.name)
-                                            .tag(album.id)
-                                    }
-                                }
-                                .labelsHidden()
-
-                                Button {
-                                    onMoveCaptionWorkflowQueueRowUp(index)
-                                } label: {
-                                    Image(systemName: "arrow.up")
-                                }
-                                .buttonStyle(.borderless)
-                                .disabled(index == 0)
-
-                                Button {
-                                    onMoveCaptionWorkflowQueueRowDown(index)
-                                } label: {
-                                    Image(systemName: "arrow.down")
-                                }
-                                .buttonStyle(.borderless)
-                                .disabled(index == captionWorkflowQueueRows.count - 1)
-
-                                Button {
-                                    onRemoveCaptionWorkflowQueueRow(index)
-                                } label: {
-                                    Image(systemName: "minus.circle")
-                                }
-                                .buttonStyle(.borderless)
-                                .disabled(captionWorkflowQueueRows.count <= CaptionWorkflowConfiguration.minimumQueueLength)
-                            }
-                        }
-
-                        Button("Add Album To Queue") {
-                            onAddCaptionWorkflowQueueRow()
-                        }
-
-                        if let captionWorkflowStatusMessage {
-                            Text(captionWorkflowStatusMessage)
-                                .font(.footnote)
-                                .foregroundStyle(captionWorkflowStatusMessage.contains("Needs repair") || captionWorkflowStatusMessage.contains("different album")
-                                    ? .orange
-                                    : .secondary)
+                            onRemoveCaptionWorkflowQueueRow(index)
                         }
                     }
                 }
+                .padding(12)
+                .background(WorkbenchPalette.surfaceAlt)
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
             }
 
-            Section("Capture Date Filter") {
-                Toggle("Limit by capture date", isOn: $useDateFilter)
-                if useDateFilter {
-                    DatePicker("Start", selection: $startDate, displayedComponents: .date)
-                    DatePicker("End", selection: $endDate, displayedComponents: .date)
-                }
+            HStack {
+                Button("Add Album To Queue", action: onAddCaptionWorkflowQueueRow)
+                    .buttonStyle(.bordered)
+                Spacer(minLength: 0)
             }
 
-            Section("Processing Order") {
-                Picker("Order", selection: $traversalOrder) {
-                    Text(RunTraversalOrder.photosOrderFast.title).tag(RunTraversalOrder.photosOrderFast)
-                    Text(RunTraversalOrder.oldestToNewest.title).tag(RunTraversalOrder.oldestToNewest)
-                    Text(RunTraversalOrder.newestToOldest.title).tag(RunTraversalOrder.newestToOldest)
-                    Text(RunTraversalOrder.random.title).tag(RunTraversalOrder.random)
-                    Text(RunTraversalOrder.cycle.title).tag(RunTraversalOrder.cycle)
-                }
-            }
-
-            Section("Overwrite Behavior") {
-                Toggle("Overwrite app-owned same/newer metadata", isOn: $overwriteAppOwnedSameOrNewer)
-                Toggle("Always overwrite non-app metadata (no per-item prompts)", isOn: $alwaysOverwriteExternalMetadata)
+            if let captionWorkflowStatusMessage {
+                WorkbenchNotice(
+                    captionWorkflowStatusMessage,
+                    fill: captionWorkflowStatusMessage.contains("Needs repair") || captionWorkflowStatusMessage.contains("different album")
+                        ? WorkbenchPalette.warningFill
+                        : WorkbenchPalette.accentSoft,
+                    textColor: captionWorkflowStatusMessage.contains("Needs repair") || captionWorkflowStatusMessage.contains("different album")
+                        ? WorkbenchPalette.warningText
+                        : WorkbenchPalette.muted
+                )
             }
         }
-        .onChange(of: pickerItems, initial: false) { _, newItems in
-            pickerIDs = newItems.compactMap(\.itemIdentifier)
+    }
+
+    @ViewBuilder
+    private func dateField(title: String, selection: Binding<Date>) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(WorkbenchPalette.muted)
+
+            DatePicker(title, selection: selection, displayedComponents: .date)
+                .labelsHidden()
+                .datePickerStyle(.compact)
+                .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    @ViewBuilder
+    private func queueButton(systemName: String, disabled: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+        }
+        .buttonStyle(.borderless)
+        .disabled(disabled)
+        .frame(width: 28, height: 28)
     }
 }

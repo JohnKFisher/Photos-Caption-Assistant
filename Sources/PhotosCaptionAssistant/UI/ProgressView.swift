@@ -17,197 +17,214 @@ struct ProcessingProgressView: View {
         return Double(progress.processed) / Double(progress.totalDiscovered)
     }
 
+    private var displayedErrors: [String] {
+        liveErrors.isEmpty ? (summary?.errors ?? []) : liveErrors
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Run Progress")
-                .font(.headline)
+        WorkbenchCard(
+            title: "Last Completed Item"
+        ) {
+            VStack(alignment: .leading, spacing: 14) {
+                HStack(alignment: .top, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(lastCompletedItemPreview?.filename ?? "Waiting for a completed item")
+                            .font(.headline)
+                            .foregroundStyle(WorkbenchPalette.text)
 
-            SwiftUI.ProgressView(value: completionFraction)
-
-            HStack(spacing: 18) {
-                stat("Discovered", value: progress.totalDiscovered)
-                stat("Processed", value: progress.processed)
-                stat("Changed", value: progress.changed)
-                stat("Skipped", value: progress.skipped)
-                stat("Failed", value: progress.failed)
-            }
-
-            if isRunning || progress.processed > 0 {
-                HStack(spacing: 18) {
-                    metric("Rate", value: rateText)
-                    metric("Elapsed", value: Self.formatDuration(seconds: performance.elapsedSeconds))
-                    metric("ETA", value: etaText)
-                }
-            }
-
-            if isRunning {
-                if let statusMessage {
-                    HStack(spacing: 8) {
-                        SwiftUI.ProgressView()
-                            .controlSize(.small)
-                        Text(statusMessage)
+                        Text(runStatusText)
+                            .font(.footnote)
+                            .foregroundStyle(WorkbenchPalette.muted)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                } else {
-                    Text("Processing is running. You can cancel between item boundaries.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-            }
 
-            if isRunning || lastCompletedItemPreview != nil {
-                if let onOpenImmersivePreview {
-                    Button {
-                        onOpenImmersivePreview()
-                    } label: {
-                        HStack(spacing: 6) {
-                            Image(systemName: "arrow.up.left.and.arrow.down.right")
-                            Text(lastCompletedItemPreview == nil ? "Open immersive view (waiting for first completed item)" : "Open immersive view")
+                    Spacer(minLength: 0)
+
+                    if isRunning || lastCompletedItemPreview != nil {
+                        Button {
+                            onOpenImmersivePreview?()
+                        } label: {
+                            Label("Immersive View", systemImage: "arrow.up.left.and.arrow.down.right")
                         }
+                        .buttonStyle(.bordered)
+                        .font(.caption)
+                        .disabled(onOpenImmersivePreview == nil)
                     }
-                    .buttonStyle(.bordered)
-                    .font(.caption)
+                }
+
+                previewHero
+
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack {
+                        Text("Run Progress")
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(WorkbenchPalette.text)
+                        Spacer(minLength: 0)
+                        Text(completionPercentText)
+                            .font(.caption.monospacedDigit().weight(.semibold))
+                            .foregroundStyle(WorkbenchPalette.muted)
+                    }
+
+                    SwiftUI.ProgressView(value: completionFraction)
+                        .controlSize(.large)
+                }
+
+                metricsGrid
+
+                if !displayedErrors.isEmpty {
+                    errorPanel
+                }
+
+                if let diagnostics = summary?.diagnostics {
+                    diagnosticsPanel(diagnostics)
                 }
             }
+        }
+    }
 
-            let displayedErrors = liveErrors.isEmpty ? (summary?.errors ?? []) : liveErrors
-            if !displayedErrors.isEmpty {
-                let errorText = Array(displayedErrors.suffix(8))
-                    .map { "• \($0)" }
-                    .joined(separator: "\n")
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Recent Errors")
-                        .font(.subheadline.bold())
-                    ScrollView {
-                        Text(errorText)
-                            .font(.footnote.monospaced())
-                            .foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .textSelection(.enabled)
-                    }
-                    .frame(maxHeight: 130)
-                }
-            }
+    @ViewBuilder
+    private var previewHero: some View {
+        if let preview = lastCompletedItemPreview {
+            Button {
+                onOpenImmersivePreview?()
+            } label: {
+                VStack(alignment: .leading, spacing: 14) {
+                    previewImage(preview)
+                        .frame(maxWidth: .infinity)
 
-            if let preview = lastCompletedItemPreview {
-                Divider()
-                Button {
-                    onOpenImmersivePreview?()
-                } label: {
                     VStack(alignment: .leading, spacing: 8) {
-                        HStack(alignment: .center, spacing: 8) {
-                            Text("Last Completed Item")
-                                .font(.subheadline.bold())
-                            Text("Click to enlarge")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+                        if !preview.sourceContext.isEmpty {
+                            labeledText("Source", value: preview.sourceContext, lineLimit: 2)
                         }
 
-                        HStack(alignment: .top, spacing: 12) {
-                            previewThumbnail(preview)
-
-                            VStack(alignment: .leading, spacing: 6) {
-                                Text(preview.filename)
-                                    .font(.subheadline)
-                                    .lineLimit(1)
-
-                                if !preview.sourceContext.isEmpty {
-                                    Text("Source")
-                                        .font(.caption.bold())
-                                    Text(preview.sourceContext)
-                                        .font(.footnote)
-                                        .foregroundStyle(.secondary)
-                                        .fixedSize(horizontal: false, vertical: true)
-                                }
-
-                                Text("Caption")
-                                    .font(.caption.bold())
-                                Text(preview.caption)
-                                    .font(.footnote)
-                                    .fixedSize(horizontal: false, vertical: true)
-
-                                Text("Keywords")
-                                    .font(.caption.bold())
-                                Text(preview.keywords.isEmpty ? "(none)" : preview.keywords.joined(separator: ", "))
-                                    .font(.footnote)
-                                    .foregroundStyle(.secondary)
-                                    .fixedSize(horizontal: false, vertical: true)
-                            }
-                        }
+                        labeledText("Caption", value: preview.caption.isEmpty ? "(empty caption)" : preview.caption, lineLimit: 3)
+                        labeledText(
+                            "Keywords",
+                            value: preview.keywords.isEmpty ? "(none)" : preview.keywords.joined(separator: ", "),
+                            lineLimit: 2
+                        )
                     }
                 }
-                .buttonStyle(.plain)
-                .disabled(onOpenImmersivePreview == nil)
+                .padding(14)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(WorkbenchPalette.surfaceAlt)
+                .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
             }
-
-            if let diagnostics = summary?.diagnostics {
-                Divider()
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Last Run Timings")
-                        .font(.subheadline.bold())
-
-                    Text(diagnosticsSummaryText(diagnostics))
-                        .font(.caption.monospaced())
-                        .foregroundStyle(.secondary)
-                        .textSelection(.enabled)
-
-                    let topStages = diagnostics.stageTimings
-                        .filter { $0.elapsedSeconds > 0.001 }
-                        .sorted { lhs, rhs in lhs.elapsedSeconds > rhs.elapsedSeconds }
-                        .prefix(4)
-
-                    if !topStages.isEmpty {
-                        ForEach(Array(topStages)) { stage in
-                            HStack(spacing: 8) {
-                                Text(stage.stage)
-                                    .font(.caption.monospaced())
-                                    .foregroundStyle(.secondary)
-                                    .frame(width: 120, alignment: .leading)
-                                Text(formatSeconds(stage.elapsedSeconds))
-                                    .font(.caption.monospacedDigit())
-                            }
+            .buttonStyle(.plain)
+            .disabled(onOpenImmersivePreview == nil)
+        } else {
+            VStack(alignment: .leading, spacing: 10) {
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(WorkbenchPalette.accentSoft)
+                    .frame(height: 190)
+                    .overlay(
+                        VStack(spacing: 8) {
+                            Image(systemName: "photo.on.rectangle.angled")
+                                .font(.system(size: 28, weight: .semibold))
+                                .foregroundStyle(WorkbenchPalette.accent)
+                            Text("Start a run and the latest completed photo or video will appear here.")
+                                .font(.footnote)
+                                .foregroundStyle(WorkbenchPalette.muted)
+                                .multilineTextAlignment(.center)
+                                .padding(.horizontal, 20)
                         }
+                    )
 
-                        Text("Stage totals can exceed wall time because prepare, analyze, write, and preview overlap.")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
+                if isRunning {
+                    WorkbenchNotice("The preview panel updates live as soon as the first item completes.")
+                }
+            }
+        }
+    }
+
+    private var metricsGrid: some View {
+        LazyVGrid(
+            columns: [GridItem(.adaptive(minimum: 96), spacing: 10)],
+            alignment: .leading,
+            spacing: 10
+        ) {
+            metricTile("Discovered", value: "\(progress.totalDiscovered)")
+            metricTile("Processed", value: "\(progress.processed)")
+            metricTile("Changed", value: "\(progress.changed)")
+            metricTile("Failed", value: "\(progress.failed)")
+            metricTile("Elapsed", value: Self.formatDuration(seconds: performance.elapsedSeconds))
+            metricTile("ETA", value: etaText)
+        }
+    }
+
+    private var errorPanel: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Recent Errors")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(WorkbenchPalette.text)
+
+            Text(Array(displayedErrors.suffix(5))
+                .map { "• \($0)" }
+                .joined(separator: "\n"))
+                .font(.footnote.monospaced())
+                .foregroundStyle(WorkbenchPalette.warningText)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .textSelection(.enabled)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(WorkbenchPalette.warningFill)
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+
+    private func diagnosticsPanel(_ diagnostics: RunDiagnostics) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Last Run Timings")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(WorkbenchPalette.text)
+
+            Text(diagnosticsSummaryText(diagnostics))
+                .font(.caption.monospaced())
+                .foregroundStyle(WorkbenchPalette.muted)
+                .textSelection(.enabled)
+
+            let topStages = diagnostics.stageTimings
+                .filter { $0.elapsedSeconds > 0.001 }
+                .sorted { $0.elapsedSeconds > $1.elapsedSeconds }
+                .prefix(3)
+
+            if !topStages.isEmpty {
+                ForEach(Array(topStages)) { stage in
+                    HStack(spacing: 8) {
+                        Text(stage.stage)
+                            .font(.caption.monospaced())
+                            .foregroundStyle(WorkbenchPalette.muted)
+                            .frame(width: 110, alignment: .leading)
+                        Text(formatSeconds(stage.elapsedSeconds))
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(WorkbenchPalette.text)
                     }
                 }
             }
         }
-        .padding(14)
-        .background(.thinMaterial)
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(WorkbenchPalette.surfaceAlt)
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 
     @ViewBuilder
-    private func stat(_ title: String, value: Int) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(title)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            Text("\(value)")
-                .font(.title3.monospacedDigit())
-        }
-    }
-
-    @ViewBuilder
-    private func previewThumbnail(_ preview: CompletedItemPreview) -> some View {
+    private func previewImage(_ preview: CompletedItemPreview) -> some View {
         if let image = makeThumbnail(for: preview) {
             Image(nsImage: image)
                 .resizable()
                 .scaledToFill()
-                .frame(width: 132, height: 132)
-                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .frame(maxWidth: .infinity)
+                .frame(height: 190)
+                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         } else {
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(Color.secondary.opacity(0.15))
-                .frame(width: 132, height: 132)
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(WorkbenchPalette.accentSoft)
+                .frame(height: 190)
                 .overlay(
                     Text("No Preview")
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(WorkbenchPalette.muted)
                 )
         }
     }
@@ -224,25 +241,49 @@ struct ProcessingProgressView: View {
         return NSWorkspace.shared.icon(forFile: fileURL.path)
     }
 
-    @ViewBuilder
-    private func metric(_ title: String, value: String) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
+    private func labeledText(_ title: String, value: String, lineLimit: Int? = nil) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
             Text(title)
-                .font(.caption)
-                .foregroundStyle(.secondary)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(WorkbenchPalette.muted)
             Text(value)
-                .font(.subheadline.monospacedDigit())
+                .font(.footnote)
+                .foregroundStyle(WorkbenchPalette.text)
+                .lineLimit(lineLimit)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
-    private var rateText: String {
-        guard let itemsPerMinute = performance.itemsPerMinute, itemsPerMinute.isFinite else {
-            return "calculating"
+    private func metricTile(_ title: String, value: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(WorkbenchPalette.muted)
+            Text(value)
+                .font(.footnote.monospacedDigit().weight(.semibold))
+                .foregroundStyle(WorkbenchPalette.text)
         }
-        if itemsPerMinute < 1 {
-            return String(format: "%.2f items/min", itemsPerMinute)
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(WorkbenchPalette.surfaceAlt)
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+
+    private var runStatusText: String {
+        if let statusMessage, isRunning {
+            return statusMessage
         }
-        return String(format: "%.1f items/min", itemsPerMinute)
+        if isRunning {
+            return "Processing is running. You can still cancel between item boundaries."
+        }
+        if progress.processed > 0 {
+            return "The latest completed item stays visible after the run finishes."
+        }
+        return "Start a run to preview the latest completed item here."
+    }
+
+    private var completionPercentText: String {
+        "\(Int((completionFraction * 100).rounded()))%"
     }
 
     private var etaText: String {
