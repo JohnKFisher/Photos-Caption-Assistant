@@ -460,6 +460,7 @@ struct ImmersivePreviewView: View {
     let progress: RunProgress
     let performance: RunPerformanceStats
     let isRunning: Bool
+    let lagCount: Int
     @Binding var isPresented: Bool
 
     private var previewIdentity: String {
@@ -795,12 +796,14 @@ struct ImmersivePreviewView: View {
                 compactPacePill(title: "Rate", value: rateText)
                 compactPacePill(title: "Elapsed", value: Self.formatDuration(seconds: performance.elapsedSeconds))
                 compactPacePill(title: "ETA", value: etaText)
+                compactPacePill(title: "Lag", value: lagText)
             }
 
             HStack(spacing: 6) {
                 compactPacePill(title: "Rate", value: rateText, ultraCompact: true)
                 compactPacePill(title: "Elapsed", value: Self.formatDuration(seconds: performance.elapsedSeconds), ultraCompact: true)
                 compactPacePill(title: "ETA", value: etaText, ultraCompact: true)
+                compactPacePill(title: "Lag", value: lagText, ultraCompact: true)
             }
         }
     }
@@ -1088,6 +1091,10 @@ struct ImmersivePreviewView: View {
             return "calculating"
         }
         return Self.formatDuration(seconds: etaSeconds)
+    }
+
+    private var lagText: String {
+        ImmersivePreviewPolicy.lagDisplayValue(for: lagCount)
     }
 
     private static func formatDuration(seconds: Int) -> String {

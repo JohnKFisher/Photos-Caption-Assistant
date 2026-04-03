@@ -31,16 +31,33 @@ enum AppAlert: Identifiable {
 }
 
 enum ImmersivePreviewPolicy {
-    static let regularDisplaySeconds: TimeInterval = 30
-    static let catchUpDisplaySeconds: TimeInterval = 10
-    static let catchUpThreshold = 20
-    static let emergencySamplingThreshold = 60
-    static let sampledRetainedPreviewCount = 30
+    static let emergencySamplingThreshold = 40
+    static let sampledRetainedPreviewCount = 24
 
     static func displaySeconds(for backlogCount: Int) -> TimeInterval {
-        backlogCount > catchUpThreshold
-            ? catchUpDisplaySeconds
-            : regularDisplaySeconds
+        switch backlogCount {
+        case ...2:
+            return 20
+        case 3...6:
+            return 18
+        case 7...12:
+            return 16
+        case 13...20:
+            return 14
+        default:
+            return 12
+        }
+    }
+
+    static func lagDisplayValue(for lagCount: Int) -> String {
+        let clampedLagCount = max(0, lagCount)
+        guard clampedLagCount > 0 else {
+            return "Live"
+        }
+        if clampedLagCount > 99 {
+            return "99+"
+        }
+        return "\(clampedLagCount)"
     }
 
     static func retainedIndices(
@@ -96,7 +113,12 @@ final class AppViewModel: ObservableObject {
     private static let ollamaDownloadPageURL = URL(string: "https://ollama.com/download/mac")!
 
     private struct ImmersivePreviewQueue {
-        private var storage: [CompletedItemPreview] = []
+        private struct Entry {
+            let preview: CompletedItemPreview
+            let lagSpan: Int
+        }
+
+        private var storage: [Entry] = []
         private var headIndex = 0
 
         var count: Int {
@@ -107,9 +129,12 @@ final class AppViewModel: ObservableObject {
             count == 0
         }
 
+        var totalLagSpan: Int {
+            activeEntries.reduce(0) { $0 + $1.lagSpan }
+        }
+
         var previews: [CompletedItemPreview] {
-            guard headIndex < storage.count else { return [] }
-            return Array(storage[headIndex...])
+            activeEntries.map(\.preview)
         }
 
         var previewFileURLs: [URL] {
@@ -117,12 +142,12 @@ final class AppViewModel: ObservableObject {
         }
 
         mutating func append(_ preview: CompletedItemPreview) {
-            storage.append(preview)
+            storage.append(Entry(preview: preview, lagSpan: 1))
         }
 
-        mutating func popFirst() -> CompletedItemPreview? {
+        mutating func popFirst() -> (preview: CompletedItemPreview, lagSpan: Int)? {
             guard headIndex < storage.count else { return nil }
-            let preview = storage[headIndex]
+            let entry = storage[headIndex]
             headIndex += 1
 
             if headIndex >= 32 && headIndex * 2 >= storage.count {
@@ -130,32 +155,40 @@ final class AppViewModel: ObservableObject {
                 headIndex = 0
             }
 
-            return preview
+            return (entry.preview, entry.lagSpan)
         }
 
         @discardableResult
         mutating func sampleDown(toRetainedCount retainedCount: Int) -> [CompletedItemPreview] {
-            let activePreviews = previews
+            let activeEntries = self.activeEntries
             let retainedIndices = Set(
                 ImmersivePreviewPolicy.retainedIndices(
-                    for: activePreviews.count,
+                    for: activeEntries.count,
                     targetRetainedCount: retainedCount
                 )
             )
-            guard retainedIndices.count < activePreviews.count else {
+            guard retainedIndices.count < activeEntries.count else {
                 return []
             }
 
-            var kept: [CompletedItemPreview] = []
+            var kept: [Entry] = []
             var dropped: [CompletedItemPreview] = []
+            var accumulatedLagSpan = 0
             kept.reserveCapacity(retainedIndices.count)
-            dropped.reserveCapacity(activePreviews.count - retainedIndices.count)
+            dropped.reserveCapacity(activeEntries.count - retainedIndices.count)
 
-            for (index, preview) in activePreviews.enumerated() {
+            for (index, entry) in activeEntries.enumerated() {
+                accumulatedLagSpan += entry.lagSpan
                 if retainedIndices.contains(index) {
-                    kept.append(preview)
+                    kept.append(
+                        Entry(
+                            preview: entry.preview,
+                            lagSpan: accumulatedLagSpan
+                        )
+                    )
+                    accumulatedLagSpan = 0
                 } else {
-                    dropped.append(preview)
+                    dropped.append(entry.preview)
                 }
             }
 
@@ -167,6 +200,11 @@ final class AppViewModel: ObservableObject {
         mutating func removeAll() {
             storage.removeAll(keepingCapacity: true)
             headIndex = 0
+        }
+
+        private var activeEntries: ArraySlice<Entry> {
+            guard headIndex < storage.count else { return [] }
+            return storage[headIndex...]
         }
     }
 
@@ -264,6 +302,15 @@ final class AppViewModel: ObservableObject {
     )
     @Published private(set) var isRunningScanBenchmark = false
     @Published private(set) var isRunningIdentityWriteProbe = false
+
+    var immersiveLagCount: Int {
+        guard isImmersivePreviewPresented,
+              immersiveDisplayedItemPreview != nil
+        else {
+            return 0
+        }
+        return queuedImmersivePreviews.totalLagSpan
+    }
 
     var runPreflightRefreshToken: String {
         let queueToken = captionWorkflowQueueRows.map { row in
@@ -549,7 +596,7 @@ final class AppViewModel: ObservableObject {
             },
             onItemCompleted: { [weak self] preview in
                 Task { @MainActor in
-                    self?.handleCompletedItemPreview(preview)
+                    self?.receiveCompletedItemPreview(preview)
                 }
             },
             onPendingIDsUpdated: { [weak self] pendingIDs in
@@ -971,7 +1018,7 @@ final class AppViewModel: ObservableObject {
         }
     }
 
-    private func handleCompletedItemPreview(_ preview: CompletedItemPreview) {
+    func receiveCompletedItemPreview(_ preview: CompletedItemPreview, scheduleAdvance: Bool = true) {
         lastCompletedItemPreview = preview
 
         guard isImmersivePreviewPresented else {
@@ -995,7 +1042,9 @@ final class AppViewModel: ObservableObject {
             )
         }
         synchronizeRetainedPreviewFiles()
-        scheduleImmersivePreviewAdvanceIfNeeded()
+        if scheduleAdvance {
+            scheduleImmersivePreviewAdvanceIfNeeded()
+        }
     }
 
     private func scheduleImmersivePreviewAdvanceIfNeeded() {
@@ -1010,7 +1059,7 @@ final class AppViewModel: ObservableObject {
                 while self.isImmersivePreviewPresented, !self.queuedImmersivePreviews.isEmpty {
                     let now = Date()
                     let targetDelay = ImmersivePreviewPolicy.displaySeconds(
-                        for: self.queuedImmersivePreviews.count
+                        for: self.immersiveLagCount
                     )
                     let elapsed = self.immersiveLastPreviewPresentedAt.map { now.timeIntervalSince($0) }
                         ?? targetDelay
@@ -1026,10 +1075,7 @@ final class AppViewModel: ObservableObject {
                 }
 
                 guard self.isImmersivePreviewPresented else { break }
-                guard let nextPreview = self.queuedImmersivePreviews.popFirst() else { break }
-                self.immersiveDisplayedItemPreview = nextPreview
-                self.immersiveLastPreviewPresentedAt = Date()
-                self.synchronizeRetainedPreviewFiles()
+                guard self.advanceImmersivePreviewNowIfPossible() else { break }
             }
 
             self.immersivePreviewTask = nil
@@ -1037,6 +1083,17 @@ final class AppViewModel: ObservableObject {
                 self.scheduleImmersivePreviewAdvanceIfNeeded()
             }
         }
+    }
+
+    @discardableResult
+    func advanceImmersivePreviewNowIfPossible() -> Bool {
+        guard isImmersivePreviewPresented else { return false }
+        guard let nextPreview = queuedImmersivePreviews.popFirst() else { return false }
+
+        immersiveDisplayedItemPreview = nextPreview.preview
+        immersiveLastPreviewPresentedAt = Date()
+        synchronizeRetainedPreviewFiles()
+        return true
     }
 
     private func resetImmersivePreviewState() {
@@ -1788,6 +1845,7 @@ struct MainView: View {
                     progress: viewModel.progress,
                     performance: viewModel.performance,
                     isRunning: viewModel.isRunning,
+                    lagCount: viewModel.immersiveLagCount,
                     isPresented: $viewModel.isImmersivePreviewPresented
                 )
                 .transition(.opacity)

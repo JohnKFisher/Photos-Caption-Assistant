@@ -140,6 +140,8 @@ Videos still use a local export/acquire path that is appropriate for video analy
 - Tighter or trickier aspect ratios can fall back to the bottom-shelf layout so chrome stays visible.
 - Empty immersive state now shows only centered copy until there is a completed item to display.
 - Aspect-fit media uses a restrained ambient matte instead of a flat black letterbox.
+- Run Pace now includes a minimalist `Lag` pill that shows `Live` or the number of newer completed items still queued behind immersive playback.
+- When immersive falls behind live completions, it shortens dwell time gradually and only samples evenly in extreme backlog conditions.
 - Capture dates are now interpreted in the Mac's local time zone instead of drifting through the earlier pseudo-epoch conversion.
 
 ## Data And Storage
