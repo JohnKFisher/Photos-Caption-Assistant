@@ -382,6 +382,46 @@ final class RunCoordinatorTests: XCTestCase {
         XCTAssertEqual(recordedInputs, ["photo-preview-data"])
     }
 
+    func testPhotoPreviewPathAlsoFeedsCompletedPreviewWithoutExtraExport() async {
+        let asset = MediaAsset(id: "asset-preview", filename: "IMG_preview.jpg", captureDate: Date(), kind: .photo)
+        let metadata = [
+            asset.id: ExistingMetadataState(caption: nil, keywords: [], ownershipTag: nil, isExternal: false)
+        ]
+        let previewInputRecorder = AnalysisInputRecorder()
+        let previewRecorder = PreviewRecorder()
+        let writer = MockPhotosWriter(
+            assets: [asset],
+            metadataByID: metadata,
+            previewDataByID: [asset.id: Data([0xFF, 0xD8, 0xFF, 0xD9])]
+        )
+        let coordinator = RunCoordinator(
+            photosWriter: writer,
+            analyzer: MockAnalyzer(result: GeneratedMetadata(caption: "caption", keywords: ["k1"])),
+            checkpointInterval: 10_000,
+            photosMemoryCheckInterval: 10_000,
+            previewRenderer: RecordingPreviewRenderer(recorder: previewInputRecorder)
+        )
+
+        let summary = await coordinator.run(
+            options: defaultRunOptions(),
+            capabilities: defaultCapabilities(),
+            callbacks: RunCallbacks(
+                onItemCompleted: { preview in
+                    previewRecorder.record(preview: preview)
+                }
+            )
+        )
+
+        let previewInputs = await previewInputRecorder.values()
+        let exportRequests = await writer.exportRequestsValue()
+        let completedPreview = previewRecorder.firstValue()
+
+        XCTAssertEqual(summary.progress.changed, 1)
+        XCTAssertEqual(previewInputs, ["photo-preview-data"])
+        XCTAssertEqual(exportRequests, [])
+        XCTAssertEqual(completedPreview?.previewFileURL?.pathExtension.lowercased(), "jpg")
+    }
+
     func testPhotoPreviewFallsBackToExportWhenUnavailable() async {
         let asset = MediaAsset(id: "asset-fallback", filename: "IMG_fallback.jpg", captureDate: Date(), kind: .photo)
         let metadata = [
@@ -2570,6 +2610,41 @@ private actor MockPreviewRenderer: PreviewRendering {
             return fileURL
         } catch {
             await timelineRecorder?.record("preview-end:\(assetID)")
+            return nil
+        }
+    }
+}
+
+private actor RecordingPreviewRenderer: PreviewRendering {
+    private let recorder: AnalysisInputRecorder
+
+    init(recorder: AnalysisInputRecorder) {
+        self.recorder = recorder
+    }
+
+    func persistPreviewFile(
+        from input: AnalysisInput,
+        assetID _: String,
+        fallbackFilename _: String,
+        kind _: MediaKind
+    ) async -> URL? {
+        switch input {
+        case .fileURL:
+            await recorder.record("file-url")
+        case .photoPreviewJPEGData:
+            await recorder.record("photo-preview-data")
+        }
+
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pdc-tests-rendered-preview-recording", isDirectory: true)
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let fileURL = root.appendingPathComponent("preview.jpg")
+
+        do {
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            FileManager.default.createFile(atPath: fileURL.path, contents: Data([0xFF, 0xD8, 0xFF, 0xD9]))
+            return fileURL
+        } catch {
             return nil
         }
     }

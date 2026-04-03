@@ -2,6 +2,441 @@ import AppKit
 import Foundation
 import SwiftUI
 
+enum ImmersiveLayoutMode: Equatable {
+    case overlay
+    case bottomShelf
+}
+
+enum ImmersiveMediaSizingMode: Equatable {
+    case aspectFill
+    case aspectFit
+
+    var contentMode: ContentMode {
+        switch self {
+        case .aspectFill:
+            return .fill
+        case .aspectFit:
+            return .fit
+        }
+    }
+}
+
+struct ImmersivePreviewChromeMetrics: Equatable {
+    let topBarHeight: CGFloat
+    let topBarHorizontalPadding: CGFloat
+    let topBarVerticalPadding: CGFloat
+    let bottomPanelHeight: CGFloat
+    let bottomPanelHorizontalPadding: CGFloat
+    let bottomPanelVerticalPadding: CGFloat
+    let sectionSpacing: CGFloat
+    let utilityWidth: CGFloat
+    let captionWidth: CGFloat
+    let titleFontSize: CGFloat
+    let subtitleFontSize: CGFloat
+    let sectionLabelFontSize: CGFloat
+    let captionFontSize: CGFloat
+    let compactCaptionFontSize: CGFloat
+    let minimumCaptionFontSize: CGFloat
+    let fullProgressCardWidth: CGFloat
+    let compactProgressCardWidth: CGFloat
+    let keywordStyle: ImmersiveKeywordChipLayout.Style
+
+    var captionRegionHeight: CGFloat {
+        max(72, bottomPanelHeight - (bottomPanelVerticalPadding * 2) - 12)
+    }
+
+    func withBottomPanelHeight(_ height: CGFloat) -> ImmersivePreviewChromeMetrics {
+        ImmersivePreviewChromeMetrics(
+            topBarHeight: topBarHeight,
+            topBarHorizontalPadding: topBarHorizontalPadding,
+            topBarVerticalPadding: topBarVerticalPadding,
+            bottomPanelHeight: height,
+            bottomPanelHorizontalPadding: bottomPanelHorizontalPadding,
+            bottomPanelVerticalPadding: bottomPanelVerticalPadding,
+            sectionSpacing: sectionSpacing,
+            utilityWidth: utilityWidth,
+            captionWidth: captionWidth,
+            titleFontSize: titleFontSize,
+            subtitleFontSize: subtitleFontSize,
+            sectionLabelFontSize: sectionLabelFontSize,
+            captionFontSize: captionFontSize,
+            compactCaptionFontSize: compactCaptionFontSize,
+            minimumCaptionFontSize: minimumCaptionFontSize,
+            fullProgressCardWidth: fullProgressCardWidth,
+            compactProgressCardWidth: compactProgressCardWidth,
+            keywordStyle: keywordStyle
+        )
+    }
+}
+
+struct ImmersivePreviewLayout: Equatable {
+    let safeViewportRect: CGRect
+    let mediaContainerRect: CGRect
+    let mediaRect: CGRect
+    let layoutMode: ImmersiveLayoutMode
+    let mediaSizingMode: ImmersiveMediaSizingMode
+    let topBarRect: CGRect
+    let bottomPanelRect: CGRect
+    let metrics: ImmersivePreviewChromeMetrics
+}
+
+enum ImmersivePreviewLayoutCalculator {
+    private enum Constants {
+        static let horizontalInsetRange: ClosedRange<CGFloat> = 20...32
+        static let verticalInsetRange: ClosedRange<CGFloat> = 24...40
+        static let overlayPanelInset: CGFloat = 18
+        static let overlayVerticalGap: CGFloat = 28
+        static let overlayMinMediaWidth: CGFloat = 980
+        static let overlayMinMediaHeight: CGFloat = 520
+        static let overlayMinCaptionWidth: CGFloat = 420
+        static let overlayMinUtilityWidth: CGFloat = 280
+        static let overlayLandscapeAspectThreshold: CGFloat = 1.1
+        static let overlayFillPreservationThreshold: CGFloat = 0.88
+        static let shelfVerticalGap: CGFloat = 18
+        static let minShelfMediaHeight: CGFloat = 220
+        static let rectTolerance: CGFloat = 0.5
+    }
+
+    static func calculate(
+        viewportSize: CGSize,
+        safeAreaInsets: EdgeInsets,
+        mediaSize: CGSize?
+    ) -> ImmersivePreviewLayout {
+        let safeViewportRect = safeViewportRect(
+            viewportSize: viewportSize,
+            safeAreaInsets: safeAreaInsets
+        )
+        let normalizedMediaSize = normalizedMediaSize(mediaSize)
+        let horizontalInset = clamped(
+            safeViewportRect.width * 0.02,
+            to: Constants.horizontalInsetRange
+        )
+        let verticalInset = clamped(
+            safeViewportRect.height * 0.03,
+            to: Constants.verticalInsetRange
+        )
+        let chromeSafeRect = safeViewportRect.insetBy(dx: horizontalInset, dy: verticalInset)
+
+        let overlayContainerRect = chromeSafeRect
+        let overlaySizingMode = preferredOverlaySizingMode(
+            mediaSize: normalizedMediaSize,
+            containerRect: overlayContainerRect
+        )
+        let overlayMediaRect = mediaRect(
+            mediaSize: normalizedMediaSize,
+            in: overlayContainerRect,
+            sizingMode: overlaySizingMode
+        )
+        let overlayChromeContainer = overlayMediaRect.intersection(safeViewportRect)
+
+        let overlayPanelWidth = max(
+            240,
+            overlayMediaRect.width - (Constants.overlayPanelInset * 2)
+        )
+        let overlayMetrics = chromeMetrics(
+            panelWidth: overlayPanelWidth,
+            viewportHeight: safeViewportRect.height,
+            layoutMode: .overlay
+        )
+        let overlayTopBarRect = clampedRect(
+            CGRect(
+                x: overlayMediaRect.minX + Constants.overlayPanelInset,
+                y: overlayMediaRect.minY + Constants.overlayPanelInset,
+                width: overlayPanelWidth,
+                height: overlayMetrics.topBarHeight
+            ),
+            inside: overlayChromeContainer
+        )
+        let overlayBottomPanelRect = clampedRect(
+            CGRect(
+                x: overlayMediaRect.minX + Constants.overlayPanelInset,
+                y: overlayMediaRect.maxY - Constants.overlayPanelInset - overlayMetrics.bottomPanelHeight,
+                width: overlayPanelWidth,
+                height: overlayMetrics.bottomPanelHeight
+            ),
+            inside: overlayChromeContainer
+        )
+
+        if canUseOverlay(
+            safeViewportRect: safeViewportRect,
+            mediaRect: overlayMediaRect,
+            topBarRect: overlayTopBarRect,
+            bottomPanelRect: overlayBottomPanelRect,
+            metrics: overlayMetrics
+        ) {
+            return ImmersivePreviewLayout(
+                safeViewportRect: safeViewportRect,
+                mediaContainerRect: overlayContainerRect,
+                mediaRect: overlayMediaRect,
+                layoutMode: .overlay,
+                mediaSizingMode: overlaySizingMode,
+                topBarRect: overlayTopBarRect,
+                bottomPanelRect: overlayBottomPanelRect,
+                metrics: overlayMetrics
+            )
+        }
+
+        let shelfUsableRect = chromeSafeRect
+        var shelfMetrics = chromeMetrics(
+            panelWidth: shelfUsableRect.width,
+            viewportHeight: safeViewportRect.height,
+            layoutMode: .bottomShelf
+        )
+        let maxShelfHeight = max(
+            140,
+            shelfUsableRect.height
+                - shelfMetrics.topBarHeight
+                - (Constants.shelfVerticalGap * 2)
+                - Constants.minShelfMediaHeight
+        )
+        shelfMetrics = shelfMetrics.withBottomPanelHeight(
+            min(shelfMetrics.bottomPanelHeight, maxShelfHeight)
+        )
+
+        let shelfTopBarRect = clampedRect(
+            CGRect(
+                x: shelfUsableRect.minX,
+                y: shelfUsableRect.minY,
+                width: shelfUsableRect.width,
+                height: shelfMetrics.topBarHeight
+            ),
+            inside: shelfUsableRect
+        )
+        let shelfBottomPanelRect = clampedRect(
+            CGRect(
+                x: shelfUsableRect.minX,
+                y: shelfUsableRect.maxY - shelfMetrics.bottomPanelHeight,
+                width: shelfUsableRect.width,
+                height: shelfMetrics.bottomPanelHeight
+            ),
+            inside: shelfUsableRect
+        )
+
+        let mediaAreaMinY = shelfTopBarRect.maxY + Constants.shelfVerticalGap
+        let mediaAreaMaxY = shelfBottomPanelRect.minY - Constants.shelfVerticalGap
+        let mediaAreaRect = CGRect(
+            x: shelfUsableRect.minX,
+            y: mediaAreaMinY,
+            width: shelfUsableRect.width,
+            height: max(0, mediaAreaMaxY - mediaAreaMinY)
+        )
+        let shelfMediaRect = mediaRect(
+            mediaSize: normalizedMediaSize,
+            in: mediaAreaRect,
+            sizingMode: .aspectFit
+        )
+
+        return ImmersivePreviewLayout(
+            safeViewportRect: safeViewportRect,
+            mediaContainerRect: mediaAreaRect,
+            mediaRect: shelfMediaRect,
+            layoutMode: .bottomShelf,
+            mediaSizingMode: .aspectFit,
+            topBarRect: shelfTopBarRect,
+            bottomPanelRect: shelfBottomPanelRect,
+            metrics: shelfMetrics
+        )
+    }
+
+    private static func safeViewportRect(
+        viewportSize: CGSize,
+        safeAreaInsets: EdgeInsets
+    ) -> CGRect {
+        CGRect(
+            x: safeAreaInsets.leading,
+            y: safeAreaInsets.top,
+            width: max(0, viewportSize.width - safeAreaInsets.leading - safeAreaInsets.trailing),
+            height: max(0, viewportSize.height - safeAreaInsets.top - safeAreaInsets.bottom)
+        )
+    }
+
+    private static func normalizedMediaSize(_ mediaSize: CGSize?) -> CGSize {
+        guard let mediaSize,
+              mediaSize.width.isFinite,
+              mediaSize.height.isFinite,
+              mediaSize.width > 1,
+              mediaSize.height > 1
+        else {
+            return CGSize(width: 1600, height: 1200)
+        }
+        return mediaSize
+    }
+
+    private static func preferredOverlaySizingMode(
+        mediaSize: CGSize,
+        containerRect: CGRect
+    ) -> ImmersiveMediaSizingMode {
+        let mediaAspectRatio = mediaSize.width / mediaSize.height
+        guard mediaAspectRatio >= Constants.overlayLandscapeAspectThreshold,
+              containerRect.width > 0,
+              containerRect.height > 0
+        else {
+            return .aspectFit
+        }
+
+        let containerAspectRatio = containerRect.width / containerRect.height
+        let widthFraction: CGFloat
+        let heightFraction: CGFloat
+
+        if mediaAspectRatio >= containerAspectRatio {
+            widthFraction = containerAspectRatio / mediaAspectRatio
+            heightFraction = 1
+        } else {
+            widthFraction = 1
+            heightFraction = mediaAspectRatio / containerAspectRatio
+        }
+
+        if widthFraction >= Constants.overlayFillPreservationThreshold,
+           heightFraction >= Constants.overlayFillPreservationThreshold
+        {
+            return .aspectFill
+        }
+
+        return .aspectFit
+    }
+
+    private static func mediaRect(
+        mediaSize: CGSize,
+        in containerRect: CGRect,
+        sizingMode: ImmersiveMediaSizingMode
+    ) -> CGRect {
+        guard containerRect.width > 0,
+              containerRect.height > 0
+        else {
+            return .zero
+        }
+
+        switch sizingMode {
+        case .aspectFill:
+            return containerRect
+        case .aspectFit:
+            let scale = min(
+                containerRect.width / mediaSize.width,
+                containerRect.height / mediaSize.height
+            )
+            let width = mediaSize.width * scale
+            let height = mediaSize.height * scale
+            return CGRect(
+                x: containerRect.midX - (width / 2),
+                y: containerRect.midY - (height / 2),
+                width: width,
+                height: height
+            )
+        }
+    }
+
+    private static func chromeMetrics(
+        panelWidth: CGFloat,
+        viewportHeight: CGFloat,
+        layoutMode: ImmersiveLayoutMode
+    ) -> ImmersivePreviewChromeMetrics {
+        let isOverlay = layoutMode == .overlay
+        let topBarHeight = clamped(
+            viewportHeight * (isOverlay ? 0.075 : 0.07),
+            to: (isOverlay ? 58...72 : 56...68)
+        )
+        let bottomPanelHeight = clamped(
+            viewportHeight * (isOverlay ? 0.19 : 0.23),
+            to: (isOverlay ? 156...186 : 180...226)
+        )
+        let topBarHorizontalPadding: CGFloat = isOverlay ? 22 : 20
+        let topBarVerticalPadding: CGFloat = isOverlay ? 12 : 11
+        let bottomPanelHorizontalPadding: CGFloat = isOverlay ? 24 : 24
+        let bottomPanelVerticalPadding: CGFloat = isOverlay ? 16 : 18
+        let sectionSpacing: CGFloat = isOverlay ? 20 : 22
+        let utilityWidth = min(
+            max(panelWidth * (isOverlay ? 0.30 : 0.28), isOverlay ? 280 : 260),
+            isOverlay ? 420 : 360
+        )
+        let captionAvailableWidth = panelWidth
+            - (bottomPanelHorizontalPadding * 2)
+            - sectionSpacing
+            - 1
+            - utilityWidth
+        let captionWidth = max(CGFloat.zero, captionAvailableWidth)
+        let keywordStyle = ImmersiveKeywordChipLayout.Style.immersiveCompact
+
+        return ImmersivePreviewChromeMetrics(
+            topBarHeight: topBarHeight,
+            topBarHorizontalPadding: topBarHorizontalPadding,
+            topBarVerticalPadding: topBarVerticalPadding,
+            bottomPanelHeight: bottomPanelHeight,
+            bottomPanelHorizontalPadding: bottomPanelHorizontalPadding,
+            bottomPanelVerticalPadding: bottomPanelVerticalPadding,
+            sectionSpacing: sectionSpacing,
+            utilityWidth: utilityWidth,
+            captionWidth: captionWidth,
+            titleFontSize: isOverlay ? 20 : 18,
+            subtitleFontSize: isOverlay ? 13 : 12,
+            sectionLabelFontSize: 11,
+            captionFontSize: isOverlay ? 40 : 34,
+            compactCaptionFontSize: isOverlay ? 34 : 30,
+            minimumCaptionFontSize: 26,
+            fullProgressCardWidth: isOverlay ? 78 : 72,
+            compactProgressCardWidth: isOverlay ? 64 : 60,
+            keywordStyle: keywordStyle
+        )
+    }
+
+    private static func canUseOverlay(
+        safeViewportRect: CGRect,
+        mediaRect: CGRect,
+        topBarRect: CGRect,
+        bottomPanelRect: CGRect,
+        metrics: ImmersivePreviewChromeMetrics
+    ) -> Bool {
+        guard mediaRect.width >= Constants.overlayMinMediaWidth,
+              mediaRect.height >= Constants.overlayMinMediaHeight,
+              metrics.utilityWidth >= Constants.overlayMinUtilityWidth,
+              metrics.captionWidth >= Constants.overlayMinCaptionWidth
+        else {
+            return false
+        }
+
+        let chromeGap = bottomPanelRect.minY - topBarRect.maxY
+        guard chromeGap >= Constants.overlayVerticalGap else {
+            return false
+        }
+
+        return rect(topBarRect, fitsInside: safeViewportRect)
+            && rect(bottomPanelRect, fitsInside: safeViewportRect)
+            && rect(topBarRect, fitsInside: mediaRect)
+            && rect(bottomPanelRect, fitsInside: mediaRect)
+    }
+
+    private static func rect(_ rect: CGRect, fitsInside container: CGRect) -> Bool {
+        rect.minX >= container.minX - Constants.rectTolerance
+            && rect.maxX <= container.maxX + Constants.rectTolerance
+            && rect.minY >= container.minY - Constants.rectTolerance
+            && rect.maxY <= container.maxY + Constants.rectTolerance
+    }
+
+    private static func clampedRect(
+        _ rect: CGRect,
+        inside container: CGRect
+    ) -> CGRect {
+        guard container.width > 0,
+              container.height > 0
+        else {
+            return .zero
+        }
+
+        let width = min(rect.width, container.width)
+        let height = min(rect.height, container.height)
+        let x = min(max(rect.minX, container.minX), container.maxX - width)
+        let y = min(max(rect.minY, container.minY), container.maxY - height)
+
+        return CGRect(x: x, y: y, width: width, height: height)
+    }
+
+    private static func clamped(
+        _ value: CGFloat,
+        to range: ClosedRange<CGFloat>
+    ) -> CGFloat {
+        min(max(value, range.lowerBound), range.upperBound)
+    }
+}
+
 struct ImmersivePreviewView: View {
     private static let captureDateFormatter: DateFormatter = {
         let formatter = DateFormatter()
@@ -10,37 +445,15 @@ struct ImmersivePreviewView: View {
         return formatter
     }()
 
-    private struct OverlayMetrics {
-        let outerInset: CGFloat
-        let hudHeight: CGFloat
-        let hudHorizontalPadding: CGFloat
-        let hudVerticalPadding: CGFloat
-        let dockBottomInset: CGFloat
-        let dockHeight: CGFloat
-        let dockHorizontalPadding: CGFloat
-        let dockVerticalPadding: CGFloat
-        let dockSectionSpacing: CGFloat
-        let utilityWidth: CGFloat
-        let utilitySectionSpacing: CGFloat
-        let titleFontSize: CGFloat
-        let subtitleFontSize: CGFloat
-        let sectionLabelFontSize: CGFloat
-        let captionFontSize: CGFloat
-        let compactCaptionFontSize: CGFloat
-        let minimumCaptionFontSize: CGFloat
-        let fullProgressCardWidth: CGFloat
-        let compactProgressCardWidth: CGFloat
-        let keywordStyle: ImmersiveKeywordChipLayout.Style
-
-        var captionRegionHeight: CGFloat {
-            max(72, dockHeight - (dockVerticalPadding * 2) - 12)
-        }
-    }
-
     private struct ProgressCardDisplay: Identifiable {
         let id: String
         let title: String
         let value: String
+    }
+
+    private struct ResolvedMedia {
+        let image: NSImage?
+        let size: CGSize
     }
 
     let preview: CompletedItemPreview?
@@ -57,76 +470,92 @@ struct ImmersivePreviewView: View {
 
     var body: some View {
         GeometryReader { proxy in
-            let overlayMetrics = Self.overlayMetrics(for: proxy.size)
+            let safeAreaInsets = proxy.safeAreaInsets
+            let resolvedMedia = preview.map(Self.resolveMedia(for:))
+            let layout = ImmersivePreviewLayoutCalculator.calculate(
+                viewportSize: proxy.size,
+                safeAreaInsets: safeAreaInsets,
+                mediaSize: resolvedMedia?.size
+            )
 
-            ZStack {
+            ZStack(alignment: .topLeading) {
                 Color.black
-                backgroundLayer
+                    .ignoresSafeArea()
+
+                if let resolvedMedia {
+                    mediaLayer(resolvedMedia, layout: layout)
+                } else {
+                    fallbackBackground
+                        .ignoresSafeArea()
+                }
 
                 if let preview {
-                    previewForeground(preview: preview, metrics: overlayMetrics)
+                    previewForeground(preview: preview, layout: layout)
                         .transition(.opacity)
                 } else {
                     emptyStateForeground
-                    closeButtonLayer
+                    closeButtonLayer(safeAreaInsets: safeAreaInsets)
                 }
             }
-            .frame(width: proxy.size.width, height: proxy.size.height, alignment: .center)
+            .frame(width: proxy.size.width, height: proxy.size.height, alignment: .topLeading)
         }
-        .ignoresSafeArea()
         .onExitCommand {
             isPresented = false
         }
         .animation(.easeInOut(duration: 0.3), value: previewIdentity)
     }
 
-    @ViewBuilder
-    private var backgroundLayer: some View {
-        if let preview,
-           let image = makeDisplayImage(for: preview)
-        {
-            Image(nsImage: image)
-                .resizable()
-                .scaledToFill()
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .clipped()
-                .transition(.opacity)
-        } else {
-            LinearGradient(
+    private var fallbackBackground: some View {
+        LinearGradient(
+            colors: [
+                Color(red: 0.12, green: 0.14, blue: 0.20),
+                Color(red: 0.05, green: 0.06, blue: 0.10)
+            ],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
+        )
+        .overlay(
+            RadialGradient(
                 colors: [
-                    Color(red: 0.12, green: 0.14, blue: 0.20),
-                    Color(red: 0.05, green: 0.06, blue: 0.10)
+                    Color.white.opacity(0.12),
+                    Color.clear
                 ],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
+                center: .center,
+                startRadius: 0,
+                endRadius: 700
             )
-            .overlay(
-                RadialGradient(
-                    colors: [
-                        Color.white.opacity(0.12),
-                        Color.clear
-                    ],
-                    center: .center,
-                    startRadius: 0,
-                    endRadius: 700
-                )
-            )
+        )
+    }
+
+    private func mediaLayer(
+        _ resolvedMedia: ResolvedMedia,
+        layout: ImmersivePreviewLayout
+    ) -> some View {
+        Group {
+            if let image = resolvedMedia.image {
+                Image(nsImage: image)
+                    .resizable()
+                    .aspectRatio(contentMode: layout.mediaSizingMode.contentMode)
+                    .frame(width: layout.mediaRect.width, height: layout.mediaRect.height)
+                    .clipped()
+                    .position(x: layout.mediaRect.midX, y: layout.mediaRect.midY)
+            } else {
+                fallbackBackground
+                    .frame(width: layout.mediaRect.width, height: layout.mediaRect.height)
+                    .position(x: layout.mediaRect.midX, y: layout.mediaRect.midY)
+            }
         }
     }
 
-    private func previewForeground(preview: CompletedItemPreview, metrics: OverlayMetrics) -> some View {
-        VStack(spacing: 0) {
-            topHUD(preview: preview, metrics: metrics)
-                .padding(.top, metrics.outerInset)
-                .padding(.horizontal, metrics.outerInset)
-
-            Spacer(minLength: 0)
-
-            bottomDock(preview: preview, metrics: metrics)
-                .padding(.horizontal, metrics.outerInset)
-                .padding(.bottom, metrics.dockBottomInset)
+    private func previewForeground(
+        preview: CompletedItemPreview,
+        layout: ImmersivePreviewLayout
+    ) -> some View {
+        ZStack(alignment: .topLeading) {
+            topBar(preview: preview, layout: layout)
+            bottomPanel(preview: preview, layout: layout)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     private var emptyStateForeground: some View {
@@ -137,24 +566,32 @@ struct ImmersivePreviewView: View {
             Text("Start a run and this view will update live as items complete.")
                 .font(.title3)
                 .foregroundStyle(Color.white.opacity(0.74))
-
-            if showsRunPerformance {
-                VStack(alignment: .leading, spacing: 12) {
-                    progressStatsGrid
-
-                    HStack(spacing: 12) {
-                        legacyPacePill(title: "Rate", value: rateText)
-                        legacyPacePill(title: "Elapsed", value: Self.formatDuration(seconds: performance.elapsedSeconds))
-                        legacyPacePill(title: "ETA", value: etaText)
-                    }
-                }
-                .padding(.top, 8)
-            }
         }
         .padding(40)
     }
 
-    private func topHUD(preview: CompletedItemPreview, metrics: OverlayMetrics) -> some View {
+    private func topBar(
+        preview: CompletedItemPreview,
+        layout: ImmersivePreviewLayout
+    ) -> some View {
+        topHUD(preview: preview, metrics: layout.metrics)
+            .frame(width: layout.topBarRect.width, height: layout.topBarRect.height)
+            .position(x: layout.topBarRect.midX, y: layout.topBarRect.midY)
+    }
+
+    private func bottomPanel(
+        preview: CompletedItemPreview,
+        layout: ImmersivePreviewLayout
+    ) -> some View {
+        bottomDock(preview: preview, layout: layout)
+            .frame(width: layout.bottomPanelRect.width, height: layout.bottomPanelRect.height)
+            .position(x: layout.bottomPanelRect.midX, y: layout.bottomPanelRect.midY)
+    }
+
+    private func topHUD(
+        preview: CompletedItemPreview,
+        metrics: ImmersivePreviewChromeMetrics
+    ) -> some View {
         HStack(alignment: .center, spacing: 14) {
             VStack(alignment: .leading, spacing: 6) {
                 Text(preview.filename)
@@ -184,26 +621,33 @@ struct ImmersivePreviewView: View {
 
             integratedCloseButton
         }
-        .padding(.horizontal, metrics.hudHorizontalPadding)
-        .padding(.vertical, metrics.hudVerticalPadding)
-        .frame(maxWidth: .infinity, minHeight: metrics.hudHeight, alignment: .leading)
+        .padding(.horizontal, metrics.topBarHorizontalPadding)
+        .padding(.vertical, metrics.topBarVerticalPadding)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
         .background(panelBackground(cornerRadius: 24, fillOpacity: 0.92))
+        .shadow(color: Color.black.opacity(0.22), radius: 18, y: 8)
     }
 
-    private func bottomDock(preview: CompletedItemPreview, metrics: OverlayMetrics) -> some View {
-        HStack(alignment: .top, spacing: metrics.dockSectionSpacing) {
+    private func bottomDock(
+        preview: CompletedItemPreview,
+        layout: ImmersivePreviewLayout
+    ) -> some View {
+        let metrics = layout.metrics
+
+        return HStack(alignment: .top, spacing: metrics.sectionSpacing) {
             VStack(alignment: .leading, spacing: 10) {
                 sectionLabel("Caption", size: metrics.sectionLabelFontSize)
                 captionText(preview.caption, metrics: metrics)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .frame(width: metrics.captionWidth, alignment: .topLeading)
+            .frame(maxHeight: .infinity, alignment: .topLeading)
 
             Rectangle()
                 .fill(Self.dividerColor.opacity(0.45))
                 .frame(width: 1)
                 .padding(.vertical, 6)
 
-            VStack(alignment: .leading, spacing: metrics.utilitySectionSpacing) {
+            VStack(alignment: .leading, spacing: 8) {
                 if showsRunPerformance {
                     VStack(alignment: .leading, spacing: 8) {
                         sectionLabel("Run Pace", size: metrics.sectionLabelFontSize)
@@ -213,18 +657,35 @@ struct ImmersivePreviewView: View {
 
                 VStack(alignment: .leading, spacing: 8) {
                     sectionLabel("Keywords", size: metrics.sectionLabelFontSize)
-                    keywordsView(preview.keywords, metrics: metrics)
+                    keywordsView(
+                        preview.keywords,
+                        utilityWidth: metrics.utilityWidth,
+                        style: metrics.keywordStyle
+                    )
                 }
             }
             .frame(width: metrics.utilityWidth, alignment: .topLeading)
         }
-        .padding(.horizontal, metrics.dockHorizontalPadding)
-        .padding(.vertical, metrics.dockVerticalPadding)
-        .frame(maxWidth: .infinity, minHeight: metrics.dockHeight, maxHeight: metrics.dockHeight, alignment: .topLeading)
-        .background(panelBackground(cornerRadius: 28, fillOpacity: 0.89))
+        .padding(.horizontal, metrics.bottomPanelHorizontalPadding)
+        .padding(.vertical, metrics.bottomPanelVerticalPadding)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(
+            panelBackground(
+                cornerRadius: layout.layoutMode == .overlay ? 28 : 24,
+                fillOpacity: layout.layoutMode == .overlay ? 0.89 : 0.96
+            )
+        )
+        .shadow(
+            color: Color.black.opacity(layout.layoutMode == .overlay ? 0.26 : 0.18),
+            radius: layout.layoutMode == .overlay ? 22 : 14,
+            y: layout.layoutMode == .overlay ? 10 : 6
+        )
     }
 
-    private func captionText(_ caption: String, metrics: OverlayMetrics) -> some View {
+    private func captionText(
+        _ caption: String,
+        metrics: ImmersivePreviewChromeMetrics
+    ) -> some View {
         let displayCaption = caption.isEmpty ? "(empty caption)" : caption
 
         return ViewThatFits(in: .vertical) {
@@ -246,23 +707,27 @@ struct ImmersivePreviewView: View {
     }
 
     @ViewBuilder
-    private func keywordsView(_ keywords: [String], metrics: OverlayMetrics) -> some View {
+    private func keywordsView(
+        _ keywords: [String],
+        utilityWidth: CGFloat,
+        style: ImmersiveKeywordChipLayout.Style
+    ) -> some View {
         let rows = ImmersiveKeywordChipLayout.rows(
             for: keywords,
-            maxWidth: max(120, metrics.utilityWidth - 6),
-            style: metrics.keywordStyle
+            maxWidth: max(120, utilityWidth - 6),
+            style: style
         )
 
         if rows.isEmpty {
             Text("(none)")
-                .font(.system(size: metrics.keywordStyle.fontSize, weight: .semibold))
+                .font(.system(size: style.fontSize, weight: .semibold))
                 .foregroundStyle(Self.secondaryTextColor)
         } else {
-            VStack(alignment: .leading, spacing: metrics.keywordStyle.rowSpacing) {
+            VStack(alignment: .leading, spacing: style.rowSpacing) {
                 ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
-                    HStack(spacing: metrics.keywordStyle.itemSpacing) {
+                    HStack(spacing: style.itemSpacing) {
                         ForEach(Array(row.chips.enumerated()), id: \.offset) { _, chip in
-                            keywordChip(chip, style: metrics.keywordStyle)
+                            keywordChip(chip, style: style)
                         }
                     }
                 }
@@ -270,7 +735,10 @@ struct ImmersivePreviewView: View {
         }
     }
 
-    private func keywordChip(_ chip: ImmersiveKeywordChipLayout.Chip, style: ImmersiveKeywordChipLayout.Style) -> some View {
+    private func keywordChip(
+        _ chip: ImmersiveKeywordChipLayout.Chip,
+        style: ImmersiveKeywordChipLayout.Style
+    ) -> some View {
         Text(chip.text)
             .font(.system(size: style.fontSize, weight: .semibold))
             .foregroundStyle(.white)
@@ -331,7 +799,11 @@ struct ImmersivePreviewView: View {
         }
     }
 
-    private func compactPacePill(title: String, value: String, ultraCompact: Bool = false) -> some View {
+    private func compactPacePill(
+        title: String,
+        value: String,
+        ultraCompact: Bool = false
+    ) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(title)
                 .font(.system(size: ultraCompact ? 9 : 10, weight: .semibold))
@@ -400,7 +872,7 @@ struct ImmersivePreviewView: View {
         .keyboardShortcut(.cancelAction)
     }
 
-    private var closeButtonLayer: some View {
+    private func closeButtonLayer(safeAreaInsets: EdgeInsets) -> some View {
         VStack {
             HStack {
                 Spacer()
@@ -414,7 +886,7 @@ struct ImmersivePreviewView: View {
                 }
                 .buttonStyle(.plain)
                 .keyboardShortcut(.cancelAction)
-                .padding(.top, 24)
+                .padding(.top, safeAreaInsets.top + 24)
                 .padding(.trailing, 24)
             }
             Spacer()
@@ -508,16 +980,27 @@ struct ImmersivePreviewView: View {
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 
-    private func makeDisplayImage(for preview: CompletedItemPreview) -> NSImage? {
-        guard let fileURL = preview.previewFileURL else {
-            return nil
+    private static func resolveMedia(for preview: CompletedItemPreview) -> ResolvedMedia {
+        let fallbackSize: CGSize = preview.kind == .video
+            ? CGSize(width: 1920, height: 1080)
+            : CGSize(width: 1600, height: 1200)
+
+        if let fileURL = preview.previewFileURL,
+           let image = NSImage(contentsOf: fileURL),
+           image.size.width > 1,
+           image.size.height > 1
+        {
+            return ResolvedMedia(image: image, size: image.size)
         }
 
-        if let image = NSImage(contentsOf: fileURL) {
-            return image
+        if let fileURL = preview.previewFileURL {
+            return ResolvedMedia(
+                image: NSWorkspace.shared.icon(forFile: fileURL.path),
+                size: fallbackSize
+            )
         }
 
-        return NSWorkspace.shared.icon(forFile: fileURL.path)
+        return ResolvedMedia(image: nil, size: fallbackSize)
     }
 
     private var showsRunPerformance: Bool {
@@ -539,54 +1022,6 @@ struct ImmersivePreviewView: View {
             return "calculating"
         }
         return Self.formatDuration(seconds: etaSeconds)
-    }
-
-    private static func overlayMetrics(for size: CGSize) -> OverlayMetrics {
-        let outerInset = min(max(size.width * 0.012, 12), 24)
-        let hudHeight = min(max(size.height * 0.08, 58), 72)
-        let hudHorizontalPadding = min(max(size.width * 0.018, 18), 24)
-        let hudVerticalPadding = min(max(size.height * 0.015, 10), 14)
-
-        let dockBottomInset = min(max(size.height * 0.016, 12), 22)
-        let dockHeight = min(max(size.height * 0.19, 152), 186)
-        let dockHorizontalPadding = min(max(size.width * 0.018, 18), 28)
-        let dockVerticalPadding = min(max(size.height * 0.016, 14), 18)
-        let dockSectionSpacing = min(max(size.width * 0.016, 16), 24)
-
-        let dockWidth = max(size.width - (outerInset * 2), 360)
-        var utilityWidth = min(max(dockWidth * 0.34, 300), 420)
-        let minimumCaptionWidth = max(240, dockWidth * 0.36)
-        let availableCaptionWidth = dockWidth - (dockHorizontalPadding * 2) - dockSectionSpacing - utilityWidth - 1
-        if availableCaptionWidth < minimumCaptionWidth {
-            utilityWidth = max(240, dockWidth - (dockHorizontalPadding * 2) - dockSectionSpacing - minimumCaptionWidth - 1)
-        }
-
-        let captionFontSize = min(max(size.height * 0.056, 34), 56)
-        let compactCaptionFontSize = max(30, captionFontSize * 0.88)
-        let minimumCaptionFontSize = max(26, captionFontSize * 0.76)
-
-        return OverlayMetrics(
-            outerInset: outerInset,
-            hudHeight: hudHeight,
-            hudHorizontalPadding: hudHorizontalPadding,
-            hudVerticalPadding: hudVerticalPadding,
-            dockBottomInset: dockBottomInset,
-            dockHeight: dockHeight,
-            dockHorizontalPadding: dockHorizontalPadding,
-            dockVerticalPadding: dockVerticalPadding,
-            dockSectionSpacing: dockSectionSpacing,
-            utilityWidth: utilityWidth,
-            utilitySectionSpacing: 8,
-            titleFontSize: min(max(size.width * 0.014, 18), 22),
-            subtitleFontSize: min(max(size.width * 0.009, 12), 15),
-            sectionLabelFontSize: 11,
-            captionFontSize: captionFontSize,
-            compactCaptionFontSize: compactCaptionFontSize,
-            minimumCaptionFontSize: minimumCaptionFontSize,
-            fullProgressCardWidth: 78,
-            compactProgressCardWidth: 64,
-            keywordStyle: .immersiveCompact
-        )
     }
 
     private static func formatDuration(seconds: Int) -> String {
@@ -784,7 +1219,11 @@ struct ImmersiveKeywordChipLayout {
         }
     }
 
-    private static func truncatedKeyword(_ keyword: String, maxWidth: CGFloat, style: Style) -> String {
+    private static func truncatedKeyword(
+        _ keyword: String,
+        maxWidth: CGFloat,
+        style: Style
+    ) -> String {
         if measuredChipWidth(for: keyword, style: style) <= maxWidth {
             return keyword
         }

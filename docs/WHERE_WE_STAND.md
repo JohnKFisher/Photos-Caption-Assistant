@@ -12,7 +12,7 @@ What is working now:
 - Library, album, picker, and Queued Albums runs.
 - Visible run-summary/preflight UI showing source scope, exact count where practical, overwrite behavior, model status, and local Ollama service status.
 - The main screen now uses a denser two-column workbench layout: card-based setup controls on the left and a compact preview-forward run summary/result pane on the right.
-- The immersive completed-item view now uses a full-bleed photo with a slim top HUD and a low-cover bottom dock instead of the older split artwork/details layout.
+- The immersive completed-item view now uses a hybrid media layout: roomy landscape items keep the slim top HUD plus low-cover bottom dock, while tighter aspect ratios fall back to a dedicated bottom shelf so the chrome stays fully visible.
 - Run Summary now sits beside the main setup controls, while Data & Storage and Diagnostics live in separate windows opened from the menu bar.
 - Safer startup defaults: `Album` is selected by default, and no-prompt overwrite of non-app metadata is off by default.
 - Whole-library runs require explicit confirmation before write work starts.
