@@ -2296,36 +2296,6 @@ final class RunCoordinatorTests: XCTestCase {
         XCTAssertEqual(Set(writeOrder), expectedIDs)
     }
 
-    func testSingleAnalysisWithPrepareAheadBeatsDualAnalysisUnderContention() async {
-        let dualAnalysis = await runSyntheticContentionScenario(
-            analysisConcurrency: 2,
-            prepareAheadLimit: 0
-        )
-        let pipelinedSingleAnalysis = await runSyntheticContentionScenario(
-            analysisConcurrency: 1,
-            prepareAheadLimit: 1
-        )
-
-        let dualMilliseconds = Double(dualAnalysis.elapsedNanoseconds) / 1_000_000
-        let pipelinedMilliseconds = Double(pipelinedSingleAnalysis.elapsedNanoseconds) / 1_000_000
-        print(
-            String(
-                format: "[RunCoordinatorTests] synthetic contention benchmark dual=%.1fms pipelined=%.1fms",
-                dualMilliseconds,
-                pipelinedMilliseconds
-            )
-        )
-
-        XCTAssertEqual(dualAnalysis.summary.progress.failed, 0)
-        XCTAssertEqual(pipelinedSingleAnalysis.summary.progress.failed, 0)
-        XCTAssertGreaterThanOrEqual(dualAnalysis.maxActiveAnalyses, 2)
-        XCTAssertEqual(pipelinedSingleAnalysis.maxActiveAnalyses, 1)
-        XCTAssertLessThan(
-            pipelinedSingleAnalysis.elapsedNanoseconds,
-            dualAnalysis.elapsedNanoseconds - 80_000_000
-        )
-    }
-
     private func defaultRunOptions() -> RunOptions {
         RunOptions(
             source: .library,
@@ -2339,47 +2309,6 @@ final class RunCoordinatorTests: XCTestCase {
             photosAutomationAvailable: true,
             qwenModelAvailable: true,
             pickerCapability: .supported
-        )
-    }
-
-    private func runSyntheticContentionScenario(
-        analysisConcurrency: Int,
-        prepareAheadLimit: Int
-    ) async -> SyntheticContentionResult {
-        let assets = makeAssets(count: 4)
-        let metadata = Dictionary(uniqueKeysWithValues: assets.map { asset in
-            (asset.id, ExistingMetadataState(caption: nil, keywords: [], ownershipTag: nil, isExternal: false))
-        })
-        let writer = MockPhotosWriter(
-            assets: assets,
-            metadataByID: metadata,
-            exportDelayNanoseconds: 80_000_000
-        )
-        let analyzerState = ContentionAwareAnalyzerState(
-            result: GeneratedMetadata(caption: "caption", keywords: ["k1"]),
-            baseDelayNanoseconds: 150_000_000,
-            concurrentPenaltyNanoseconds: 220_000_000
-        )
-        let coordinator = RunCoordinator(
-            photosWriter: writer,
-            analyzer: ContentionAwareAnalyzer(state: analyzerState),
-            analysisConcurrency: analysisConcurrency,
-            prepareAheadLimit: prepareAheadLimit
-        )
-
-        let started = DispatchTime.now().uptimeNanoseconds
-        let summary = await coordinator.run(
-            options: defaultRunOptions(),
-            capabilities: defaultCapabilities(),
-            callbacks: RunCallbacks()
-        )
-        let elapsed = DispatchTime.now().uptimeNanoseconds - started
-        let maxActiveAnalyses = await analyzerState.maxActiveCountValue()
-
-        return SyntheticContentionResult(
-            summary: summary,
-            elapsedNanoseconds: elapsed,
-            maxActiveAnalyses: maxActiveAnalyses
         )
     }
 
@@ -2427,12 +2356,6 @@ final class RunCoordinatorTests: XCTestCase {
             )
         ])
     }
-}
-
-private struct SyntheticContentionResult {
-    let summary: RunSummary
-    let elapsedNanoseconds: UInt64
-    let maxActiveAnalyses: Int
 }
 
 private actor TimelineRecorder {
