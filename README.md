@@ -4,7 +4,7 @@ Photos Caption Assistant is a local-first macOS app for generating captions and 
 
 This is a vibe-coded personal hobby app that I use on my own Mac and iterate on quickly. It is published so the source stays visible and recoverable, not because it is polished for broad public use. Outside usefulness is incidental. No support commitment, compatibility guarantee, stability promise, or warranty is implied beyond the repository's actual license situation.
 
-The current source tree builds locally as version `3.5.2` build `10`.
+The current source tree builds locally as version `3.5.4` build `12`.
 
 ## What It Does
 
