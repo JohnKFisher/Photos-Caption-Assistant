@@ -47,7 +47,7 @@
 - The app-hosted benchmark now requests Photos access if needed and defaults to the first `1000` assets per scope so large libraries finish in a reasonable time.
 - If the optional album sample cannot be mapped from the AppleScript album ID to a PhotoKit collection, the benchmark now reports that and continues with the whole-library comparison instead of aborting.
 - The main window now includes a Diagnostics section where you can optionally override the benchmark album and enter the sacrificial/control/smart-album IDs needed for the write probe.
-- Prefer the app-hosted path on this machine, because it uses the existing `Photo Description Creator.app` Photos and Automation permissions.
+- Prefer the app-hosted path on this machine, because it uses the existing `Photos Caption Assistant.app` Photos and Automation permissions.
 - Enable the real-library benchmark with:
 
 ```bash

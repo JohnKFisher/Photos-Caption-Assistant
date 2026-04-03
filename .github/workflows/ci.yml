@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run test suite
+        run: swift test
+
+  release-builds:
+    runs-on: macos-15
+    strategy:
+      matrix:
+        triple:
+          - arm64-apple-macosx15.0
+          - x86_64-apple-macosx15.0
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build release product
+        run: swift build -c release --triple "${{ matrix.triple }}" --product PhotosCaptionAssistant

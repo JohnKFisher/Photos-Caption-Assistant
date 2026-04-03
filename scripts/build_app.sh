@@ -2,13 +2,18 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-INFO_PLIST_SOURCE="$ROOT_DIR/Sources/PhotoDescriptionCreator/Resources/Info.plist"
+INFO_PLIST_SOURCE="$ROOT_DIR/Sources/PhotosCaptionAssistant/Resources/Info.plist"
 PROMPTS_SOURCE_DIR="$ROOT_DIR/Prompts"
-APP_NAME="Photo Description Creator"
-EXECUTABLE_NAME="PhotoDescriptionCreator"
+APP_NAME="Photos Caption Assistant"
+EXECUTABLE_NAME="PhotosCaptionAssistant"
 APP_BUNDLE="$ROOT_DIR/dist/$APP_NAME.app"
-RELEASE_BINARY="$ROOT_DIR/.build/arm64-apple-macosx/release/$EXECUTABLE_NAME"
-ICON_PATH="$ROOT_DIR/Sources/PhotoDescriptionCreator/Resources/AppIcon.icns"
+ARM64_TRIPLE="arm64-apple-macosx15.0"
+X86_64_TRIPLE="x86_64-apple-macosx15.0"
+ARM64_BINARY="$ROOT_DIR/.build/arm64-apple-macosx/release/$EXECUTABLE_NAME"
+X86_64_BINARY="$ROOT_DIR/.build/x86_64-apple-macosx/release/$EXECUTABLE_NAME"
+UNIVERSAL_DIR="$ROOT_DIR/.build/universal-apple-macosx/release"
+UNIVERSAL_BINARY="$UNIVERSAL_DIR/$EXECUTABLE_NAME"
+ICON_PATH="$ROOT_DIR/Sources/PhotosCaptionAssistant/Resources/AppIcon.icns"
 
 plist_read() {
   /usr/libexec/PlistBuddy -c "Print :$2" "$1"
@@ -16,6 +21,19 @@ plist_read() {
 
 plist_set() {
   /usr/libexec/PlistBuddy -c "Set :$2 $3" "$1"
+}
+
+increment_patch_version() {
+  local version="$1"
+  local major minor patch
+  IFS='.' read -r major minor patch <<<"$version"
+
+  if [[ ! "$major" =~ ^[0-9]+$ || ! "$minor" =~ ^[0-9]+$ || ! "$patch" =~ ^[0-9]+$ ]]; then
+    echo "Version must be in major.minor.patch form: $version" >&2
+    exit 1
+  fi
+
+  echo "$major.$minor.$((patch + 1))"
 }
 
 if [[ ! -f "$INFO_PLIST_SOURCE" ]]; then
@@ -30,34 +48,53 @@ fi
 
 CURRENT_VERSION="$(plist_read "$INFO_PLIST_SOURCE" CFBundleShortVersionString)"
 CURRENT_BUILD="$(plist_read "$INFO_PLIST_SOURCE" CFBundleVersion)"
-NEXT_BUILD=1
+NEXT_VERSION="$(increment_patch_version "$CURRENT_VERSION")"
 
-if [[ -f "$APP_BUNDLE/Contents/Info.plist" ]]; then
-  DIST_VERSION="$(plist_read "$APP_BUNDLE/Contents/Info.plist" CFBundleShortVersionString || true)"
-  DIST_BUILD="$(plist_read "$APP_BUNDLE/Contents/Info.plist" CFBundleVersion || true)"
-  if [[ "$DIST_VERSION" == "$CURRENT_VERSION" && "$DIST_BUILD" =~ ^[0-9]+$ ]]; then
-    NEXT_BUILD=$((DIST_BUILD + 1))
-  else
-    NEXT_BUILD=1
-  fi
-elif [[ "$CURRENT_BUILD" =~ ^[0-9]+$ ]]; then
-  NEXT_BUILD=$((CURRENT_BUILD + 1))
+MAX_KNOWN_BUILD=0
+if [[ "$CURRENT_BUILD" =~ ^[0-9]+$ ]]; then
+  MAX_KNOWN_BUILD="$CURRENT_BUILD"
 fi
 
+if [[ -f "$APP_BUNDLE/Contents/Info.plist" ]]; then
+  DIST_BUILD="$(plist_read "$APP_BUNDLE/Contents/Info.plist" CFBundleVersion || true)"
+  if [[ "$DIST_BUILD" =~ ^[0-9]+$ && "$DIST_BUILD" -gt "$MAX_KNOWN_BUILD" ]]; then
+    MAX_KNOWN_BUILD="$DIST_BUILD"
+  fi
+fi
+
+NEXT_BUILD=$((MAX_KNOWN_BUILD + 1))
+
+plist_set "$INFO_PLIST_SOURCE" CFBundleShortVersionString "$NEXT_VERSION"
 plist_set "$INFO_PLIST_SOURCE" CFBundleVersion "$NEXT_BUILD"
 
 bash "$ROOT_DIR/scripts/generate_app_icon.sh"
 
-swift build -c release --package-path "$ROOT_DIR"
+swift build -c release --triple "$ARM64_TRIPLE" --package-path "$ROOT_DIR" --product "$EXECUTABLE_NAME"
+swift build -c release --triple "$X86_64_TRIPLE" --package-path "$ROOT_DIR" --product "$EXECUTABLE_NAME"
 
-if [[ ! -f "$RELEASE_BINARY" ]]; then
-  echo "Missing release binary: $RELEASE_BINARY" >&2
+if [[ ! -f "$ARM64_BINARY" ]]; then
+  echo "Missing arm64 release binary: $ARM64_BINARY" >&2
   exit 1
 fi
 
+if [[ ! -f "$X86_64_BINARY" ]]; then
+  echo "Missing x86_64 release binary: $X86_64_BINARY" >&2
+  exit 1
+fi
+
+mkdir -p "$UNIVERSAL_DIR"
+lipo -create -output "$UNIVERSAL_BINARY" "$ARM64_BINARY" "$X86_64_BINARY"
+
+if [[ ! -f "$UNIVERSAL_BINARY" ]]; then
+  echo "Missing universal release binary: $UNIVERSAL_BINARY" >&2
+  exit 1
+fi
+
+UNIVERSAL_ARCHS="$(lipo -archs "$UNIVERSAL_BINARY")"
+
 rm -rf "$APP_BUNDLE"
 mkdir -p "$APP_BUNDLE/Contents/MacOS" "$APP_BUNDLE/Contents/Resources/Prompts"
-cp "$RELEASE_BINARY" "$APP_BUNDLE/Contents/MacOS/$EXECUTABLE_NAME"
+cp "$UNIVERSAL_BINARY" "$APP_BUNDLE/Contents/MacOS/$EXECUTABLE_NAME"
 chmod +x "$APP_BUNDLE/Contents/MacOS/$EXECUTABLE_NAME"
 cp "$ICON_PATH" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
 cp "$PROMPTS_SOURCE_DIR/photoprompt.txt" "$APP_BUNDLE/Contents/Resources/Prompts/photoprompt.txt"
@@ -75,15 +112,15 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
     <key>CFBundleExecutable</key>
     <string>$EXECUTABLE_NAME</string>
     <key>CFBundleIdentifier</key>
-    <string>com.jkfisher.PhotoDescriptionCreator</string>
+    <string>com.jkfisher.PhotosCaptionAssistant</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
-    <string>$APP_NAME</string>
+    <string>$EXECUTABLE_NAME</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>$CURRENT_VERSION</string>
+    <string>$NEXT_VERSION</string>
     <key>CFBundleVersion</key>
     <string>$NEXT_BUILD</string>
     <key>CFBundleIconFile</key>
@@ -91,9 +128,9 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
     <key>LSMinimumSystemVersion</key>
     <string>15.0</string>
     <key>NSAppleEventsUsageDescription</key>
-    <string>Photo Description Creator needs automation access to update captions and keywords in Photos.</string>
+    <string>Photos Caption Assistant needs automation access to read from Photos and update captions and keywords in Photos.</string>
     <key>NSPhotoLibraryUsageDescription</key>
-    <string>Photo Description Creator reads selected photos and videos to generate captions and keywords.</string>
+    <string>Photos Caption Assistant reads selected photos and videos and writes generated captions and keywords back to Photos.</string>
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
 </dict>
@@ -105,4 +142,5 @@ codesign --force --deep --sign - "$APP_BUNDLE"
 codesign --verify --deep --strict --verbose=2 "$APP_BUNDLE"
 
 echo "Built: $APP_BUNDLE"
-echo "Version: $CURRENT_VERSION ($NEXT_BUILD)"
+echo "Version: $NEXT_VERSION ($NEXT_BUILD)"
+echo "Architectures: $UNIVERSAL_ARCHS"

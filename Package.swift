@@ -2,23 +2,23 @@
 import PackageDescription
 
 let package = Package(
-    name: "PhotoDescriptionCreator",
+    name: "PhotosCaptionAssistant",
     platforms: [
         .macOS(.v15)
     ],
     products: [
-        .executable(name: "PhotoDescriptionCreator", targets: ["PhotoDescriptionCreator"])
+        .executable(name: "PhotosCaptionAssistant", targets: ["PhotosCaptionAssistant"])
     ],
     targets: [
         .executableTarget(
-            name: "PhotoDescriptionCreator",
-            path: "Sources/PhotoDescriptionCreator",
+            name: "PhotosCaptionAssistant",
+            path: "Sources/PhotosCaptionAssistant",
             exclude: ["Resources"]
         ),
         .testTarget(
-            name: "PhotoDescriptionCreatorTests",
-            dependencies: ["PhotoDescriptionCreator"],
-            path: "Tests/PhotoDescriptionCreatorTests"
+            name: "PhotosCaptionAssistantTests",
+            dependencies: ["PhotosCaptionAssistant"],
+            path: "Tests/PhotosCaptionAssistantTests"
         )
     ]
 )

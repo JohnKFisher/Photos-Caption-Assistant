@@ -1,74 +1,66 @@
-# Photo Description Creator
+# Photos Caption Assistant
 
-Current version/build: 3.0.0 (1)
+Current version/build: 3.0.2 (3)
 Current description logic version: 3.0.0
 
 Current overall status:
-The current source tree builds as version 3.0.0 build 1 with description logic 3.0.0. The current durable known-good anchor is the March 26, 2026 fast-scan pipeline baseline listed below.
+The current source tree builds locally as version 3.0.2 build 3 and now includes safer run preflight checks, menu-accessible storage and diagnostics windows, a universal macOS build script, and the new Photos Caption Assistant identity. The core local captioning workflow is working, but this is still a personal hobby app built around Apple Photos automation rather than a polished public-distribution product.
 
 What is working now:
 - Local photo and video analysis through Ollama with the `qwen2.5vl:7b` model.
 - Apple Photos metadata reads and writes, including captions, keywords, and app ownership tags.
-- Library, album, and picker-based runs with overwrite policy checks.
-- A `Caption Workflow` source mode that stores an ordered user-managed album queue, starts with 2 visible queue rows, lets the user add more rows, and re-queries the selected albums from top to bottom during a run.
-- Incremental processing, pending-item tracking, and per-item completion previews.
-- Batched metadata reads and batched metadata writes in the current source tree.
-- Resilient enumerate-page retry behavior for large fast-order runs.
-- Caption-workflow queue handoffs now preflight the configured albums, tolerate album renames, and use bounded retry/wait behavior before concluding that the next queue item is empty or failed.
-- Caption-workflow fast runs now collect and freeze bounded smart-album chunks before processing, so large shrinking smart albums can start sooner without relying on stale offsets.
-- Automatic Photos restart after every 500 changed items, plus the same restart path as a backup when Photos memory usage crosses the configured threshold.
-- Future builds from this source baseline now embed the current prompt files and use prompt logic 3.0.0.
-- Launch-time capability checks now surface denied Photos automation immediately so unattended restart runs are less likely to stall later on a hidden permission prompt.
-- Video analysis now selects three ordered key frames from a larger candidate set using time coverage plus lightweight visual-difference scoring.
-- Cloud-backed videos now try a Photos-framework acquire/export path before falling back to AppleScript, so longer iCloud movies are less likely to die at the old fixed AppleScript export timeout.
-- The run pipeline now defaults to one in-flight LLM analysis with bounded prepare-ahead overlap so the next asset can be readied without competing model calls.
-- Analyzer-ready payloads are now prepared ahead of the LLM handoff when the analyzer supports it, so image encoding and video frame packaging can overlap with the current analysis.
-- Fast photo analysis now keeps the preview JPEG in memory until analysis completes instead of writing a temp file and reading it back immediately.
-- Ordered overwrite gating now starts acquisition/analysis as soon as each active-window asset clears metadata checks, instead of waiting for the whole active window to finish eligibility gating first.
-- Completion preview rendering is now deferred off the metadata-write critical path with a small bounded backlog.
-- The immersive preview now shows the same run counters as the main progress view, includes source context for each completed item, and uses backlog-aware `30s / 10s / sampled` display timing without slowing the processing pipeline.
-- The cancel button now switches to `Canceling` after a cancel request is acknowledged while the current stage drains safely.
+- Library, album, picker, and Queued Albums runs.
+- Visible run-summary/preflight UI showing source scope, exact count where practical, overwrite behavior, model status, and local Ollama service status.
+- Run Summary now sits beside the main setup controls, while Data & Storage and Diagnostics live in separate windows opened from the menu bar.
+- Safer startup defaults: `Album` is selected by default, and no-prompt overwrite of non-app metadata is off by default.
+- Whole-library runs require explicit confirmation before write work starts.
+- Runs that overwrite non-app metadata without per-item prompts require explicit confirmation.
+- If Ollama is missing, the app now shows a setup card and can open the official macOS download page after explicit confirmation.
+- Missing model downloads still require explicit confirmation, while ordinary local Ollama startup does not.
+- Resume-state and queued-albums files are stored under Application Support and surfaced in the Data & Storage window.
+- The build script now creates a universal `arm64` + `x86_64` app bundle in `dist/`.
+- Existing long-run progress, cancellation, resume-state persistence, diagnostics, and restart safeguards remain in place.
 
 What is partially implemented:
 - Long-run resilience is improved, but still depends on AppleScript and Photos relaunching cleanly when the automatic restart cycle fires.
-- Prompt management exists in source text files and embedded analyzer constants, but there is no dedicated in-app prompt/version switcher.
-- Recovery from interrupted or historical rollback states is only partially addressed; repo history before this baseline should not be treated as authoritative.
+- The guarded PhotoKit rollout still covers only the safe scan/count scopes already documented elsewhere; metadata writes remain AppleScript-backed.
+- If Ollama is installed but not already running, the app cannot know model presence until it starts the local service and checks.
 
 What is not implemented yet:
 - No dedicated prompt comparison or prompt selection UI.
-- No formal migration or repair tooling for previously lost git history.
-- No fully isolated packaging flow that keeps build artifacts out of version control automatically.
+- No notarized public-distribution flow.
+- No fully isolated release-management pipeline beyond the local build script and repo docs.
 
 Known limitations and trust warnings:
+- The packaged app is ad-hoc signed for local use but not notarized.
 - The app depends on Apple Photos automation and local Ollama availability.
-- Prompt quality and throughput can vary with model readiness and local machine performance.
-- The `Caption Workflow` source now depends on saved queue-item album mappings; if a selected album is deleted or recreated under a new ID, that queue item must be repaired in the setup UI before the run can start.
-- The `Caption Workflow` source re-queries each configured queue item and may briefly wait/retry when Photos is slow to update the next smart album, so queue handoffs are a little more defensive than the normal fast library/album modes.
-- The `Caption Workflow` fast-start path now trades a little more queue-refresh overhead for earlier visible progress; ordered traversal modes still use the slower full-queue snapshot path.
-- Ordered active-window scans now stream earlier, but metadata writes still flush in batches and later windows still rely on the existing bounded metadata prefetch machinery.
-- If the immersive preview backlog grows past 60 queued items, it samples the queue to stay reasonably current instead of showing every completed image in strict order.
-- Video-analysis throughput may vary modestly with clip format because key-frame selection now evaluates a larger candidate set before sending frames to the model.
-- Metadata writes still happen after each analyzed chunk, so the pipeline is only partially streamed end to end even though acquisition, preparation, analysis, and preview generation overlap more than before.
-- The internal metadata ownership logic version in code is currently separate from the app marketing version.
-- The logic version major bump to 3.0.0 will cause previously app-owned 2.x metadata to be treated as older and eligible for overwrite under the usual ownership rules.
-- This repo started a fresh baseline on March 14, 2026; earlier rollback points should be treated cautiously.
+- Photos.app must be open before starting a write run.
+- The bundle identifier is now `com.jkfisher.PhotosCaptionAssistant`, so macOS will likely prompt again for Photos and Apple Events permissions after the rename.
+- The core production write path still relies on AppleScript and Photos automation for metadata reads, writes, overwrite gating, picker resolution, queued-albums resolution, and Photos lifecycle handling.
+- The app does not install Ollama itself. It uses a manual browser handoff to the official download page when Ollama is missing.
+- The build script now bumps the patch version and build number every time it runs, so building changes the source `Info.plist`.
+- This repo is source-first. Built app bundles and temp outputs should not be treated as source-of-truth artifacts.
 
 Setup/runtime requirements:
 - macOS 15 or later.
 - Photos.app installed and open before starting a write run.
-- Ollama running locally on `http://127.0.0.1:11434`.
-- The `qwen2.5vl:7b` model installed locally.
+- Ollama required before runs can start, but not required before first launch; the app can open the official macOS download page to guide setup.
+- The app does not auto-install Ollama or run remote install scripts.
+- The `qwen2.5vl:7b` model installed locally, or willingness to let the app download it through Ollama after a separate confirmation.
 - User approval for Photos library access and Apple Events automation when macOS prompts.
+- First launch after the rename should be treated like a new app for macOS permission prompts.
 
 Important operational risks:
-- Large runs now deliberately pause for about 90 seconds per 500 changed items to reduce Photos instability, and they can still fail if Photos does not relaunch into an automation-ready state.
-- Local model inference may time out on first run or under heavy load.
-- Build artifacts are currently present in the repo history and should not be treated as source-of-truth outputs.
+- Large runs can still fail if Photos does not relaunch into an automation-ready state.
+- First-time Ollama setup is still manual after the browser handoff.
+- First-run model download can take several minutes.
+- If Ollama is missing entirely, the run cannot start until the user installs it and clicks Re-check Setup.
+- Whole-library runs and no-prompt overwrite modes are intentionally possible, but they still deserve caution even with the new confirmations.
 
 Recommended next priorities:
-- Add a cleaner artifact management strategy so builds do not muddy repo state.
-- Add more explicit diagnostics around prompt version, model readiness, and fallback behavior.
-- Add a small, repeatable smoke-test workflow for known-good verification before future anchors.
+- Decide whether this project will stay source-first and local-only, or gain a real notarized distribution path.
+- Add an explicit dry-run mode that previews filtered write scope without starting model preparation.
+- Add a small, repeatable smoke-test checklist for future known-good anchors and releases.
 
 Most recent durable known-good anchor:
-- `known-good/20260326-v2-4-fast-scan-pipeline`
+- `checkpoint/20260402-180116-known-good`

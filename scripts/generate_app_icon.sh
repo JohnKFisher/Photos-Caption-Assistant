@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-RES_DIR="$ROOT_DIR/Sources/PhotoDescriptionCreator/Resources"
+RES_DIR="$ROOT_DIR/Sources/PhotosCaptionAssistant/Resources"
 ICONSET_DIR="$RES_DIR/AppIcon.iconset"
 MASTER_PNG="$RES_DIR/AppIcon-1024.png"
 ICNS_PATH="$RES_DIR/AppIcon.icns"
