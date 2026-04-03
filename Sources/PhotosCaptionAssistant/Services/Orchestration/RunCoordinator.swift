@@ -684,9 +684,9 @@ public final class RunCoordinator {
             }
         }
 
-        func measureOnMain<T>(
+        func measureOnMain<T: Sendable>(
             _ stage: RunTimingStage,
-            operation: () async throws -> T
+            operation: @Sendable () async throws -> T
         ) async throws -> T {
             let start = DispatchTime.now().uptimeNanoseconds
             do {

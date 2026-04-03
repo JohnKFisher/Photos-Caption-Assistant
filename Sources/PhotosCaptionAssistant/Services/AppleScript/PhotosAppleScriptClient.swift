@@ -9,6 +9,10 @@ public actor PhotosAppleScriptClient: PhotosWriter, PhotosProcessMonitoring, Pho
         let rawValue: AVAssetExportSession
     }
 
+    private struct UncheckedImage: @unchecked Sendable {
+        let rawValue: NSImage
+    }
+
     private enum ScriptTimeout {
         static let enumerateLibrary: TimeInterval = 900
         static let enumerateNarrowScope: TimeInterval = 180
@@ -854,7 +858,7 @@ public actor PhotosAppleScriptClient: PhotosWriter, PhotosProcessMonitoring, Pho
             return nil
         }
 
-        return previewJPEGData(from: image)
+        return previewJPEGData(from: image.rawValue)
     }
 
     public func isPhotosAppRunning() async -> Bool {
@@ -1261,14 +1265,14 @@ public actor PhotosAppleScriptClient: PhotosWriter, PhotosProcessMonitoring, Pho
         for asset: PHAsset,
         targetSize: CGSize,
         options: PHImageRequestOptions
-    ) async -> NSImage? {
+    ) async -> UncheckedImage? {
         await withCheckedContinuation { continuation in
             let manager = PHImageManager.default()
             let lock = NSLock()
             var didResume = false
             var requestID: PHImageRequestID = PHInvalidImageRequestID
 
-            func resumeOnce(_ image: NSImage?) {
+            func resumeOnce(_ image: UncheckedImage?) {
                 lock.lock()
                 guard !didResume else {
                     lock.unlock()
@@ -1303,13 +1307,24 @@ public actor PhotosAppleScriptClient: PhotosWriter, PhotosProcessMonitoring, Pho
                     return
                 case .returnImage:
                     timeoutWork.cancel()
-                    resumeOnce(image)
+                    resumeOnce(Self.snapshotImage(image))
                 case .returnNil:
                     timeoutWork.cancel()
                     resumeOnce(nil)
                 }
             }
         }
+    }
+
+    nonisolated private static func snapshotImage(_ image: NSImage?) -> UncheckedImage? {
+        guard
+            let image,
+            let tiffData = image.tiffRepresentation,
+            let copiedImage = NSImage(data: tiffData)
+        else {
+            return nil
+        }
+        return UncheckedImage(rawValue: copiedImage)
     }
 
     private func requestVideoAsset(

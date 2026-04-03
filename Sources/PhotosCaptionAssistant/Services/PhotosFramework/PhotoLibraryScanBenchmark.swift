@@ -741,8 +741,8 @@ actor PhotoLibraryScanBenchmarkRunner {
         return url
     }
 
-    private func measureOnce<T>(
-        operation: () async throws -> T
+    private func measureOnce<T: Sendable>(
+        operation: @Sendable () async throws -> T
     ) async throws -> PhotoLibraryBenchmarkTimedValue<T> {
         let started = DispatchTime.now().uptimeNanoseconds
         let value = try await operation()
@@ -824,7 +824,7 @@ private struct PhotoLibraryBenchmarkScopeDiscovery {
     let notice: String?
 }
 
-private struct PhotoLibraryBenchmarkTimedValue<T> {
+private struct PhotoLibraryBenchmarkTimedValue<T: Sendable>: Sendable {
     let value: T
     let elapsedSeconds: Double
 }
