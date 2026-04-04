@@ -226,15 +226,79 @@ struct RunSetupView: View {
             subtitle: sourceSelection.summary
         ) {
             VStack(alignment: .leading, spacing: 12) {
-                Picker("Selection", selection: $sourceSelection) {
-                    ForEach(SourceSelection.allCases) { source in
-                        Text(source.title).tag(source)
-                    }
-                }
-                .pickerStyle(.segmented)
+                sourceSelectionOptions
 
                 sourceConfiguration
             }
+        }
+    }
+
+    @ViewBuilder
+    private var sourceSelectionOptions: some View {
+        ViewThatFits(in: .horizontal) {
+            LazyVGrid(
+                columns: [
+                    GridItem(.flexible(minimum: 140), spacing: 10),
+                    GridItem(.flexible(minimum: 140), spacing: 10)
+                ],
+                alignment: .leading,
+                spacing: 10
+            ) {
+                sourceSelectionOptionButtons
+            }
+
+            VStack(alignment: .leading, spacing: 10) {
+                sourceSelectionOptionButtons
+            }
+        }
+    }
+
+    private var sourceSelectionOptionButtons: some View {
+        ForEach(SourceSelection.allCases) { source in
+            Button {
+                sourceSelection = source
+            } label: {
+                HStack(alignment: .top, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(source.title)
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(WorkbenchPalette.text)
+                            .multilineTextAlignment(.leading)
+
+                        Text(source.summary)
+                            .font(.footnote)
+                            .foregroundStyle(WorkbenchPalette.muted)
+                            .multilineTextAlignment(.leading)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    Spacer(minLength: 0)
+
+                    Image(systemName: sourceSelection == source ? "largecircle.fill.circle" : "circle")
+                        .font(.body.weight(.semibold))
+                        .foregroundStyle(
+                            sourceSelection == source
+                                ? WorkbenchPalette.accent
+                                : WorkbenchPalette.muted.opacity(0.65)
+                        )
+                        .padding(.top, 2)
+                }
+                .padding(14)
+                .frame(maxWidth: .infinity, minHeight: 96, alignment: .leading)
+                .background(
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .fill(sourceSelection == source ? WorkbenchPalette.accentSoft : WorkbenchPalette.surfaceAlt)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .strokeBorder(
+                            sourceSelection == source ? WorkbenchPalette.accent : WorkbenchPalette.border,
+                            lineWidth: sourceSelection == source ? 1.5 : 1
+                        )
+                )
+                .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            }
+            .buttonStyle(.plain)
         }
     }
 
