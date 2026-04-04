@@ -897,6 +897,7 @@ public final class RunCoordinator {
 
                 callbacks.onItemCompleted(
                     CompletedItemPreview(
+                        assetID: write.asset.id,
                         filename: write.asset.filename,
                         sourceContext: write.sourceContext,
                         captureDate: write.asset.captureDate,

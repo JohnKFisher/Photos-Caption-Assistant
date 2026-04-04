@@ -282,6 +282,7 @@ public struct RunSummary: Sendable, Equatable {
 }
 
 public struct CompletedItemPreview: Sendable, Equatable {
+    public let assetID: String
     public let filename: String
     public let sourceContext: String
     public let captureDate: Date?
@@ -291,6 +292,7 @@ public struct CompletedItemPreview: Sendable, Equatable {
     public let keywords: [String]
 
     public init(
+        assetID: String,
         filename: String,
         sourceContext: String,
         captureDate: Date?,
@@ -299,6 +301,7 @@ public struct CompletedItemPreview: Sendable, Equatable {
         caption: String,
         keywords: [String]
     ) {
+        self.assetID = assetID
         self.filename = filename
         self.sourceContext = sourceContext
         self.captureDate = captureDate

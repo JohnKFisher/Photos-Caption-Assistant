@@ -1,10 +1,10 @@
 # Photos Caption Assistant
 
-Current version/build: 3.5.1 (9)
+Current version/build: 3.5.5 (13)
 Current description logic version: 3.0.0
 
 Current overall status:
-The current source tree builds locally as version 3.5.1 build 9 and now includes safer run preflight checks, menu-accessible storage and diagnostics windows, a universal macOS build script, and the new Photos Caption Assistant identity. The core local captioning workflow is working, but this is still a personal hobby app built around Apple Photos automation rather than a polished public-distribution product.
+The current source tree builds locally as version 3.5.5 build 13 and now includes safer run preflight checks, menu-accessible storage and diagnostics windows, a universal macOS build script, adaptive immersive playback cadence, and the new Photos Caption Assistant identity. The core local captioning workflow is working, but this is still a personal hobby app built around Apple Photos automation rather than a polished public-distribution product.
 
 What is working now:
 - Local photo and video analysis through Ollama with the `qwen2.5vl:7b` model.
@@ -14,6 +14,8 @@ What is working now:
 - The main screen now uses a denser two-column workbench layout: card-based setup controls on the left and a compact preview-forward run summary/result pane on the right.
 - Album names now surface before PhotoKit finishes resolving counts, so album-mode controls stop feeling dead on cold launch.
 - The immersive completed-item view now uses a hybrid media layout: roomy landscape items keep the slim top HUD plus low-cover bottom dock, while tighter aspect ratios fall back to a dedicated bottom shelf so the chrome stays fully visible.
+- The immersive completed-item view now buffers recent completed items even before full-screen opens, resumes any unseen backlog if you close and reopen it during a run, and suppresses same-asset replay inside that playback queue.
+- Immersive playback cadence now learns from the rolling mean of the most recent completed-item intervals, aims to stay about two learned item-times behind the newest completion, and nudges preview holds up or down gradually instead of using the old fixed backlog-delay tiers.
 - Aspect-fit immersive media now uses a restrained ambient matte instead of a flat black letterbox, and empty immersive state copy is centered until a completed preview exists.
 - Capture dates now come across from AppleScript as stable local wall-clock timestamps so immersive timestamps match the Mac's local time instead of drifting through the earlier pseudo-epoch conversion.
 - Run Summary now sits beside the main setup controls, while Data & Storage and Diagnostics live in separate windows opened from the menu bar.

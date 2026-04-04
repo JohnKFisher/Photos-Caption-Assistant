@@ -33,21 +33,13 @@ enum AppAlert: Identifiable {
 enum ImmersivePreviewPolicy {
     static let emergencySamplingThreshold = 40
     static let sampledRetainedPreviewCount = 24
-
-    static func displaySeconds(for backlogCount: Int) -> TimeInterval {
-        switch backlogCount {
-        case ...2:
-            return 20
-        case 3...6:
-            return 18
-        case 7...12:
-            return 16
-        case 13...20:
-            return 14
-        default:
-            return 12
-        }
-    }
+    static let cadenceRollingWindowSize = 30
+    static let targetDriftMultiplier = 2.0
+    static let driftDeadbandFraction = 0.25
+    static let cadenceAdjustmentStepFraction = 0.05
+    static let minimumCatchUpIntervalFactor = 0.5
+    static let maximumBacklogIntervalFactor = 1.25
+    static let bootstrapDisplaySeconds: TimeInterval = 12
 
     static func lagDisplayValue(for lagCount: Int) -> String {
         let clampedLagCount = max(0, lagCount)
@@ -88,6 +80,104 @@ enum ImmersivePreviewPolicy {
     }
 }
 
+struct ImmersivePlaybackCadence {
+    private(set) var learnedInterval: TimeInterval?
+    private(set) var currentDisplayInterval: TimeInterval?
+    private(set) var latestCompletionAt: Date?
+    private var recentCompletionIntervals: [TimeInterval] = []
+
+    var recentIntervalCount: Int {
+        recentCompletionIntervals.count
+    }
+
+    mutating func reset() {
+        learnedInterval = nil
+        currentDisplayInterval = nil
+        latestCompletionAt = nil
+        recentCompletionIntervals.removeAll(keepingCapacity: true)
+    }
+
+    mutating func recordCompletion(at completedAt: Date) {
+        if let latestCompletionAt {
+            guard completedAt > latestCompletionAt else {
+                return
+            }
+            appendCompletionInterval(completedAt.timeIntervalSince(latestCompletionAt))
+        }
+
+        latestCompletionAt = completedAt
+    }
+
+    func driftSeconds(for displayedCompletionAt: Date?) -> TimeInterval? {
+        guard let latestCompletionAt, let displayedCompletionAt else {
+            return nil
+        }
+        return max(0, latestCompletionAt.timeIntervalSince(displayedCompletionAt))
+    }
+
+    @discardableResult
+    mutating func updateCurrentDisplayInterval(
+        displayedCompletionAt: Date?,
+        hasBacklog: Bool
+    ) -> TimeInterval? {
+        guard let learnedInterval else {
+            currentDisplayInterval = nil
+            return nil
+        }
+
+        guard hasBacklog else {
+            currentDisplayInterval = learnedInterval
+            return currentDisplayInterval
+        }
+
+        let targetDrift = learnedInterval * ImmersivePreviewPolicy.targetDriftMultiplier
+        let deadband = targetDrift * ImmersivePreviewPolicy.driftDeadbandFraction
+        let lowerDriftBound = max(0, targetDrift - deadband)
+        let upperDriftBound = targetDrift + deadband
+        let minimumInterval = learnedInterval * ImmersivePreviewPolicy.minimumCatchUpIntervalFactor
+        let maximumInterval = learnedInterval * ImmersivePreviewPolicy.maximumBacklogIntervalFactor
+
+        var nextInterval = currentDisplayInterval ?? learnedInterval
+
+        if let driftSeconds = driftSeconds(for: displayedCompletionAt) {
+            if driftSeconds > upperDriftBound {
+                nextInterval *= 1 - ImmersivePreviewPolicy.cadenceAdjustmentStepFraction
+            } else if driftSeconds < lowerDriftBound {
+                nextInterval *= 1 + ImmersivePreviewPolicy.cadenceAdjustmentStepFraction
+            } else {
+                nextInterval += (learnedInterval - nextInterval) * ImmersivePreviewPolicy.cadenceAdjustmentStepFraction
+            }
+        } else {
+            nextInterval = learnedInterval
+        }
+
+        currentDisplayInterval = min(max(nextInterval, minimumInterval), maximumInterval)
+        return currentDisplayInterval
+    }
+
+    func effectiveDisplayInterval(
+        fallback: TimeInterval = ImmersivePreviewPolicy.bootstrapDisplaySeconds
+    ) -> TimeInterval {
+        max(0, currentDisplayInterval ?? learnedInterval ?? fallback)
+    }
+
+    private mutating func appendCompletionInterval(_ interval: TimeInterval) {
+        guard interval > 0 else { return }
+        recentCompletionIntervals.append(interval)
+        if recentCompletionIntervals.count > ImmersivePreviewPolicy.cadenceRollingWindowSize {
+            recentCompletionIntervals.removeFirst(
+                recentCompletionIntervals.count - ImmersivePreviewPolicy.cadenceRollingWindowSize
+            )
+        }
+
+        let total = recentCompletionIntervals.reduce(0, +)
+        learnedInterval = total / Double(recentCompletionIntervals.count)
+        if currentDisplayInterval == nil {
+            currentDisplayInterval = learnedInterval
+        }
+    }
+}
+
 struct CaptionWorkflowQueueRowState: Identifiable, Equatable {
     let id: UUID
     var albumID: String?
@@ -115,6 +205,7 @@ final class AppViewModel: ObservableObject {
     private struct ImmersivePreviewQueue {
         private struct Entry {
             let preview: CompletedItemPreview
+            let completedAt: Date
             let lagSpan: Int
         }
 
@@ -141,11 +232,21 @@ final class AppViewModel: ObservableObject {
             previews.compactMap(\.previewFileURL)
         }
 
-        mutating func append(_ preview: CompletedItemPreview) {
-            storage.append(Entry(preview: preview, lagSpan: 1))
+        func containsAssetID(_ assetID: String) -> Bool {
+            activeEntries.contains { $0.preview.assetID == assetID }
         }
 
-        mutating func popFirst() -> (preview: CompletedItemPreview, lagSpan: Int)? {
+        mutating func append(_ preview: CompletedItemPreview, completedAt: Date) {
+            storage.append(
+                Entry(
+                    preview: preview,
+                    completedAt: completedAt,
+                    lagSpan: 1
+                )
+            )
+        }
+
+        mutating func popFirst() -> (preview: CompletedItemPreview, completedAt: Date, lagSpan: Int)? {
             guard headIndex < storage.count else { return nil }
             let entry = storage[headIndex]
             headIndex += 1
@@ -155,7 +256,7 @@ final class AppViewModel: ObservableObject {
                 headIndex = 0
             }
 
-            return (entry.preview, entry.lagSpan)
+            return (entry.preview, entry.completedAt, entry.lagSpan)
         }
 
         @discardableResult
@@ -183,6 +284,7 @@ final class AppViewModel: ObservableObject {
                     kept.append(
                         Entry(
                             preview: entry.preview,
+                            completedAt: entry.completedAt,
                             lagSpan: accumulatedLagSpan
                         )
                     )
@@ -279,6 +381,9 @@ final class AppViewModel: ObservableObject {
     private var queuedImmersivePreviews = ImmersivePreviewQueue()
     private var immersivePreviewTask: Task<Void, Never>?
     private var immersiveLastPreviewPresentedAt: Date?
+    private var immersiveDisplayedItemCompletedAt: Date?
+    private var lastCompletedItemCompletedAt: Date?
+    private var immersiveCadence = ImmersivePlaybackCadence()
     private var retainedPreviewFileURLs: Set<URL> = []
     private var lastScanBenchmarkReport: PhotoKitScanBenchmarkReport?
     private var preflightCountCache: [String: Int] = [:]
@@ -310,6 +415,18 @@ final class AppViewModel: ObservableObject {
             return 0
         }
         return queuedImmersivePreviews.totalLagSpan
+    }
+
+    var immersiveLearnedInterval: TimeInterval? {
+        immersiveCadence.learnedInterval
+    }
+
+    var immersiveCurrentDisplayInterval: TimeInterval? {
+        immersiveCadence.currentDisplayInterval
+    }
+
+    var immersiveDriftSeconds: TimeInterval? {
+        immersiveCadence.driftSeconds(for: immersiveDisplayedItemCompletedAt)
     }
 
     var runPreflightRefreshToken: String {
@@ -997,9 +1114,17 @@ final class AppViewModel: ObservableObject {
 
     func openImmersivePreview() {
         isOpeningImmersivePreview = true
-        immersiveDisplayedItemPreview = lastCompletedItemPreview
-        queuedImmersivePreviews.removeAll()
+        if immersiveDisplayedItemPreview == nil {
+            if let nextPreview = queuedImmersivePreviews.popFirst() {
+                immersiveDisplayedItemPreview = nextPreview.preview
+                immersiveDisplayedItemCompletedAt = nextPreview.completedAt
+            } else {
+                immersiveDisplayedItemPreview = lastCompletedItemPreview
+                immersiveDisplayedItemCompletedAt = lastCompletedItemCompletedAt
+            }
+        }
         immersiveLastPreviewPresentedAt = immersiveDisplayedItemPreview == nil ? nil : Date()
+        refreshImmersiveDisplayInterval()
         synchronizeRetainedPreviewFiles()
         isImmersivePreviewPresented = true
     }
@@ -1011,38 +1136,49 @@ final class AppViewModel: ObservableObject {
             isOpeningImmersivePreview = false
             immersivePreviewTask?.cancel()
             immersivePreviewTask = nil
-            queuedImmersivePreviews.removeAll()
             immersiveDisplayedItemPreview = nil
             immersiveLastPreviewPresentedAt = nil
+            immersiveDisplayedItemCompletedAt = nil
             synchronizeRetainedPreviewFiles()
         }
     }
 
     func receiveCompletedItemPreview(_ preview: CompletedItemPreview, scheduleAdvance: Bool = true) {
+        receiveCompletedItemPreview(preview, completedAt: Date(), scheduleAdvance: scheduleAdvance)
+    }
+
+    func receiveCompletedItemPreview(
+        _ preview: CompletedItemPreview,
+        completedAt: Date,
+        scheduleAdvance: Bool = true
+    ) {
+        let priorLastCompletedAssetID = lastCompletedItemPreview?.assetID
         lastCompletedItemPreview = preview
+        lastCompletedItemCompletedAt = completedAt
 
-        guard isImmersivePreviewPresented else {
-            immersiveDisplayedItemPreview = nil
-            immersiveLastPreviewPresentedAt = nil
+        guard shouldTrackImmersivePreview(
+            preview,
+            priorLastCompletedAssetID: priorLastCompletedAssetID
+        ) else {
             synchronizeRetainedPreviewFiles()
             return
         }
 
-        if immersiveDisplayedItemPreview == nil {
+        immersiveCadence.recordCompletion(at: completedAt)
+
+        if isImmersivePreviewPresented, immersiveDisplayedItemPreview == nil {
             immersiveDisplayedItemPreview = preview
+            immersiveDisplayedItemCompletedAt = completedAt
             immersiveLastPreviewPresentedAt = Date()
+            refreshImmersiveDisplayInterval()
             synchronizeRetainedPreviewFiles()
             return
         }
 
-        queuedImmersivePreviews.append(preview)
-        if queuedImmersivePreviews.count > ImmersivePreviewPolicy.emergencySamplingThreshold {
-            queuedImmersivePreviews.sampleDown(
-                toRetainedCount: ImmersivePreviewPolicy.sampledRetainedPreviewCount
-            )
-        }
+        queueImmersivePreview(preview, completedAt: completedAt)
+        refreshImmersiveDisplayInterval()
         synchronizeRetainedPreviewFiles()
-        if scheduleAdvance {
+        if isImmersivePreviewPresented, scheduleAdvance {
             scheduleImmersivePreviewAdvanceIfNeeded()
         }
     }
@@ -1058,9 +1194,7 @@ final class AppViewModel: ObservableObject {
             while self.isImmersivePreviewPresented, !self.queuedImmersivePreviews.isEmpty {
                 while self.isImmersivePreviewPresented, !self.queuedImmersivePreviews.isEmpty {
                     let now = Date()
-                    let targetDelay = ImmersivePreviewPolicy.displaySeconds(
-                        for: self.immersiveLagCount
-                    )
+                    let targetDelay = self.immersiveCadence.effectiveDisplayInterval()
                     let elapsed = self.immersiveLastPreviewPresentedAt.map { now.timeIntervalSince($0) }
                         ?? targetDelay
                     let remainingDelay = max(0, targetDelay - elapsed)
@@ -1091,7 +1225,9 @@ final class AppViewModel: ObservableObject {
         guard let nextPreview = queuedImmersivePreviews.popFirst() else { return false }
 
         immersiveDisplayedItemPreview = nextPreview.preview
+        immersiveDisplayedItemCompletedAt = nextPreview.completedAt
         immersiveLastPreviewPresentedAt = Date()
+        refreshImmersiveDisplayInterval()
         synchronizeRetainedPreviewFiles()
         return true
     }
@@ -1103,7 +1239,39 @@ final class AppViewModel: ObservableObject {
         immersiveDisplayedItemPreview = nil
         queuedImmersivePreviews.removeAll()
         immersiveLastPreviewPresentedAt = nil
+        immersiveDisplayedItemCompletedAt = nil
+        lastCompletedItemCompletedAt = nil
+        immersiveCadence.reset()
         synchronizeRetainedPreviewFiles()
+    }
+
+    private func shouldTrackImmersivePreview(
+        _ preview: CompletedItemPreview,
+        priorLastCompletedAssetID: String?
+    ) -> Bool {
+        if preview.assetID == priorLastCompletedAssetID {
+            return false
+        }
+        if preview.assetID == immersiveDisplayedItemPreview?.assetID {
+            return false
+        }
+        return !queuedImmersivePreviews.containsAssetID(preview.assetID)
+    }
+
+    private func queueImmersivePreview(_ preview: CompletedItemPreview, completedAt: Date) {
+        queuedImmersivePreviews.append(preview, completedAt: completedAt)
+        if queuedImmersivePreviews.count > ImmersivePreviewPolicy.emergencySamplingThreshold {
+            queuedImmersivePreviews.sampleDown(
+                toRetainedCount: ImmersivePreviewPolicy.sampledRetainedPreviewCount
+            )
+        }
+    }
+
+    private func refreshImmersiveDisplayInterval() {
+        _ = immersiveCadence.updateCurrentDisplayInterval(
+            displayedCompletionAt: immersiveDisplayedItemCompletedAt,
+            hasBacklog: !queuedImmersivePreviews.isEmpty
+        )
     }
 
     private func synchronizeRetainedPreviewFiles() {
