@@ -145,6 +145,14 @@ struct WorkbenchNotice: View {
     }
 }
 
+private extension View {
+    func workbenchFormControlAppearance() -> some View {
+        self
+            .environment(\.colorScheme, .light)
+            .tint(WorkbenchPalette.accent)
+    }
+}
+
 struct RunSetupView: View {
     @Binding var sourceSelection: SourceSelection
     @Binding var selectedAlbumID: String?
@@ -324,6 +332,7 @@ struct RunSetupView: View {
         ) {
             VStack(alignment: .leading, spacing: 12) {
                 Toggle("Limit by capture date", isOn: $useDateFilter)
+                    .workbenchFormControlAppearance()
 
                 if useDateFilter {
                     HStack(alignment: .top, spacing: 14) {
@@ -356,12 +365,15 @@ struct RunSetupView: View {
                         Text(RunTraversalOrder.cycle.title).tag(RunTraversalOrder.cycle)
                     }
                     .labelsHidden()
+                    .workbenchFormControlAppearance()
                 }
 
                 Divider()
 
                 Toggle("Overwrite app-owned same/newer metadata", isOn: $overwriteAppOwnedSameOrNewer)
+                    .workbenchFormControlAppearance()
                 Toggle("Always overwrite non-app metadata (no per-item prompts)", isOn: $alwaysOverwriteExternalMetadata)
+                    .workbenchFormControlAppearance()
 
                 WorkbenchNotice(
                     "External metadata stays protected unless you widen the overwrite rule and then confirm it at run start."
@@ -449,6 +461,7 @@ struct RunSetupView: View {
                         }
                     }
                     .labelsHidden()
+                    .workbenchFormControlAppearance()
                     .disabled(!hasUsableAlbumList)
 
                     Spacer(minLength: 0)
@@ -505,6 +518,7 @@ struct RunSetupView: View {
             DatePicker(title, selection: selection, displayedComponents: .date)
                 .labelsHidden()
                 .datePickerStyle(.compact)
+                .workbenchFormControlAppearance()
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -545,6 +559,7 @@ struct RunSetupView: View {
                 }
             }
             .labelsHidden()
+            .workbenchFormControlAppearance()
             .disabled(!hasUsableAlbumList)
 
             if let notice = albumLoadingNotice {
