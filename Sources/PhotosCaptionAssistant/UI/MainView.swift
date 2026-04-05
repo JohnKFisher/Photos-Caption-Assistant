@@ -773,6 +773,11 @@ final class AppViewModel: ObservableObject {
                 title: "Run Completed with Errors",
                 message: summary.errors.prefix(5).joined(separator: "\n")
             )
+        } else if summary.progress.totalDiscovered == 0 {
+            showMessage(
+                title: "Run Finished: No Matching Items",
+                message: emptyRunMessage(for: options)
+            )
         }
     }
 
@@ -1536,6 +1541,39 @@ final class AppViewModel: ObservableObject {
         return lines.joined(separator: "\n")
     }
 
+    private func emptyRunMessage(for options: RunOptions) -> String {
+        var notes: [String] = []
+        notes.append("The run started successfully, but Photos returned no eligible items for the current setup.")
+
+        switch options.source {
+        case .library:
+            notes.append("Source: Whole Library")
+        case let .album(id):
+            if let album = albums.first(where: { $0.id == id }) {
+                notes.append("Source: Album \"\(album.name)\"")
+            } else {
+                notes.append("Source: Album (currently unavailable)")
+            }
+        case let .picker(ids):
+            notes.append("Source: Photos Picker (\(ids.count) selected)")
+        case .captionWorkflow:
+            notes.append("Source: \(AppPresentation.queuedAlbumsTitle)")
+        }
+
+        if let dateRange = options.optionalCaptureDateRange {
+            let formatter = DateFormatter()
+            formatter.dateStyle = .medium
+            notes.append(
+                "Capture-date filter: \(formatter.string(from: dateRange.start)) to \(formatter.string(from: dateRange.end))"
+            )
+            notes.append("Try widening or turning off the capture-date filter, then run again.")
+        } else {
+            notes.append("Try switching source scope or reloading albums, then run again.")
+        }
+
+        return notes.joined(separator: "\n")
+    }
+
     private func persistRunStateIfNeeded(pendingIDs: [String], force: Bool) async {
         guard let persistedRunOptionsForResume else { return }
         let shouldPersist: Bool
@@ -1910,94 +1948,99 @@ struct MainView: View {
                 .ignoresSafeArea()
 
             VStack(spacing: 0) {
-                ScrollView([.vertical, .horizontal]) {
-                    VStack(alignment: .leading, spacing: 18) {
-                        header
+                ScrollView(.horizontal) {
+                    ScrollView(.vertical) {
+                        VStack(alignment: .leading, spacing: 18) {
+                            header
 
-                        if viewModel.shouldShowOllamaSetupCard {
-                            OllamaSetupCardView(
-                                isBusy: viewModel.isRunning || viewModel.isPreparingModel,
-                                onOpenDownloadPage: {
-                                    Task {
-                                        await viewModel.confirmAndOpenOllamaDownloadPage()
-                                    }
-                                },
-                                onRecheckSetup: {
-                                    Task {
-                                        await viewModel.recheckOllamaSetup()
-                                    }
-                                }
-                            )
-                        }
-
-                        HStack(alignment: .top, spacing: 18) {
-                            RunSetupView(
-                                sourceSelection: $viewModel.sourceSelection,
-                                selectedAlbumID: $viewModel.selectedAlbumID,
-                                albums: viewModel.albums,
-                                albumLoadState: viewModel.albumLoadState,
-                                captionWorkflowQueueRows: viewModel.captionWorkflowQueueRows,
-                                captionWorkflowStatusMessage: viewModel.captionWorkflowStatusMessage,
-                                useDateFilter: $viewModel.useDateFilter,
-                                startDate: $viewModel.startDate,
-                                endDate: $viewModel.endDate,
-                                traversalOrder: $viewModel.traversalOrder,
-                                overwriteAppOwnedSameOrNewer: $viewModel.overwriteAppOwnedSameOrNewer,
-                                alwaysOverwriteExternalMetadata: $viewModel.alwaysOverwriteExternalMetadata,
-                                pickerSupported: viewModel.pickerSupported,
-                                pickerUnsupportedReason: viewModel.pickerUnavailableReason,
-                                pickerIDs: $viewModel.pickerIDs,
-                                onCaptionWorkflowAlbumSelectionChanged: { index, albumID in
-                                    Task {
-                                        await viewModel.setCaptionWorkflowAlbumSelection(albumID, at: index)
-                                    }
-                                },
-                                onAddCaptionWorkflowQueueRow: {
-                                    Task {
-                                        await viewModel.addCaptionWorkflowQueueRow()
-                                    }
-                                },
-                                onRemoveCaptionWorkflowQueueRow: { index in
-                                    Task {
-                                        await viewModel.removeCaptionWorkflowQueueRow(at: index)
-                                    }
-                                },
-                                onMoveCaptionWorkflowQueueRowUp: { index in
-                                    Task {
-                                        await viewModel.moveCaptionWorkflowQueueRowUp(from: index)
-                                    }
-                                },
-                                onMoveCaptionWorkflowQueueRowDown: { index in
-                                    Task {
-                                        await viewModel.moveCaptionWorkflowQueueRowDown(from: index)
-                                    }
-                                }
-                            )
-                            .frame(minWidth: 680, maxWidth: 760, alignment: .topLeading)
-
-                            VStack(alignment: .leading, spacing: 16) {
-                                RunPreflightPanelView(summary: viewModel.runPreflightSummary)
-
-                                ProcessingProgressView(
-                                    progress: viewModel.progress,
-                                    performance: viewModel.performance,
-                                    isRunning: viewModel.isRunning,
-                                    isOpeningImmersivePreview: viewModel.isOpeningImmersivePreview,
-                                    statusMessage: viewModel.runStatusMessage,
-                                    summary: viewModel.lastSummary,
-                                    liveErrors: viewModel.recentRunErrors,
-                                    lastCompletedItemPreview: viewModel.lastCompletedItemPreview,
-                                    onOpenImmersivePreview: {
-                                        viewModel.openImmersivePreview()
+                            if viewModel.shouldShowOllamaSetupCard {
+                                OllamaSetupCardView(
+                                    isBusy: viewModel.isRunning || viewModel.isPreparingModel,
+                                    onOpenDownloadPage: {
+                                        Task {
+                                            await viewModel.confirmAndOpenOllamaDownloadPage()
+                                        }
+                                    },
+                                    onRecheckSetup: {
+                                        Task {
+                                            await viewModel.recheckOllamaSetup()
+                                        }
                                     }
                                 )
                             }
-                            .frame(width: 388, alignment: .topLeading)
+
+                            HStack(alignment: .top, spacing: 18) {
+                                RunSetupView(
+                                    sourceSelection: $viewModel.sourceSelection,
+                                    selectedAlbumID: $viewModel.selectedAlbumID,
+                                    albums: viewModel.albums,
+                                    albumLoadState: viewModel.albumLoadState,
+                                    captionWorkflowQueueRows: viewModel.captionWorkflowQueueRows,
+                                    captionWorkflowStatusMessage: viewModel.captionWorkflowStatusMessage,
+                                    useDateFilter: $viewModel.useDateFilter,
+                                    startDate: $viewModel.startDate,
+                                    endDate: $viewModel.endDate,
+                                    traversalOrder: $viewModel.traversalOrder,
+                                    overwriteAppOwnedSameOrNewer: $viewModel.overwriteAppOwnedSameOrNewer,
+                                    alwaysOverwriteExternalMetadata: $viewModel.alwaysOverwriteExternalMetadata,
+                                    pickerSupported: viewModel.pickerSupported,
+                                    pickerUnsupportedReason: viewModel.pickerUnavailableReason,
+                                    pickerIDs: $viewModel.pickerIDs,
+                                    onCaptionWorkflowAlbumSelectionChanged: { index, albumID in
+                                        Task {
+                                            await viewModel.setCaptionWorkflowAlbumSelection(albumID, at: index)
+                                        }
+                                    },
+                                    onAddCaptionWorkflowQueueRow: {
+                                        Task {
+                                            await viewModel.addCaptionWorkflowQueueRow()
+                                        }
+                                    },
+                                    onRemoveCaptionWorkflowQueueRow: { index in
+                                        Task {
+                                            await viewModel.removeCaptionWorkflowQueueRow(at: index)
+                                        }
+                                    },
+                                    onMoveCaptionWorkflowQueueRowUp: { index in
+                                        Task {
+                                            await viewModel.moveCaptionWorkflowQueueRowUp(from: index)
+                                        }
+                                    },
+                                    onMoveCaptionWorkflowQueueRowDown: { index in
+                                        Task {
+                                            await viewModel.moveCaptionWorkflowQueueRowDown(from: index)
+                                        }
+                                    }
+                                )
+                                .frame(minWidth: 680, maxWidth: 760, alignment: .topLeading)
+
+                                VStack(alignment: .leading, spacing: 16) {
+                                    RunPreflightPanelView(summary: viewModel.runPreflightSummary)
+
+                                    ProcessingProgressView(
+                                        progress: viewModel.progress,
+                                        performance: viewModel.performance,
+                                        isRunning: viewModel.isRunning,
+                                        isOpeningImmersivePreview: viewModel.isOpeningImmersivePreview,
+                                        statusMessage: viewModel.runStatusMessage,
+                                        summary: viewModel.lastSummary,
+                                        liveErrors: viewModel.recentRunErrors,
+                                        lastCompletedItemPreview: viewModel.lastCompletedItemPreview,
+                                        onOpenImmersivePreview: {
+                                            viewModel.openImmersivePreview()
+                                        }
+                                    )
+                                }
+                                .frame(width: 388, alignment: .topLeading)
+                            }
                         }
+                        .padding(20)
+                        .padding(.bottom, 8)
+                        .frame(minWidth: 1110, maxWidth: .infinity, alignment: .topLeading)
                     }
-                    .padding(20)
-                    .frame(minWidth: 1110, maxWidth: .infinity, alignment: .topLeading)
+                    .scrollIndicators(.visible)
                 }
+                .scrollIndicators(.visible)
                 .allowsHitTesting(!viewModel.isImmersivePreviewPresented)
                 .environment(\.controlActiveState, viewModel.isImmersivePreviewPresented ? .inactive : .key)
                 .zIndex(0)
