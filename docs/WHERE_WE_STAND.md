@@ -1,25 +1,28 @@
 # Photos Caption Assistant
 
-Current version/build: 3.5.10 (18)
+Current version/build: 3.6.0 (19)
 Current description logic version: 3.0.0
 
 Current overall status:
-The current source tree builds locally as version 3.5.10 build 18 and now includes safer run preflight checks, menu-accessible storage and diagnostics windows, deterministic source-controlled versioning, a universal macOS packaging script, adaptive immersive playback cadence, per-stage item retries for the core caption pipeline, and a version-triggered GitHub release flow that publishes a DMG. The core local captioning workflow is working, but this is still a personal hobby app built around Apple Photos automation rather than a polished public-distribution product.
+The current source tree builds locally as version 3.6.0 build 19 and now uses a more Mac-native scene model: a toolbar-first hybrid workbench, dedicated Settings and Preview windows, stronger menu/keyboard access, more Finder-style reveal actions, and the existing deterministic version-triggered GitHub release flow. The core local captioning workflow is working, but this is still a personal hobby app built around Apple Photos automation rather than a polished public-distribution product.
 
 What is working now:
 - Local photo and video analysis through Ollama with the `qwen2.5vl:7b` model.
 - Apple Photos metadata reads and writes, including captions, keywords, and app ownership tags.
 - Library, album, picker, and Queued Albums runs.
 - Visible run-summary/preflight UI showing source scope, exact count where practical, overwrite behavior, model status, and local Ollama service status.
-- The main screen now uses a denser two-column workbench layout: card-based setup controls on the left and a compact preview-forward run summary/result pane on the right.
+- The main screen now uses a resizable Mac workbench layout with a primary setup pane, an optional summary pane, and toolbar-first run actions instead of the older bottom action tray.
+- A dedicated Settings window now owns durable app-wide defaults for source mode, traversal order, overwrite defaults, and preview-window behavior.
+- A dedicated Preview window now owns completed-item playback, and it can either open in a normal window or jump straight into full screen based on the saved preference.
+- Run actions are now available from the toolbar, the `Run` menu, and keyboard shortcuts in addition to the main workbench UI.
 - Album names now surface before PhotoKit finishes resolving counts, so album-mode controls stop feeling dead on cold launch.
 - The immersive completed-item view now uses a hybrid media layout: roomy landscape items keep the slim top HUD plus low-cover bottom dock, while tighter aspect ratios fall back to a dedicated bottom shelf so the chrome stays fully visible.
 - The immersive completed-item view now buffers recent completed items even before full-screen opens, resumes any unseen backlog if you close and reopen it during a run, and suppresses same-asset replay inside that playback queue.
 - Immersive playback cadence now learns from the rolling mean of the most recent completed-item intervals, aims to stay about two learned item-times behind the newest completion, and nudges preview holds up or down gradually instead of using the old fixed backlog-delay tiers.
 - Aspect-fit immersive media now uses a restrained ambient matte instead of a flat black letterbox, and empty immersive state copy is centered until a completed preview exists.
 - Capture dates now come across from AppleScript as stable local wall-clock timestamps so immersive timestamps match the Mac's local time instead of drifting through the earlier pseudo-epoch conversion.
-- Run Summary now sits beside the main setup controls, while Data & Storage and Diagnostics live in separate windows opened from the menu bar.
-- Safer startup defaults: `Album` is selected by default, and no-prompt overwrite of non-app metadata is off by default.
+- Data & Storage and Diagnostics remain separate utility windows, now with more specific Finder reveal actions for app-owned files and recent diagnostics outputs.
+- Safer startup defaults remain conservative: `Album` is selected by default, and no-prompt overwrite of non-app metadata is off by default unless explicitly changed in Settings.
 - Whole-library runs require explicit confirmation before write work starts.
 - Runs that overwrite non-app metadata without per-item prompts require explicit confirmation.
 - Core per-item stages now retry once automatically after a short pause when asset acquisition, caption generation/JSON decode, or Photos metadata write fails transiently.
@@ -48,6 +51,7 @@ Known limitations and trust warnings:
 - The app does not install Ollama itself. It uses a manual browser handoff to the official download page when Ollama is missing.
 - The app is still distributed as an ad-hoc-signed, non-notarized build, so Gatekeeper may still require Finder `Open` or `Privacy & Security -> Open Anyway`.
 - This repo is source-first. Built app bundles and temp outputs should not be treated as source-of-truth artifacts.
+- The Preview window is now its own scene, so the old “take over the main window” immersive behavior is no longer the default presentation path.
 
 Setup/runtime requirements:
 - macOS 15 or later.
@@ -68,6 +72,7 @@ Important operational risks:
 Recommended next priorities:
 - Decide whether this project will stay source-first and local-only, or gain a real notarized distribution path.
 - Add a small, repeatable smoke-test checklist for future known-good anchors and releases.
+- Consider whether the diagnostics tools should eventually become a more structured inspector-style utility window rather than a free-form form.
 
 Most recent durable known-good anchor:
 - `checkpoint/20260402-180116-known-good`

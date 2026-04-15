@@ -215,7 +215,16 @@ struct DataStoragePanelView: View {
     let storagePaths: AppStoragePaths
     let resumablePendingCount: Int
     let isBusy: Bool
-    let onOpenDataFolder: () -> Void
+    let latestBenchmarkReportURL: URL?
+    let latestIdentityWriteProbeReportURL: URL?
+    let onRevealDataFolder: () -> Void
+    let onRevealResumeState: () -> Void
+    let onRevealQueuedAlbumsConfig: () -> Void
+    let onRevealBenchmarkTempFolder: () -> Void
+    let onRevealPreviewTempFolder: () -> Void
+    let onRevealLatestBenchmarkReport: () -> Void
+    let onRevealLatestIdentityWriteProbeReport: () -> Void
+    let onCopyPath: (String) -> Void
     let onClearSavedRunState: () -> Void
 
     var body: some View {
@@ -231,11 +240,61 @@ struct DataStoragePanelView: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
 
-                pathRow("Data Folder", storagePaths.applicationSupportDirectory.path)
-                pathRow("Resume State", storagePaths.runResumeStateFile.path)
-                pathRow("Queued Albums Config", storagePaths.captionWorkflowConfigurationFile.path)
-                pathRow("Temp Reports", storagePaths.benchmarkTempRoot.path)
-                pathRow("Temp Previews", storagePaths.previewTempRoot.path)
+                pathRow(
+                    "Data Folder",
+                    storagePaths.applicationSupportDirectory.path,
+                    revealLabel: "Reveal Folder",
+                    onReveal: onRevealDataFolder,
+                    onCopy: { onCopyPath(storagePaths.applicationSupportDirectory.path) }
+                )
+                pathRow(
+                    "Resume State",
+                    storagePaths.runResumeStateFile.path,
+                    revealLabel: "Reveal File",
+                    onReveal: onRevealResumeState,
+                    onCopy: { onCopyPath(storagePaths.runResumeStateFile.path) }
+                )
+                pathRow(
+                    "Queued Albums Config",
+                    storagePaths.captionWorkflowConfigurationFile.path,
+                    revealLabel: "Reveal File",
+                    onReveal: onRevealQueuedAlbumsConfig,
+                    onCopy: { onCopyPath(storagePaths.captionWorkflowConfigurationFile.path) }
+                )
+                pathRow(
+                    "Temp Reports",
+                    storagePaths.benchmarkTempRoot.path,
+                    revealLabel: "Reveal Folder",
+                    onReveal: onRevealBenchmarkTempFolder,
+                    onCopy: { onCopyPath(storagePaths.benchmarkTempRoot.path) }
+                )
+                pathRow(
+                    "Temp Previews",
+                    storagePaths.previewTempRoot.path,
+                    revealLabel: "Reveal Folder",
+                    onReveal: onRevealPreviewTempFolder,
+                    onCopy: { onCopyPath(storagePaths.previewTempRoot.path) }
+                )
+
+                if let latestBenchmarkReportURL {
+                    pathRow(
+                        "Latest Benchmark Report",
+                        latestBenchmarkReportURL.path,
+                        revealLabel: "Reveal Report",
+                        onReveal: onRevealLatestBenchmarkReport,
+                        onCopy: { onCopyPath(latestBenchmarkReportURL.path) }
+                    )
+                }
+
+                if let latestIdentityWriteProbeReportURL {
+                    pathRow(
+                        "Latest Identity Probe",
+                        latestIdentityWriteProbeReportURL.path,
+                        revealLabel: "Reveal Report",
+                        onReveal: onRevealLatestIdentityWriteProbeReport,
+                        onCopy: { onCopyPath(latestIdentityWriteProbeReportURL.path) }
+                    )
+                }
 
                 Text(resumablePendingCount > 0
                     ? "Saved run state currently tracks \(resumablePendingCount) pending item(s)."
@@ -244,7 +303,7 @@ struct DataStoragePanelView: View {
                     .foregroundStyle(.secondary)
 
                 HStack {
-                    Button("Open Data Folder", action: onOpenDataFolder)
+                    Button("Reveal Data Folder", action: onRevealDataFolder)
                         .buttonStyle(.bordered)
 
                     Button("Clear Saved Run State", action: onClearSavedRunState)
@@ -262,11 +321,34 @@ struct DataStoragePanelView: View {
     }
 
     @ViewBuilder
-    private func pathRow(_ title: String, _ path: String) -> some View {
+    private func pathRow(
+        _ title: String,
+        _ path: String,
+        revealLabel: String,
+        onReveal: @escaping () -> Void,
+        onCopy: @escaping () -> Void,
+        secondaryActionTitle: String? = nil,
+        secondaryAction: (() -> Void)? = nil
+    ) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(title)
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
+            HStack(alignment: .center) {
+                Text(title)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+
+                Spacer()
+
+                if let secondaryActionTitle, let secondaryAction {
+                    Button(secondaryActionTitle, action: secondaryAction)
+                        .buttonStyle(.borderless)
+                }
+
+                Button("Copy Path", action: onCopy)
+                    .buttonStyle(.borderless)
+
+                Button(revealLabel, action: onReveal)
+                    .buttonStyle(.borderless)
+            }
 
             Text(path)
                 .font(.caption.monospaced())
@@ -285,8 +367,31 @@ struct DataStorageWindowView: View {
                 storagePaths: viewModel.currentStoragePaths,
                 resumablePendingCount: viewModel.resumablePendingCount,
                 isBusy: viewModel.isRunning || viewModel.isPreparingModel,
-                onOpenDataFolder: {
-                    viewModel.openDataFolder()
+                latestBenchmarkReportURL: viewModel.lastScanBenchmarkReportURL,
+                latestIdentityWriteProbeReportURL: viewModel.lastIdentityWriteProbeReportURL,
+                onRevealDataFolder: {
+                    viewModel.revealDataFolder()
+                },
+                onRevealResumeState: {
+                    viewModel.revealSavedRunStateFile()
+                },
+                onRevealQueuedAlbumsConfig: {
+                    viewModel.revealQueuedAlbumsConfigurationFile()
+                },
+                onRevealBenchmarkTempFolder: {
+                    viewModel.revealBenchmarkTempFolder()
+                },
+                onRevealPreviewTempFolder: {
+                    viewModel.revealPreviewTempFolder()
+                },
+                onRevealLatestBenchmarkReport: {
+                    viewModel.revealLatestScanBenchmarkReport()
+                },
+                onRevealLatestIdentityWriteProbeReport: {
+                    viewModel.revealLatestIdentityWriteProbeReport()
+                },
+                onCopyPath: { path in
+                    viewModel.copyPath(path)
                 },
                 onClearSavedRunState: {
                     Task {
@@ -387,6 +492,26 @@ struct DiagnosticsPanelView: View {
                     Text("Run the scan benchmark once and the latest sampled IDs will appear here for copy/paste.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
+                }
+
+                if viewModel.lastScanBenchmarkReportURL != nil || viewModel.lastIdentityWriteProbeReportURL != nil {
+                    Divider()
+
+                    HStack(spacing: 12) {
+                        if viewModel.lastScanBenchmarkReportURL != nil {
+                            Button("Reveal Latest Benchmark Report") {
+                                viewModel.revealLatestScanBenchmarkReport()
+                            }
+                            .buttonStyle(.bordered)
+                        }
+
+                        if viewModel.lastIdentityWriteProbeReportURL != nil {
+                            Button("Reveal Latest Identity Probe Report") {
+                                viewModel.revealLatestIdentityWriteProbeReport()
+                            }
+                            .buttonStyle(.bordered)
+                        }
+                    }
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)

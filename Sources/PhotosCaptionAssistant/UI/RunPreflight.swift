@@ -1,8 +1,8 @@
 import Foundation
 
 enum RunSetupDefaults {
-    static let sourceSelection: SourceSelection = .album
-    static let alwaysOverwriteExternalMetadata = false
+    static let sourceSelection: SourceSelection = AppSettingsSnapshot.default.defaultSourceSelection
+    static let alwaysOverwriteExternalMetadata = AppSettingsSnapshot.default.defaultAlwaysOverwriteExternalMetadata
 }
 
 enum RunPreflightCountState: Equatable {

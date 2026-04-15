@@ -50,10 +50,10 @@ struct ProcessingProgressView: View {
                                     SwiftUI.ProgressView()
                                         .controlSize(.small)
                                 } else {
-                                    Image(systemName: "arrow.up.left.and.arrow.down.right")
+                                    Image(systemName: "macwindow")
                                 }
 
-                                Text(isOpeningImmersivePreview ? "Opening…" : "Immersive View")
+                                Text(isOpeningImmersivePreview ? "Opening…" : "Preview Window")
                             }
                         }
                         .buttonStyle(.bordered)

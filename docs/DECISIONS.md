@@ -23,3 +23,11 @@ Rationale: This repo distributes personal-use, ad-hoc-signed macOS builds and do
 ## 2026-04-14 — Publish GitHub releases from version changes on main
 Status: approved
 Rationale: A checked-in version/build change on `main` is the publish signal. CI should create or update the corresponding GitHub Release using the existing `vX.Y.Z` tag shape and attach a DMG built from committed source.
+
+## 2026-04-15 — Keep the main app as a hybrid workbench, not a sidebar-first redesign
+Status: approved
+Rationale: The app’s core job is still a run-centric setup and monitoring workflow, so the modernization pass keeps that workbench model while making it feel more Mac-native through better scenes, menus, toolbars, and window behavior instead of forcing a document/sidebar architecture.
+
+## 2026-04-15 — Use a dedicated Preview window and Settings scene for macOS defaults
+Status: approved
+Rationale: Completed-item preview now lives in its own macOS window, with optional full-screen behavior, and durable app-wide defaults now live in a proper Settings scene. This keeps the main workbench focused on the current run while matching standard Mac window and menu expectations.

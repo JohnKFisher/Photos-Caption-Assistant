@@ -317,7 +317,7 @@ final class AppViewModel: ObservableObject {
     )
     @Published private(set) var capabilitiesHaveLoaded = false
 
-    @Published var sourceSelection: SourceSelection = RunSetupDefaults.sourceSelection
+    @Published var sourceSelection: SourceSelection
     @Published var selectedAlbumID: String?
     @Published var pickerIDs: [String] = []
     @Published var albums: [AlbumSummary] = []
@@ -336,10 +336,10 @@ final class AppViewModel: ObservableObject {
     @Published var useDateFilter = false
     @Published var startDate = Calendar.current.date(byAdding: .month, value: -1, to: Date()) ?? Date()
     @Published var endDate = Date()
-    @Published var traversalOrder: RunTraversalOrder = .photosOrderFast
+    @Published var traversalOrder: RunTraversalOrder
 
-    @Published var overwriteAppOwnedSameOrNewer = false
-    @Published var alwaysOverwriteExternalMetadata = RunSetupDefaults.alwaysOverwriteExternalMetadata
+    @Published var overwriteAppOwnedSameOrNewer: Bool
+    @Published var alwaysOverwriteExternalMetadata: Bool
 
     @Published var isRunning = false
     @Published var isCancelRequested = false
@@ -358,6 +358,8 @@ final class AppViewModel: ObservableObject {
     @Published var benchmarkStatusMessage: String?
     @Published var identityProbeStatusMessage: String?
     @Published var resumablePendingCount = 0
+    @Published private(set) var lastScanBenchmarkReportURL: URL?
+    @Published private(set) var lastIdentityWriteProbeReportURL: URL?
 
     @Published var pendingConflictPrompt: ConflictPromptData?
     @Published var activeAlert: AppAlert?
@@ -387,6 +389,7 @@ final class AppViewModel: ObservableObject {
     private var preflightCountCache: [String: Int] = [:]
     private var albumRefreshGeneration = 0
     private var albumCountRefreshTask: Task<Void, Never>?
+    private let appSettingsDefaults: UserDefaults
 
     private let photosClient = PhotosAppleScriptClient()
     private let photoKitIncrementalScanSource = ExperimentalPhotoKitScanReader()
@@ -405,6 +408,15 @@ final class AppViewModel: ObservableObject {
     )
     @Published private(set) var isRunningScanBenchmark = false
     @Published private(set) var isRunningIdentityWriteProbe = false
+
+    init(appSettingsDefaults: UserDefaults = .standard) {
+        self.appSettingsDefaults = appSettingsDefaults
+        let snapshot = AppSettings.load(from: appSettingsDefaults)
+        sourceSelection = snapshot.defaultSourceSelection
+        traversalOrder = snapshot.defaultTraversalOrder
+        overwriteAppOwnedSameOrNewer = snapshot.defaultOverwriteAppOwnedSameOrNewer
+        alwaysOverwriteExternalMetadata = snapshot.defaultAlwaysOverwriteExternalMetadata
+    }
 
     var immersiveLagCount: Int {
         guard isImmersivePreviewPresented,
@@ -454,12 +466,33 @@ final class AppViewModel: ObservableObject {
         storagePaths
     }
 
+    var previewOpenBehavior: PreviewOpenBehavior {
+        AppSettings.load(from: appSettingsDefaults).previewOpenBehavior
+    }
+
     var shouldShowOllamaSetupCard: Bool {
         guard capabilitiesHaveLoaded else { return false }
         if case .notInstalled = capabilities.ollamaAvailability {
             return true
         }
         return false
+    }
+
+    var canOpenPreviewWindow: Bool {
+        isRunning || lastCompletedItemPreview != nil || immersiveDisplayedItemPreview != nil
+    }
+
+    var canStartRun: Bool {
+        !isRunning && !isPreparingModel && runPreflightSummary.blockingReasons.isEmpty
+    }
+
+    func applyAppDefaultsIfPossible() {
+        guard !isRunning, !isPreparingModel else { return }
+        let snapshot = AppSettings.load(from: appSettingsDefaults)
+        sourceSelection = snapshot.defaultSourceSelection
+        traversalOrder = snapshot.defaultTraversalOrder
+        overwriteAppOwnedSameOrNewer = snapshot.defaultOverwriteAppOwnedSameOrNewer
+        alwaysOverwriteExternalMetadata = snapshot.defaultAlwaysOverwriteExternalMetadata
     }
 
     func loadInitialData() async {
@@ -780,15 +813,51 @@ final class AppViewModel: ObservableObject {
     }
 
     func openDataFolder() {
+        revealDataFolder()
+    }
+
+    func revealDataFolder() {
         do {
             try FileManager.default.createDirectory(
                 at: storagePaths.applicationSupportDirectory,
                 withIntermediateDirectories: true
             )
-            NSWorkspace.shared.open(storagePaths.applicationSupportDirectory)
+            NSWorkspace.shared.activateFileViewerSelecting([storagePaths.applicationSupportDirectory])
         } catch {
             showMessage(title: "Open Data Folder Failed", message: error.localizedDescription)
         }
+    }
+
+    func revealSavedRunStateFile() {
+        revealInFinder(storagePaths.runResumeStateFile)
+    }
+
+    func revealQueuedAlbumsConfigurationFile() {
+        revealInFinder(storagePaths.captionWorkflowConfigurationFile)
+    }
+
+    func revealBenchmarkTempFolder() {
+        revealInFinder(storagePaths.benchmarkTempRoot)
+    }
+
+    func revealPreviewTempFolder() {
+        revealInFinder(storagePaths.previewTempRoot)
+    }
+
+    func revealLatestScanBenchmarkReport() {
+        guard let lastScanBenchmarkReportURL else { return }
+        revealInFinder(lastScanBenchmarkReportURL)
+    }
+
+    func revealLatestIdentityWriteProbeReport() {
+        guard let lastIdentityWriteProbeReportURL else { return }
+        revealInFinder(lastIdentityWriteProbeReportURL)
+    }
+
+    func copyPath(_ path: String) {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(path, forType: .string)
     }
 
     func clearSavedRunState() async {
@@ -927,6 +996,7 @@ final class AppViewModel: ObservableObject {
             switch outcome {
             case let .completed(run):
                 lastScanBenchmarkReport = run.report
+                lastScanBenchmarkReportURL = run.reportURL
                 benchmarkStatusMessage = "Scan benchmark report: \(run.reportURL.lastPathComponent)"
                 let noticeText = run.notices.joined(separator: "\n")
                 let summaries = run.report.scopes.map(\.summaryLine).joined(separator: "\n")
@@ -1032,6 +1102,7 @@ final class AppViewModel: ObservableObject {
 
             switch outcome {
             case let .completed(run):
+                lastIdentityWriteProbeReportURL = run.reportURL
                 identityProbeStatusMessage = "Identity write probe report: \(run.reportURL.lastPathComponent)"
                 showMessage(
                     title: run.report.overallPass ? "Identity Write Probe Passed" : "Identity Write Probe Failed",
@@ -1130,6 +1201,13 @@ final class AppViewModel: ObservableObject {
         refreshImmersiveDisplayInterval()
         synchronizeRetainedPreviewFiles()
         isImmersivePreviewPresented = true
+        handleImmersivePresentationChange(true)
+    }
+
+    func closeImmersivePreview() {
+        guard isImmersivePreviewPresented else { return }
+        isImmersivePreviewPresented = false
+        handleImmersivePresentationChange(false)
     }
 
     func handleImmersivePresentationChange(_ isPresented: Bool) {
@@ -1910,8 +1988,21 @@ final class AppViewModel: ObservableObject {
 
     private func dismissImmersiveIfNeededForPrompt() {
         if isImmersivePreviewPresented {
-            isImmersivePreviewPresented = false
+            closeImmersivePreview()
         }
+    }
+
+    private func revealInFinder(_ url: URL) {
+        let targetURL: URL
+        let fileManager = FileManager.default
+
+        if fileManager.fileExists(atPath: url.path) {
+            targetURL = url
+        } else {
+            targetURL = url.deletingLastPathComponent()
+        }
+
+        NSWorkspace.shared.activateFileViewerSelecting([targetURL])
     }
 
     var pickerSupported: Bool {
@@ -1939,127 +2030,159 @@ final class AppViewModel: ObservableObject {
 
 struct MainView: View {
     @ObservedObject var viewModel: AppViewModel
-    @State private var immersiveAutoEnteredFullScreen = false
+    @Environment(\.openWindow) private var openWindow
+    @SceneStorage("main.summaryPaneVisible") private var showsSummaryPane = true
 
     var body: some View {
-        ZStack {
-            mainBackground
-                .ignoresSafeArea()
+        VStack(spacing: 0) {
+            statusOverview
+                .padding(.horizontal, 20)
+                .padding(.top, 20)
+                .padding(.bottom, 12)
 
-            VStack(spacing: 0) {
-                ScrollView(.horizontal) {
-                    ScrollView(.vertical) {
-                        VStack(alignment: .leading, spacing: 18) {
-                            header
-
-                            if viewModel.shouldShowOllamaSetupCard {
-                                OllamaSetupCardView(
-                                    isBusy: viewModel.isRunning || viewModel.isPreparingModel,
-                                    onOpenDownloadPage: {
-                                        Task {
-                                            await viewModel.confirmAndOpenOllamaDownloadPage()
-                                        }
-                                    },
-                                    onRecheckSetup: {
-                                        Task {
-                                            await viewModel.recheckOllamaSetup()
-                                        }
+            HSplitView {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 18) {
+                        if viewModel.shouldShowOllamaSetupCard {
+                            OllamaSetupCardView(
+                                isBusy: viewModel.isRunning || viewModel.isPreparingModel,
+                                onOpenDownloadPage: {
+                                    Task {
+                                        await viewModel.confirmAndOpenOllamaDownloadPage()
                                     }
-                                )
-                            }
-
-                            HStack(alignment: .top, spacing: 18) {
-                                RunSetupView(
-                                    sourceSelection: $viewModel.sourceSelection,
-                                    selectedAlbumID: $viewModel.selectedAlbumID,
-                                    albums: viewModel.albums,
-                                    albumLoadState: viewModel.albumLoadState,
-                                    captionWorkflowQueueRows: viewModel.captionWorkflowQueueRows,
-                                    captionWorkflowStatusMessage: viewModel.captionWorkflowStatusMessage,
-                                    useDateFilter: $viewModel.useDateFilter,
-                                    startDate: $viewModel.startDate,
-                                    endDate: $viewModel.endDate,
-                                    traversalOrder: $viewModel.traversalOrder,
-                                    overwriteAppOwnedSameOrNewer: $viewModel.overwriteAppOwnedSameOrNewer,
-                                    alwaysOverwriteExternalMetadata: $viewModel.alwaysOverwriteExternalMetadata,
-                                    pickerSupported: viewModel.pickerSupported,
-                                    pickerUnsupportedReason: viewModel.pickerUnavailableReason,
-                                    pickerIDs: $viewModel.pickerIDs,
-                                    onCaptionWorkflowAlbumSelectionChanged: { index, albumID in
-                                        Task {
-                                            await viewModel.setCaptionWorkflowAlbumSelection(albumID, at: index)
-                                        }
-                                    },
-                                    onAddCaptionWorkflowQueueRow: {
-                                        Task {
-                                            await viewModel.addCaptionWorkflowQueueRow()
-                                        }
-                                    },
-                                    onRemoveCaptionWorkflowQueueRow: { index in
-                                        Task {
-                                            await viewModel.removeCaptionWorkflowQueueRow(at: index)
-                                        }
-                                    },
-                                    onMoveCaptionWorkflowQueueRowUp: { index in
-                                        Task {
-                                            await viewModel.moveCaptionWorkflowQueueRowUp(from: index)
-                                        }
-                                    },
-                                    onMoveCaptionWorkflowQueueRowDown: { index in
-                                        Task {
-                                            await viewModel.moveCaptionWorkflowQueueRowDown(from: index)
-                                        }
+                                },
+                                onRecheckSetup: {
+                                    Task {
+                                        await viewModel.recheckOllamaSetup()
                                     }
-                                )
-                                .frame(minWidth: 680, maxWidth: 760, alignment: .topLeading)
-
-                                VStack(alignment: .leading, spacing: 16) {
-                                    RunPreflightPanelView(summary: viewModel.runPreflightSummary)
-
-                                    ProcessingProgressView(
-                                        progress: viewModel.progress,
-                                        performance: viewModel.performance,
-                                        isRunning: viewModel.isRunning,
-                                        isOpeningImmersivePreview: viewModel.isOpeningImmersivePreview,
-                                        statusMessage: viewModel.runStatusMessage,
-                                        summary: viewModel.lastSummary,
-                                        liveErrors: viewModel.recentRunErrors,
-                                        lastCompletedItemPreview: viewModel.lastCompletedItemPreview,
-                                        onOpenImmersivePreview: {
-                                            viewModel.openImmersivePreview()
-                                        }
-                                    )
                                 }
-                                .frame(width: 388, alignment: .topLeading)
-                            }
+                            )
                         }
-                        .padding(20)
-                        .padding(.bottom, 8)
-                        .frame(minWidth: 1110, maxWidth: .infinity, alignment: .topLeading)
-                    }
-                    .scrollIndicators(.visible)
-                }
-                .scrollIndicators(.visible)
-                .allowsHitTesting(!viewModel.isImmersivePreviewPresented)
-                .environment(\.controlActiveState, viewModel.isImmersivePreviewPresented ? .inactive : .key)
-                .zIndex(0)
 
-                actionTray
-                    .allowsHitTesting(!viewModel.isImmersivePreviewPresented)
-                    .environment(\.controlActiveState, viewModel.isImmersivePreviewPresented ? .inactive : .key)
+                        RunSetupView(
+                            sourceSelection: $viewModel.sourceSelection,
+                            selectedAlbumID: $viewModel.selectedAlbumID,
+                            albums: viewModel.albums,
+                            albumLoadState: viewModel.albumLoadState,
+                            captionWorkflowQueueRows: viewModel.captionWorkflowQueueRows,
+                            captionWorkflowStatusMessage: viewModel.captionWorkflowStatusMessage,
+                            useDateFilter: $viewModel.useDateFilter,
+                            startDate: $viewModel.startDate,
+                            endDate: $viewModel.endDate,
+                            traversalOrder: $viewModel.traversalOrder,
+                            overwriteAppOwnedSameOrNewer: $viewModel.overwriteAppOwnedSameOrNewer,
+                            alwaysOverwriteExternalMetadata: $viewModel.alwaysOverwriteExternalMetadata,
+                            pickerSupported: viewModel.pickerSupported,
+                            pickerUnsupportedReason: viewModel.pickerUnavailableReason,
+                            pickerIDs: $viewModel.pickerIDs,
+                            onCaptionWorkflowAlbumSelectionChanged: { index, albumID in
+                                Task {
+                                    await viewModel.setCaptionWorkflowAlbumSelection(albumID, at: index)
+                                }
+                            },
+                            onAddCaptionWorkflowQueueRow: {
+                                Task {
+                                    await viewModel.addCaptionWorkflowQueueRow()
+                                }
+                            },
+                            onRemoveCaptionWorkflowQueueRow: { index in
+                                Task {
+                                    await viewModel.removeCaptionWorkflowQueueRow(at: index)
+                                }
+                            },
+                            onMoveCaptionWorkflowQueueRowUp: { index in
+                                Task {
+                                    await viewModel.moveCaptionWorkflowQueueRowUp(from: index)
+                                }
+                            },
+                            onMoveCaptionWorkflowQueueRowDown: { index in
+                                Task {
+                                    await viewModel.moveCaptionWorkflowQueueRowDown(from: index)
+                                }
+                            }
+                        )
+                    }
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, 20)
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                }
+                .frame(minWidth: 640, idealWidth: 760, maxWidth: .infinity)
+
+                if showsSummaryPane {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 16) {
+                            RunPreflightPanelView(summary: viewModel.runPreflightSummary)
+
+                            ProcessingProgressView(
+                                progress: viewModel.progress,
+                                performance: viewModel.performance,
+                                isRunning: viewModel.isRunning,
+                                isOpeningImmersivePreview: viewModel.isOpeningImmersivePreview,
+                                statusMessage: viewModel.runStatusMessage,
+                                summary: viewModel.lastSummary,
+                                liveErrors: viewModel.recentRunErrors,
+                                lastCompletedItemPreview: viewModel.lastCompletedItemPreview,
+                                onOpenImmersivePreview: viewModel.canOpenPreviewWindow ? {
+                                    openPreviewWindow()
+                                } : nil
+                            )
+                        }
+                        .padding(.trailing, 20)
+                        .padding(.bottom, 20)
+                        .frame(maxWidth: .infinity, alignment: .topLeading)
+                    }
+                    .frame(minWidth: 340, idealWidth: 400, maxWidth: 500)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(mainBackground.ignoresSafeArea())
+        .toolbar {
+            ToolbarItemGroup(placement: .automatic) {
+                Button("Reload Setup") {
+                    Task {
+                        await viewModel.loadInitialData()
+                    }
+                }
+                .disabled(viewModel.isRunning || viewModel.isPreparingModel)
+
+                if viewModel.canResumeSavedRun {
+                    Button("Resume") {
+                        Task {
+                            await viewModel.resumeSavedRun()
+                        }
+                    }
+                }
+
+                if viewModel.canRetryFailedItems {
+                    Button("Retry Failed") {
+                        Task {
+                            await viewModel.retryFailedItems()
+                        }
+                    }
+                }
+
+                Button(viewModel.isRunning ? (viewModel.isCancelRequested ? "Canceling" : "Cancel Run") : "Start Run") {
+                    if viewModel.isRunning {
+                        viewModel.cancelRun()
+                    } else {
+                        Task {
+                            await viewModel.startRun()
+                        }
+                    }
+                }
+                .disabled(viewModel.isRunning ? viewModel.isCancelRequested : !viewModel.canStartRun)
             }
 
-            if viewModel.isImmersivePreviewPresented {
-                ImmersivePreviewView(
-                    preview: viewModel.immersiveDisplayedItemPreview,
-                    progress: viewModel.progress,
-                    performance: viewModel.performance,
-                    isRunning: viewModel.isRunning,
-                    lagCount: viewModel.immersiveLagCount,
-                    isPresented: $viewModel.isImmersivePreviewPresented
-                )
-                .transition(.opacity)
-                .zIndex(5)
+            ToolbarItemGroup(placement: .secondaryAction) {
+                Button(showsSummaryPane ? "Hide Summary" : "Show Summary") {
+                    showsSummaryPane.toggle()
+                }
+
+                Button("Preview") {
+                    openPreviewWindow()
+                }
+                .disabled(!viewModel.canOpenPreviewWindow)
             }
         }
         .task {
@@ -2067,20 +2190,6 @@ struct MainView: View {
         }
         .task(id: viewModel.runPreflightRefreshToken) {
             await viewModel.refreshRunPreflightCount()
-        }
-        .onChange(of: viewModel.isImmersivePreviewPresented) { _, isPresented in
-            viewModel.handleImmersivePresentationChange(isPresented)
-            handleImmersivePresentationChange(isPresented)
-        }
-        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didEnterFullScreenNotification)) { notification in
-            guard let window = notification.object as? NSWindow else { return }
-            guard window == currentWindow() else { return }
-            viewModel.markImmersivePreviewOpened()
-        }
-        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didExitFullScreenNotification)) { notification in
-            guard let window = notification.object as? NSWindow else { return }
-            guard window == currentWindow() else { return }
-            immersiveAutoEnteredFullScreen = false
         }
         .sheet(item: $viewModel.pendingConflictPrompt) { prompt in
             ConflictPromptView(prompt: prompt) { overwrite in
@@ -2113,34 +2222,30 @@ struct MainView: View {
     }
 
     private var mainBackground: some View {
-        LinearGradient(
-            colors: [
-                Color(red: 0.95, green: 0.97, blue: 0.98),
-                Color(red: 0.92, green: 0.95, blue: 0.97)
-            ],
-            startPoint: .topLeading,
-            endPoint: .bottomTrailing
-        )
-        .overlay(
-            RadialGradient(
-                colors: [
-                    WorkbenchPalette.accentSoft.opacity(0.55),
-                    Color.clear
-                ],
-                center: .topTrailing,
-                startRadius: 0,
-                endRadius: 520
+        Color(nsColor: .windowBackgroundColor)
+            .overlay(
+                LinearGradient(
+                    colors: [
+                        Color.accentColor.opacity(0.08),
+                        Color.clear
+                    ],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
             )
-        )
     }
 
-    private var header: some View {
+    private var statusOverview: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .top, spacing: 16) {
                 VStack(alignment: .leading, spacing: 6) {
                     Text(AppPresentation.appName)
-                        .font(.system(size: 30, weight: .bold, design: .rounded))
-                        .foregroundStyle(WorkbenchPalette.text)
+                        .font(.largeTitle.weight(.bold))
+
+                    Text("Local-first captions and keywords for Apple Photos, with separate Mac windows for setup, diagnostics, storage, and preview.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
 
                 Spacer(minLength: 0)
@@ -2167,39 +2272,39 @@ struct MainView: View {
                 if let identityProbeStatusMessage = viewModel.identityProbeStatusMessage {
                     statusLine(text: identityProbeStatusMessage, isBusy: viewModel.isRunningIdentityWriteProbe)
                 }
+
+                if let runStatusMessage = viewModel.runStatusMessage, viewModel.isRunning {
+                    statusLine(text: runStatusMessage, isBusy: true)
+                }
             }
         }
         .padding(20)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 26, style: .continuous)
-                .fill(WorkbenchPalette.surface)
-        )
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 26, style: .continuous)
-                .strokeBorder(WorkbenchPalette.border, lineWidth: 1)
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.08), lineWidth: 1)
         )
-        .shadow(color: .black.opacity(0.04), radius: 10, x: 0, y: 6)
     }
 
     @ViewBuilder
     private func capabilityBadge(_ title: String, available: Bool) -> some View {
         Text("\(title): \(available ? "Available" : "Unavailable")")
             .font(.caption.weight(.semibold))
-            .foregroundStyle(available ? WorkbenchPalette.accent : WorkbenchPalette.warningText)
+            .foregroundStyle(available ? Color.accentColor : .orange)
             .padding(.horizontal, 12)
             .padding(.vertical, 6)
-            .background(available ? WorkbenchPalette.accentSoft : WorkbenchPalette.warningFill)
+            .background(available ? Color.accentColor.opacity(0.12) : Color.orange.opacity(0.18))
             .clipShape(Capsule())
     }
 
     private func detailBadge(_ text: String) -> some View {
         Text(text)
             .font(.caption)
-            .foregroundStyle(WorkbenchPalette.muted)
+            .foregroundStyle(.secondary)
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
-            .background(WorkbenchPalette.surfaceAlt)
+            .background(Color.secondary.opacity(0.08))
             .clipShape(Capsule())
     }
 
@@ -2210,144 +2315,20 @@ struct MainView: View {
                     .controlSize(.small)
             } else {
                 Circle()
-                    .fill(WorkbenchPalette.accent)
+                    .fill(Color.accentColor)
                     .frame(width: 6, height: 6)
             }
 
             Text(text)
                 .font(.footnote)
-                .foregroundStyle(WorkbenchPalette.muted)
+                .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
 
-    private var actionTray: some View {
-        HStack(alignment: .center, spacing: 14) {
-            VStack(alignment: .leading, spacing: 3) {
-                Text(actionTrayTitle)
-                    .font(.headline)
-                    .foregroundStyle(WorkbenchPalette.text)
-
-                Text(actionTrayDetail)
-                    .font(.footnote)
-                    .foregroundStyle(WorkbenchPalette.muted)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
-            Spacer(minLength: 0)
-
-            Button("Reload") {
-                Task {
-                    await viewModel.loadInitialData()
-                }
-            }
-            .buttonStyle(.bordered)
-
-            if viewModel.isRunning {
-                Button(viewModel.isCancelRequested ? "Canceling" : "Cancel Run") {
-                    viewModel.cancelRun()
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(viewModel.isCancelRequested)
-            } else {
-                if viewModel.canRetryFailedItems {
-                    Button("Retry Failed") {
-                        Task {
-                            await viewModel.retryFailedItems()
-                        }
-                    }
-                    .buttonStyle(.bordered)
-                    .disabled(viewModel.isPreparingModel)
-                }
-
-                if viewModel.canResumeSavedRun {
-                    Button("Resume Previous Run (\(viewModel.resumablePendingCount))") {
-                        Task {
-                            await viewModel.resumeSavedRun()
-                        }
-                    }
-                    .buttonStyle(.bordered)
-                    .disabled(viewModel.isPreparingModel)
-                }
-
-                Button("Start Run") {
-                    Task {
-                        await viewModel.startRun()
-                    }
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(viewModel.isPreparingModel)
-            }
-        }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 14)
-        .background(
-            Rectangle()
-                .fill(WorkbenchPalette.surface)
-                .shadow(color: .black.opacity(0.05), radius: 8, x: 0, y: -4)
-        )
-        .overlay(alignment: .top) {
-            Divider()
-        }
-    }
-
-    private var actionTrayTitle: String {
-        if viewModel.isRunning {
-            return "Run in progress"
-        }
-        if !viewModel.runPreflightSummary.blockingReasons.isEmpty {
-            return "Needs attention"
-        }
-        if !viewModel.runPreflightSummary.confirmationReasons.isEmpty {
-            return "Ready with confirmation"
-        }
-        return "Ready to run"
-    }
-
-    private var actionTrayDetail: String {
-        if viewModel.isRunning {
-            return viewModel.runStatusMessage ?? "The latest completed item updates here while the run progresses."
-        }
-        if let blocking = viewModel.runPreflightSummary.blockingReasons.first {
-            return blocking
-        }
-        if let confirmation = viewModel.runPreflightSummary.confirmationReasons.first {
-            return confirmation
-        }
-        return "Review the run summary, then start when you're ready."
-    }
-
-    private func handleImmersivePresentationChange(_ isPresented: Bool) {
-        guard let window = currentWindow() else { return }
-
-        if isPresented {
-            window.makeFirstResponder(nil)
-            if !window.styleMask.contains(.fullScreen) {
-                immersiveAutoEnteredFullScreen = true
-                window.toggleFullScreen(nil)
-            } else {
-                immersiveAutoEnteredFullScreen = false
-                viewModel.markImmersivePreviewOpened()
-            }
-            return
-        }
-
-        guard immersiveAutoEnteredFullScreen else { return }
-        immersiveAutoEnteredFullScreen = false
-
-        if window.styleMask.contains(.fullScreen) {
-            window.toggleFullScreen(nil)
-        }
-    }
-
-    private func currentWindow() -> NSWindow? {
-        if let key = NSApp.keyWindow {
-            return key
-        }
-        if let main = NSApp.mainWindow {
-            return main
-        }
-        return NSApp.windows.first(where: { $0.isVisible })
+    private func openPreviewWindow() {
+        viewModel.openImmersivePreview()
+        openWindow(id: AppSceneID.preview)
     }
 }
 

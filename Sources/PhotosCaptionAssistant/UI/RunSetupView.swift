@@ -43,7 +43,7 @@ enum AlbumLoadState: Equatable {
     case failed(message: String)
 }
 
-private extension RunTraversalOrder {
+extension RunTraversalOrder {
     var title: String {
         switch self {
         case .photosOrderFast:
@@ -61,15 +61,15 @@ private extension RunTraversalOrder {
 }
 
 enum WorkbenchPalette {
-    static let text = Color(red: 0.09, green: 0.14, blue: 0.18)
-    static let muted = Color(red: 0.38, green: 0.44, blue: 0.49)
-    static let accent = Color(red: 0.29, green: 0.50, blue: 0.65)
-    static let accentSoft = Color(red: 0.91, green: 0.95, blue: 0.98)
-    static let border = Color(red: 0.84, green: 0.88, blue: 0.91)
-    static let surface = Color.white.opacity(0.96)
-    static let surfaceAlt = Color(red: 0.97, green: 0.98, blue: 0.99)
-    static let warningFill = Color(red: 0.97, green: 0.94, blue: 0.81)
-    static let warningText = Color(red: 0.44, green: 0.35, blue: 0.11)
+    static let text = Color.primary
+    static let muted = Color.secondary
+    static let accent = Color.accentColor
+    static let accentSoft = Color.accentColor.opacity(0.12)
+    static let border = Color.primary.opacity(0.08)
+    static let surface = Color(nsColor: .controlBackgroundColor).opacity(0.78)
+    static let surfaceAlt = Color(nsColor: .underPageBackgroundColor).opacity(0.92)
+    static let warningFill = Color.orange.opacity(0.16)
+    static let warningText = Color.orange
 }
 
 struct WorkbenchCard<Content: View>: View {
@@ -108,13 +108,12 @@ struct WorkbenchCard<Content: View>: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             RoundedRectangle(cornerRadius: 20, style: .continuous)
-                .fill(WorkbenchPalette.surface)
+                .fill(.regularMaterial)
         )
         .overlay(
             RoundedRectangle(cornerRadius: 20, style: .continuous)
                 .strokeBorder(WorkbenchPalette.border, lineWidth: 1)
         )
-        .shadow(color: .black.opacity(0.035), radius: 8, x: 0, y: 5)
     }
 }
 
@@ -148,7 +147,6 @@ struct WorkbenchNotice: View {
 private extension View {
     func workbenchFormControlAppearance() -> some View {
         self
-            .environment(\.colorScheme, .light)
             .tint(WorkbenchPalette.accent)
     }
 }

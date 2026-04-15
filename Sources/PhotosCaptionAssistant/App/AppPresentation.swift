@@ -10,6 +10,7 @@ enum AppPresentation {
 
 enum AppSceneID {
     static let about = "about"
+    static let preview = "preview"
     static let dataStorage = "data-storage"
     static let diagnostics = "diagnostics"
 }
