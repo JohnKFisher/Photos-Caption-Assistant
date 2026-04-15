@@ -60,6 +60,23 @@ private enum RunTimingStage: String, CaseIterable, Hashable, Sendable {
     case preview = "preview"
 }
 
+private enum RetryableItemStage: String, Sendable {
+    case assetAcquire
+    case analyze
+    case write
+
+    var statusLabel: String {
+        switch self {
+        case .assetAcquire:
+            return "asset acquisition"
+        case .analyze:
+            return "caption generation"
+        case .write:
+            return "caption write"
+        }
+    }
+}
+
 private enum CaptionWorkflowRunError: LocalizedError {
     case albumListingUnavailable
     case incompleteConfiguration([String])
@@ -294,7 +311,9 @@ public final class RunCoordinator {
     private struct AnalysisJobResult: Sendable {
         let asset: MediaAsset
         let input: AnalysisInput?
+        let preparedPayload: PreparedAnalysisPayload?
         let generated: GeneratedMetadata?
+        let failedStage: RetryableItemStage?
         let errorMessage: String?
     }
 
@@ -303,6 +322,7 @@ public final class RunCoordinator {
         let asset: MediaAsset
         let input: AnalysisInput?
         let preparedPayload: PreparedAnalysisPayload?
+        let failedStage: RetryableItemStage?
         let errorMessage: String?
     }
 
@@ -421,6 +441,8 @@ public final class RunCoordinator {
     private static let captionWorkflowStageLoadMaxAttempts = 3
     private static let captionWorkflowEmptyConfirmationAttempts = 2
     private static let captionWorkflowRetryDelayNanoseconds: UInt64 = 1_000_000_000
+    private static let defaultStageRetryMaxAttempts = 2
+    private static let defaultStageRetryDelaySeconds: TimeInterval = 5
     private nonisolated static let photoPreviewMaxPixelSize = 2048
 
     private let photosWriter: PhotosWriter
@@ -437,6 +459,9 @@ public final class RunCoordinator {
     private let analysisConcurrency: Int
     private let prepareAheadLimit: Int
     private let writeBatchSize: Int
+    private let stageRetryMaxAttempts: Int
+    private let stageRetryDelaySeconds: TimeInterval
+    private let stageRetryDelayNanoseconds: UInt64
 
     private var isCancelled = false
 
@@ -471,6 +496,8 @@ public final class RunCoordinator {
             analysisConcurrency: analysisConcurrency,
             prepareAheadLimit: prepareAheadLimit,
             writeBatchSize: writeBatchSize,
+            stageRetryMaxAttempts: Self.defaultStageRetryMaxAttempts,
+            stageRetryDelaySeconds: Self.defaultStageRetryDelaySeconds,
             previewRenderer: DefaultPreviewRenderer(videoFrameSampler: videoFrameSampler)
         )
     }
@@ -490,6 +517,8 @@ public final class RunCoordinator {
         analysisConcurrency: Int = 1,
         prepareAheadLimit: Int = 1,
         writeBatchSize: Int = 16,
+        stageRetryMaxAttempts: Int = 2,
+        stageRetryDelaySeconds: TimeInterval = 5,
         previewRenderer: any PreviewRendering
     ) {
         self.photosWriter = photosWriter
@@ -506,6 +535,9 @@ public final class RunCoordinator {
         self.analysisConcurrency = max(1, analysisConcurrency)
         self.prepareAheadLimit = max(0, prepareAheadLimit)
         self.writeBatchSize = max(1, writeBatchSize)
+        self.stageRetryMaxAttempts = max(1, stageRetryMaxAttempts)
+        self.stageRetryDelaySeconds = max(0, stageRetryDelaySeconds)
+        self.stageRetryDelayNanoseconds = UInt64((max(0, stageRetryDelaySeconds) * 1_000_000_000).rounded())
     }
 
     private func prefersAlternateIncrementalScan(for options: RunOptions) -> Bool {
@@ -541,8 +573,8 @@ public final class RunCoordinator {
                 return incrementalScanSource
             }
 
-            print(
-                "[RunCoordinator] PhotoKit incremental scan path could not handle \(String(describing: options.source)); using AppleScript incremental scan path."
+            Self.debugLog(
+                "PhotoKit incremental scan path could not handle \(Self.scopeLogDescription(options.source)); using AppleScript incremental scan path."
             )
         }
 
@@ -581,7 +613,7 @@ public final class RunCoordinator {
                 ollamaError = "Qwen 2.5VL 7B is not installed yet. Start the run again and confirm the model download when prompted."
             case .ready:
                 ollamaError = "Qwen 2.5VL 7B is unavailable."
-            case let .failure(reason):
+            case let .failure(reason, _, _):
                 ollamaError = reason
             }
             return RunSummary(
@@ -625,7 +657,7 @@ public final class RunCoordinator {
             let timingSummary = await timingRecorder.summary(
                 totalWallNanoseconds: UInt64((diagnostics.wallSeconds * 1_000_000_000).rounded())
             )
-            print(timingSummary)
+            Self.debugLog(timingSummary.replacingOccurrences(of: "[RunCoordinator] ", with: ""))
             return RunSummary(
                 progress: progress,
                 errors: errors,
@@ -703,6 +735,26 @@ public final class RunCoordinator {
                 )
                 throw error
             }
+        }
+
+        func waitForStageRetry(
+            _ stage: RetryableItemStage,
+            asset: MediaAsset,
+            attempt: Int
+        ) async -> Bool {
+            guard !isCancelled else {
+                return false
+            }
+
+            callbacks.onStatusChanged(
+                "Retrying \(stage.statusLabel) for \(asset.filename) in \(Self.formatRetryDelay(stageRetryDelaySeconds)) (attempt \(attempt) of \(stageRetryMaxAttempts))..."
+            )
+
+            if stageRetryDelayNanoseconds > 0 {
+                try? await Task.sleep(nanoseconds: stageRetryDelayNanoseconds)
+            }
+
+            return !isCancelled
         }
 
         func verifyPhotosStillRunning() async -> Bool {
@@ -914,19 +966,61 @@ public final class RunCoordinator {
             pendingPreviewTasks.append(task)
         }
 
+        func writePayload(for write: PendingWrite) -> MetadataWritePayload {
+            MetadataWritePayload(
+                id: write.asset.id,
+                caption: write.generated.caption,
+                keywords: OwnershipTagCodec.appendTags(
+                    OwnershipTag(logicVersion: logicVersion, engineTier: targetEngine),
+                    to: write.generated.keywords
+                )
+            )
+        }
+
+        func performSingleWriteAttempt(
+            write: PendingWrite,
+            payload: MetadataWritePayload
+        ) async -> MetadataWriteResult {
+            do {
+                try await measureOnMain(.write) {
+                    try await photosWriter.writeMetadata(
+                        id: write.asset.id,
+                        caption: payload.caption,
+                        keywords: payload.keywords
+                    )
+                }
+                return MetadataWriteResult(id: write.asset.id, success: true)
+            } catch {
+                return MetadataWriteResult(
+                    id: write.asset.id,
+                    success: false,
+                    errorMessage: error.localizedDescription
+                )
+            }
+        }
+
+        func retryFailedWriteIfNeeded(
+            write: PendingWrite,
+            payload: MetadataWritePayload,
+            priorResult: MetadataWriteResult
+        ) async -> MetadataWriteResult {
+            guard !priorResult.success else {
+                return priorResult
+            }
+            guard stageRetryMaxAttempts > 1 else {
+                return priorResult
+            }
+            guard await waitForStageRetry(.write, asset: write.asset, attempt: 2) else {
+                return priorResult
+            }
+            return await performSingleWriteAttempt(write: write, payload: payload)
+        }
+
         func writeChunk(_ writes: [PendingWrite]) async {
             guard !writes.isEmpty else { return }
 
-            let payloads = writes.map { write in
-                MetadataWritePayload(
-                    id: write.asset.id,
-                    caption: write.generated.caption,
-                    keywords: OwnershipTagCodec.appendTags(
-                        OwnershipTag(logicVersion: logicVersion, engineTier: targetEngine),
-                        to: write.generated.keywords
-                    )
-                )
-            }
+            let payloads = writes.map(writePayload(for:))
+            let payloadsByID = Dictionary(uniqueKeysWithValues: zip(writes.map(\.asset.id), payloads))
 
             var resultsByID: [String: MetadataWriteResult] = [:]
             if let batchWriter {
@@ -939,28 +1033,41 @@ public final class RunCoordinator {
                         resultsByID[result.id] = result
                     }
                 } catch {
-                    resultsByID.removeAll(keepingCapacity: true)
-                }
-            }
-
-            if resultsByID.isEmpty {
-                for (index, write) in writes.enumerated() {
-                    do {
-                        try await measureOnMain(.write) {
-                            try await photosWriter.writeMetadata(
-                                id: write.asset.id,
-                                caption: payloads[index].caption,
-                                keywords: payloads[index].keywords
-                            )
-                        }
-                        resultsByID[write.asset.id] = MetadataWriteResult(id: write.asset.id, success: true)
-                    } catch {
+                    for write in writes {
                         resultsByID[write.asset.id] = MetadataWriteResult(
                             id: write.asset.id,
                             success: false,
                             errorMessage: error.localizedDescription
                         )
                     }
+                }
+            }
+
+            if resultsByID.isEmpty {
+                for (index, write) in writes.enumerated() {
+                    let firstAttempt = await performSingleWriteAttempt(write: write, payload: payloads[index])
+                    resultsByID[write.asset.id] = await retryFailedWriteIfNeeded(
+                        write: write,
+                        payload: payloads[index],
+                        priorResult: firstAttempt
+                    )
+                }
+            } else {
+                for write in writes {
+                    let priorResult = resultsByID[write.asset.id] ?? MetadataWriteResult(
+                        id: write.asset.id,
+                        success: false,
+                        errorMessage: "Write operation did not return a result."
+                    )
+                    guard !priorResult.success,
+                          let payload = payloadsByID[write.asset.id] else {
+                        continue
+                    }
+                    resultsByID[write.asset.id] = await retryFailedWriteIfNeeded(
+                        write: write,
+                        payload: payload,
+                        priorResult: priorResult
+                    )
                 }
             }
 
@@ -1046,13 +1153,66 @@ public final class RunCoordinator {
                     }
                 }
 
-                func handleOrderedResult(_ result: AnalysisJobResult) async {
-                    if let generated = result.generated,
-                       let input = result.input
+                func handleOrderedResult(index: Int, result: AnalysisJobResult) async {
+                    func retryAnalysisResultIfNeeded(
+                        index: Int,
+                        initialResult: AnalysisJobResult
+                    ) async -> AnalysisJobResult {
+                        var currentResult = initialResult
+
+                        if currentResult.failedStage == .assetAcquire,
+                           stageRetryMaxAttempts > 1,
+                           await waitForStageRetry(.assetAcquire, asset: currentResult.asset, attempt: 2)
+                        {
+                            let retriedPreparation = await Self.prepareAnalysisInput(
+                                index: index,
+                                asset: currentResult.asset,
+                                photosWriter: writer,
+                                preparedAnalyzer: preparedAnalysisEngine,
+                                timingRecorder: recorder
+                            )
+                            currentResult = await Self.analyzePreparedInput(
+                                retriedPreparation,
+                                analyzer: analysisEngine,
+                                preparedAnalyzer: preparedAnalysisEngine,
+                                timingRecorder: recorder
+                            ).1
+                        }
+
+                        if currentResult.failedStage == .analyze,
+                           stageRetryMaxAttempts > 1,
+                           await waitForStageRetry(.analyze, asset: currentResult.asset, attempt: 2),
+                           let input = currentResult.input
+                        {
+                            currentResult = await Self.analyzePreparedInput(
+                                PreparationJobResult(
+                                    index: index,
+                                    asset: currentResult.asset,
+                                    input: input,
+                                    preparedPayload: currentResult.preparedPayload,
+                                    failedStage: nil,
+                                    errorMessage: nil
+                                ),
+                                analyzer: analysisEngine,
+                                preparedAnalyzer: preparedAnalysisEngine,
+                                timingRecorder: recorder
+                            ).1
+                        }
+
+                        return currentResult
+                    }
+
+                    let resolvedResult = await retryAnalysisResultIfNeeded(
+                        index: index,
+                        initialResult: result
+                    )
+
+                    if let generated = resolvedResult.generated,
+                       let input = resolvedResult.input
                     {
                         pendingWrites.append(
                             PendingWrite(
-                                asset: result.asset,
+                                asset: resolvedResult.asset,
                                 sourceContext: sourceContext,
                                 input: input,
                                 generated: generated
@@ -1060,16 +1220,16 @@ public final class RunCoordinator {
                         )
                         await flushPendingWrites()
                     } else {
-                        if let input = result.input {
+                        if let input = resolvedResult.input {
                             Self.cleanupAnalysisInput(input)
                         }
                         progress.processed += 1
                         progress.failed += 1
-                        let message = result.errorMessage ?? "Analysis failed."
-                        recordError("\(result.asset.filename): \(message)")
-                        recordFailedAsset(result.asset)
+                        let message = resolvedResult.errorMessage ?? "Analysis failed."
+                        recordError("\(resolvedResult.asset.filename): \(message)")
+                        recordFailedAsset(resolvedResult.asset)
                         callbacks.onProgress(progress)
-                        markAssetProcessed(result.asset.id)
+                        markAssetProcessed(resolvedResult.asset.id)
                     }
                 }
 
@@ -1081,7 +1241,7 @@ public final class RunCoordinator {
                         bufferedResults[completed.0] = completed.1
 
                         while let readyResult = bufferedResults.removeValue(forKey: nextIndexToEmit) {
-                            await handleOrderedResult(readyResult)
+                            await handleOrderedResult(index: nextIndexToEmit, result: readyResult)
                             nextIndexToEmit += 1
                         }
                     }
@@ -1794,8 +1954,8 @@ public final class RunCoordinator {
                         throw error
                     }
                     lastTimeoutError = error
-                    print(
-                        "[RunCoordinator] enumerate page timed out at offset \(offset) with page size \(limit); retrying with smaller page size."
+                    Self.debugLog(
+                        "Enumerate page timed out at offset \(offset) with page size \(limit); retrying with a smaller page size."
                     )
                 }
             }
@@ -1990,11 +2150,37 @@ public final class RunCoordinator {
         return lhs.id < rhs.id
     }
 
+    private nonisolated static func debugLog(_ message: String) {
+        print("[RunCoordinator] \(message)")
+    }
+
+    private nonisolated static func scopeLogDescription(_ scope: ScopeSource) -> String {
+        switch scope {
+        case .library:
+            return "the whole library"
+        case .album:
+            return "an album scope"
+        case .picker:
+            return "Photos Picker"
+        case .captionWorkflow:
+            return AppPresentation.queuedAlbumsTitle
+        }
+    }
+
     private nonisolated static func cleanupAnalysisInput(_ input: AnalysisInput) {
         guard case let .fileURL(exportURL) = input else {
             return
         }
         let parent = exportURL.deletingLastPathComponent()
+        let storagePaths = AppStoragePaths.make()
+        let allowedRoots = [
+            storagePaths.photoExportTempRoot,
+            storagePaths.videoExportTempRoot,
+            storagePaths.photoPreviewTempRoot
+        ]
+        guard allowedRoots.contains(where: { AppStoragePaths.contains(parent, within: $0) }) else {
+            return
+        }
         try? FileManager.default.removeItem(at: parent)
     }
 
@@ -2022,6 +2208,7 @@ public final class RunCoordinator {
                 asset: asset,
                 input: input,
                 preparedPayload: preparedPayload,
+                failedStage: nil,
                 errorMessage: nil
             )
         } catch {
@@ -2030,6 +2217,7 @@ public final class RunCoordinator {
                 asset: asset,
                 input: input,
                 preparedPayload: preparedPayload,
+                failedStage: .assetAcquire,
                 errorMessage: error.localizedDescription
             )
         }
@@ -2045,7 +2233,9 @@ public final class RunCoordinator {
             let result = AnalysisJobResult(
                 asset: prepared.asset,
                 input: nil,
+                preparedPayload: prepared.preparedPayload,
                 generated: nil,
+                failedStage: prepared.failedStage ?? .assetAcquire,
                 errorMessage: prepared.errorMessage ?? "Analysis input was unavailable."
             )
             return (prepared.index, result)
@@ -2067,7 +2257,9 @@ public final class RunCoordinator {
             let result = AnalysisJobResult(
                 asset: prepared.asset,
                 input: input,
+                preparedPayload: prepared.preparedPayload,
                 generated: generated,
+                failedStage: nil,
                 errorMessage: nil
             )
             return (prepared.index, result)
@@ -2075,7 +2267,9 @@ public final class RunCoordinator {
             let result = AnalysisJobResult(
                 asset: prepared.asset,
                 input: input,
+                preparedPayload: prepared.preparedPayload,
                 generated: nil,
+                failedStage: .analyze,
                 errorMessage: error.localizedDescription
             )
             return (prepared.index, result)
@@ -2129,5 +2323,13 @@ public final class RunCoordinator {
             )
             throw error
         }
+    }
+
+    private nonisolated static func formatRetryDelay(_ seconds: TimeInterval) -> String {
+        let roundedSeconds = Int(seconds.rounded())
+        if abs(seconds - TimeInterval(roundedSeconds)) < 0.001 {
+            return "\(roundedSeconds)s"
+        }
+        return String(format: "%.1fs", seconds)
     }
 }

@@ -1440,7 +1440,10 @@ public actor PhotosAppleScriptClient: PhotosWriter, PhotosProcessMonitoring, Pho
                     timeoutSeconds: ScriptTimeout.exportPreparedVideoAsset
                 )
             } catch {
-                try? fileManager.removeItem(at: outputURL.deletingLastPathComponent())
+                cleanupOwnedTemporaryDirectory(
+                    outputURL.deletingLastPathComponent(),
+                    within: AppStoragePaths.make(fileManager: fileManager).videoExportTempRoot
+                )
                 throw error
             }
         }
@@ -1567,7 +1570,10 @@ public actor PhotosAppleScriptClient: PhotosWriter, PhotosProcessMonitoring, Pho
             try fileManager.copyItem(at: sourceURL, to: outputURL)
             return outputURL
         } catch {
-            try? fileManager.removeItem(at: outputURL.deletingLastPathComponent())
+            cleanupOwnedTemporaryDirectory(
+                outputURL.deletingLastPathComponent(),
+                within: AppStoragePaths.make(fileManager: fileManager).videoExportTempRoot
+            )
             throw error
         }
     }
@@ -2040,6 +2046,13 @@ public actor PhotosAppleScriptClient: PhotosWriter, PhotosProcessMonitoring, Pho
         let excerpt = sourceNSString.substring(with: NSRange(location: contextStart, length: contextLength))
             .replacingOccurrences(of: "\n", with: "\\n")
         return "\(message) [script excerpt: \(excerpt)]"
+    }
+
+    private func cleanupOwnedTemporaryDirectory(_ directoryURL: URL, within expectedRoot: URL) {
+        guard AppStoragePaths.contains(directoryURL, within: expectedRoot) else {
+            return
+        }
+        try? fileManager.removeItem(at: directoryURL)
     }
 }
 

@@ -4,7 +4,9 @@ Photos Caption Assistant is a local-first macOS app for generating captions and 
 
 This is a vibe-coded personal hobby app that I use on my own Mac and iterate on quickly. It is published so the source stays visible and recoverable, not because it is polished for broad public use. Outside usefulness is incidental. No support commitment, compatibility guarantee, stability promise, or warranty is implied beyond the repository's actual license situation.
 
-The current source tree builds locally as version `3.5.4` build `12`.
+The current source tree builds locally as version `3.5.10` build `18`.
+
+This repo currently distributes personal-use, ad-hoc-signed macOS builds. It does not use Developer ID signing or notarization, so Gatekeeper prompts may still appear and `Open Anyway` may still be required.
 
 ## What It Does
 
@@ -81,6 +83,12 @@ Current immersive preview from a recent local run:
 7. Applies overwrite rules and, when required, asks for confirmation before touching non-app metadata.
 8. Writes the final caption, keywords, and app ownership tags back to Photos.
 9. Persists resumable state so interrupted runs can be resumed later.
+
+For transient failures during normal item processing, the app now automatically retries the core per-item stages once:
+
+- asset acquisition
+- caption generation / JSON decode
+- Photos metadata write-back
 
 ## Photo And Video Input Details
 
@@ -176,19 +184,18 @@ swift build -c release --triple x86_64-apple-macosx15.0 --product PhotosCaptionA
 
 `./scripts/build_app.sh`:
 
-- increments the patch version
-- increments the build number
 - builds separate `arm64` and `x86_64` release binaries
 - merges them into one universal executable with `lipo`
 - packages the app into `dist/Photos Caption Assistant.app`
 - ad-hoc signs the bundle
 - verifies the resulting signature
+- uses the checked-in `Info.plist` version and build exactly as-is
 
 This repo is source-first. Built app bundles and temp outputs should not be treated as source-of-truth artifacts.
 
 ## Opening The Built App On macOS
 
-The packaged app is ad-hoc signed for local use, but it is not notarized for public distribution. macOS may warn when you open it.
+The packaged app is ad-hoc signed for local use, but it is not notarized for public distribution. This project does not currently use a paid Apple Developer notarization path, so macOS may still warn when you open it.
 
 Preferred opening flow:
 
@@ -206,7 +213,12 @@ Because the bundle identifier is now `com.jkfisher.PhotosCaptionAssistant`, macO
 
 ## CI
 
-The repository includes a GitHub Actions CI workflow that runs tests and release builds on `macos-15`. It now uses `actions/checkout@v5`, which is the Node 24-compatible line needed to avoid the Node 20 deprecation warning on GitHub-hosted runners.
+The repository uses two GitHub Actions workflows on `macos-15`:
+
+- `build.yml` runs on pushes to `main` and on manual dispatch. It builds, tests, packages the `.app`, and uploads that bundle as a CI artifact.
+- `release.yml` runs when the checked-in version source (`Sources/PhotosCaptionAssistant/Resources/Info.plist`) changes on `main`, or on manual dispatch. It rebuilds from committed source, creates a universal DMG, and publishes or updates the matching GitHub Release for tag `vX.Y.Z`.
+
+Release automation reads version and build directly from the checked-in `Info.plist`. Packaging no longer auto-bumps version/build during local or CI builds.
 
 ## Known Limits
 

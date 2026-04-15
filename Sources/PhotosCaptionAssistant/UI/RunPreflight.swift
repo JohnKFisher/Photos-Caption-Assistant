@@ -72,7 +72,7 @@ enum RunPreflightSummaryBuilder {
             countDescription: countDescription,
             countIsLoading: countIsLoading,
             filterDescription: filterDescription,
-            writeDescription: "This run will write generated captions and keywords back to Photos.",
+            writeDescription: "This run will generate captions and keywords locally, then write captions, keywords, and app ownership tags back to matching Photos items.",
             overwriteDescriptions: overwriteDescriptions,
             modelDescription: makeModelDescription(capabilities: capabilities),
             serviceDescription: makeServiceDescription(capabilities: capabilities),
@@ -100,34 +100,41 @@ enum RunPreflightSummaryBuilder {
 
     private static func makeSourceDetails(snapshot: RunSetupSnapshot) -> [String] {
         switch snapshot.sourceSelection {
-        case .library, .album:
-            return []
+        case .library:
+            return ["Scope: every eligible item currently visible in the library."]
+        case .album:
+            return ["Scope: only items currently in the selected album."]
         case .picker:
-            return ["Selected items: \(snapshot.pickerIDs.count)"]
+            return [
+                "Scope: only items currently selected in Photos Picker.",
+                "Selected items: \(snapshot.pickerIDs.count)"
+            ]
         case .captionWorkflow:
             let configuredNames = snapshot.captionWorkflowConfiguration.queue.enumerated().map { index, entry in
                 let label = "Queue item \(index + 1)"
                 let albumName = entry.albumName ?? "Not configured"
                 return "\(label): \(albumName)"
             }
-            return ["Queue length: \(snapshot.captionWorkflowConfiguration.queue.count)"] + configuredNames
+            return [
+                "Scope: only the configured albums below, processed in queue order."
+            ] + ["Queue length: \(snapshot.captionWorkflowConfiguration.queue.count)"] + configuredNames
         }
     }
 
     private static func makeCountDescription(snapshot: RunSetupSnapshot, countState: RunPreflightCountState) -> String {
         if case .captionWorkflow = snapshot.sourceSelection {
-            return "Item count is not precomputed stage-by-stage for \(AppPresentation.queuedAlbumsTitle)."
+            return "Counts are resolved stage-by-stage during the run for \(AppPresentation.queuedAlbumsTitle), so the exact write scope is not precomputed up front."
         }
 
         switch countState {
         case .loading:
-            return "Counting the current scope..."
+            return "Estimating the current scope. Final writes may still be lower after filters and overwrite checks."
         case let .exact(count):
             let itemDescription = itemCountDescription(count)
             if snapshot.useDateFilter, snapshot.sourceSelection != .picker {
-                return "Exact scope count before capture-date filtering: \(itemDescription)."
+                return "Exact scope count before capture-date filtering: \(itemDescription). Final writes may be lower after filtering and overwrite checks."
             }
-            return "Exact current scope count: \(itemDescription)."
+            return "Exact current scope count before overwrite checks: \(itemDescription)."
         case let .message(message):
             return message
         }
@@ -143,15 +150,15 @@ enum RunPreflightSummaryBuilder {
     private static func makeOverwriteDescriptions(snapshot: RunSetupSnapshot) -> [String] {
         var descriptions: [String] = []
         if snapshot.overwriteAppOwnedSameOrNewer {
-            descriptions.append("App-owned same/newer metadata will be overwritten.")
+            descriptions.append("Metadata already tagged as app-owned at the same or newer logic version will be overwritten.")
         } else {
-            descriptions.append("App-owned same/newer metadata will be preserved.")
+            descriptions.append("Metadata already tagged as app-owned at the same or newer logic version will be preserved.")
         }
 
         if snapshot.alwaysOverwriteExternalMetadata {
-            descriptions.append("Non-app metadata will be overwritten without per-item prompts.")
+            descriptions.append("Metadata not tagged as app-owned will be overwritten without per-item prompts.")
         } else {
-            descriptions.append("Non-app metadata will require per-item confirmation before overwrite.")
+            descriptions.append("Metadata not tagged as app-owned will require per-item confirmation before overwrite.")
         }
 
         return descriptions
@@ -167,7 +174,7 @@ enum RunPreflightSummaryBuilder {
             return "Model status: qwen2.5vl:7b is not installed locally yet."
         case .ready:
             return "Model status: qwen2.5vl:7b is installed and ready to warm locally."
-        case let .failure(reason):
+        case let .failure(reason, _, _):
             return "Model status: \(reason)"
         }
     }
@@ -180,7 +187,7 @@ enum RunPreflightSummaryBuilder {
             return "Ollama service: not currently reachable; the app may start Ollama locally."
         case .installedRunningModelMissing, .ready:
             return "Ollama service: reachable on http://127.0.0.1:11434."
-        case let .failure(reason):
+        case let .failure(reason, _, _):
             return "Ollama service: \(reason)"
         }
     }
@@ -189,7 +196,7 @@ enum RunPreflightSummaryBuilder {
         var reasons: [String] = []
 
         if !capabilities.photosAutomationAvailable {
-            reasons.append("Grant Photos automation access before starting a run.")
+            reasons.append("Grant Photos automation access before starting a write run.")
         }
 
         if capabilities.ollamaAvailability.requiresInstallBeforeRun {
@@ -226,11 +233,11 @@ enum RunPreflightSummaryBuilder {
         var reasons: [String] = []
 
         if snapshot.sourceSelection == .library {
-            reasons.append("This run will target the whole library.")
+            reasons.append("This run will target the whole library, subject to the current filter and overwrite settings.")
         }
 
         if snapshot.alwaysOverwriteExternalMetadata {
-            reasons.append("This run will overwrite non-app metadata without per-item confirmation.")
+            reasons.append("This run will overwrite metadata not tagged as app-owned without per-item confirmation.")
         }
 
         return reasons

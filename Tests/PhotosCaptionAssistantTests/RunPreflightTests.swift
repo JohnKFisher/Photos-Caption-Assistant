@@ -32,8 +32,8 @@ final class RunPreflightTests: XCTestCase {
         )
 
         XCTAssertEqual(summary.sourceTitle, "Whole Library")
-        XCTAssertEqual(summary.countDescription, "Exact current scope count: 120 items.")
-        XCTAssertTrue(summary.confirmationReasons.contains("This run will target the whole library."))
+        XCTAssertEqual(summary.countDescription, "Exact current scope count before overwrite checks: 120 items.")
+        XCTAssertTrue(summary.confirmationReasons.contains("This run will target the whole library, subject to the current filter and overwrite settings."))
         XCTAssertTrue(summary.modelDescription.contains("not installed locally"))
         XCTAssertEqual(summary.confirmationLabel, "Start Run")
     }
@@ -66,8 +66,9 @@ final class RunPreflightTests: XCTestCase {
         )
 
         XCTAssertEqual(summary.sourceTitle, AppPresentation.queuedAlbumsTitle)
-        XCTAssertEqual(summary.countDescription, "Item count is not precomputed stage-by-stage for \(AppPresentation.queuedAlbumsTitle).")
+        XCTAssertEqual(summary.countDescription, "Counts are resolved stage-by-stage during the run for \(AppPresentation.queuedAlbumsTitle), so the exact write scope is not precomputed up front.")
         XCTAssertTrue(summary.sourceDetails.contains("Queue length: 2"))
+        XCTAssertTrue(summary.sourceDetails.contains("Scope: only the configured albums below, processed in queue order."))
         XCTAssertTrue(summary.sourceDetails.contains("Queue item 1: Priority Queue"))
         XCTAssertTrue(summary.sourceDetails.contains("Queue item 2: Review Queue"))
         XCTAssertTrue(summary.confirmationReasons.isEmpty)
@@ -99,8 +100,8 @@ final class RunPreflightTests: XCTestCase {
             countState: .exact(42)
         )
 
-        XCTAssertTrue(summary.overwriteDescriptions.contains("Non-app metadata will be overwritten without per-item prompts."))
-        XCTAssertTrue(summary.confirmationReasons.contains("This run will overwrite non-app metadata without per-item confirmation."))
+        XCTAssertTrue(summary.overwriteDescriptions.contains("Metadata not tagged as app-owned will be overwritten without per-item prompts."))
+        XCTAssertTrue(summary.confirmationReasons.contains("This run will overwrite metadata not tagged as app-owned without per-item confirmation."))
         XCTAssertEqual(summary.confirmationLabel, "Start Run")
         XCTAssertNotNil(summary.filterDescription)
     }

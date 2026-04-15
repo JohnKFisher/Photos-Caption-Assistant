@@ -819,6 +819,274 @@ final class RunCoordinatorTests: XCTestCase {
         XCTAssertEqual(summary.failedAssets.map(\.id), [assets[0].id, assets[2].id])
     }
 
+    func testAssetAcquireRetriesOnceThenSucceeds() async {
+        let asset = MediaAsset(id: "asset-acquire-retry", filename: "IMG_retry.jpg", captureDate: Date(), kind: .photo)
+        let metadata = [asset.id: ExistingMetadataState(caption: nil, keywords: [], ownershipTag: nil, isExternal: false)]
+        let statusRecorder = StatusRecorder()
+        let writer = MockPhotosWriter(
+            assets: [asset],
+            metadataByID: metadata,
+            exportFailuresByID: [asset.id: 1]
+        )
+        let coordinator = makeRetryingCoordinator(
+            photosWriter: writer,
+            analyzer: MockAnalyzer(result: GeneratedMetadata(caption: "caption", keywords: ["retry"]))
+        )
+
+        let summary = await coordinator.run(
+            options: defaultRunOptions(),
+            capabilities: defaultCapabilities(),
+            callbacks: RunCallbacks(
+                onStatusChanged: { status in
+                    statusRecorder.record(status: status)
+                }
+            )
+        )
+        let exportAttemptCount = await writer.exportAttemptCountValue(for: asset.id)
+
+        XCTAssertEqual(summary.progress.changed, 1)
+        XCTAssertEqual(summary.progress.failed, 0)
+        XCTAssertEqual(exportAttemptCount, 2)
+        XCTAssertTrue(statusRecorder.values().contains(where: { $0.contains("Retrying asset acquisition") }))
+    }
+
+    func testAnalysisRetriesInvalidJSONOnceThenSucceeds() async {
+        let asset = MediaAsset(id: "asset-analysis-retry", filename: "IMG_analysis.jpg", captureDate: Date(), kind: .photo)
+        let metadata = [asset.id: ExistingMetadataState(caption: nil, keywords: [], ownershipTag: nil, isExternal: false)]
+        let statusRecorder = StatusRecorder()
+        let analyzerState = RetryingAnalyzerState(
+            outcomesByAssetID: [
+                asset.id: [
+                    .invalidJSON,
+                    .success(GeneratedMetadata(caption: "caption", keywords: ["retry"]))
+                ]
+            ]
+        )
+        let writer = MockPhotosWriter(
+            assets: [asset],
+            metadataByID: metadata,
+            previewDataByID: [asset.id: Data(asset.id.utf8)]
+        )
+        let coordinator = makeRetryingCoordinator(
+            photosWriter: writer,
+            analyzer: RetryingAnalyzer(
+                state: analyzerState,
+                fallback: GeneratedMetadata(caption: "caption", keywords: ["retry"])
+            )
+        )
+
+        let summary = await coordinator.run(
+            options: defaultRunOptions(),
+            capabilities: defaultCapabilities(),
+            callbacks: RunCallbacks(
+                onStatusChanged: { status in
+                    statusRecorder.record(status: status)
+                }
+            )
+        )
+        let attemptCount = await analyzerState.attemptCountValue(for: asset.id)
+
+        XCTAssertEqual(summary.progress.changed, 1)
+        XCTAssertEqual(summary.progress.failed, 0)
+        XCTAssertEqual(attemptCount, 2)
+        XCTAssertTrue(statusRecorder.values().contains(where: { $0.contains("Retrying caption generation") }))
+    }
+
+    func testWriteRetriesOnceThenSucceeds() async {
+        let asset = MediaAsset(id: "asset-write-retry", filename: "IMG_write.jpg", captureDate: Date(), kind: .photo)
+        let metadata = [asset.id: ExistingMetadataState(caption: nil, keywords: [], ownershipTag: nil, isExternal: false)]
+        let statusRecorder = StatusRecorder()
+        let writer = MockPhotosWriter(
+            assets: [asset],
+            metadataByID: metadata,
+            previewDataByID: [asset.id: Data(asset.id.utf8)],
+            writeFailuresByID: [asset.id: 1]
+        )
+        let coordinator = makeRetryingCoordinator(
+            photosWriter: writer,
+            analyzer: MockAnalyzer(result: GeneratedMetadata(caption: "caption", keywords: ["retry"]))
+        )
+
+        let summary = await coordinator.run(
+            options: defaultRunOptions(),
+            capabilities: defaultCapabilities(),
+            callbacks: RunCallbacks(
+                onStatusChanged: { status in
+                    statusRecorder.record(status: status)
+                }
+            )
+        )
+        let writeAttemptCount = await writer.writeAttemptCountValue(for: asset.id)
+
+        XCTAssertEqual(summary.progress.changed, 1)
+        XCTAssertEqual(summary.progress.failed, 0)
+        XCTAssertEqual(writeAttemptCount, 2)
+        XCTAssertTrue(statusRecorder.values().contains(where: { $0.contains("Retrying caption write") }))
+    }
+
+    func testAssetAcquireFailsTwiceThenMarksItemFailedOnce() async {
+        let asset = MediaAsset(id: "asset-acquire-fail", filename: "IMG_fail.jpg", captureDate: Date(), kind: .photo)
+        let metadata = [asset.id: ExistingMetadataState(caption: nil, keywords: [], ownershipTag: nil, isExternal: false)]
+        let writer = MockPhotosWriter(
+            assets: [asset],
+            metadataByID: metadata,
+            exportFailuresByID: [asset.id: 2]
+        )
+        let coordinator = makeRetryingCoordinator(
+            photosWriter: writer,
+            analyzer: MockAnalyzer(result: GeneratedMetadata(caption: "caption", keywords: ["retry"]))
+        )
+
+        let summary = await coordinator.run(
+            options: defaultRunOptions(),
+            capabilities: defaultCapabilities(),
+            callbacks: RunCallbacks()
+        )
+        let exportAttemptCount = await writer.exportAttemptCountValue(for: asset.id)
+
+        XCTAssertEqual(summary.progress.changed, 0)
+        XCTAssertEqual(summary.progress.failed, 1)
+        XCTAssertEqual(exportAttemptCount, 2)
+    }
+
+    func testAnalysisFailsTwiceThenMarksItemFailedOnce() async {
+        let asset = MediaAsset(id: "asset-analysis-fail", filename: "IMG_analysis_fail.jpg", captureDate: Date(), kind: .photo)
+        let metadata = [asset.id: ExistingMetadataState(caption: nil, keywords: [], ownershipTag: nil, isExternal: false)]
+        let analyzerState = RetryingAnalyzerState(
+            outcomesByAssetID: [asset.id: [.invalidJSON, .invalidJSON]]
+        )
+        let writer = MockPhotosWriter(
+            assets: [asset],
+            metadataByID: metadata,
+            previewDataByID: [asset.id: Data(asset.id.utf8)]
+        )
+        let coordinator = makeRetryingCoordinator(
+            photosWriter: writer,
+            analyzer: RetryingAnalyzer(
+                state: analyzerState,
+                fallback: GeneratedMetadata(caption: "caption", keywords: ["retry"])
+            )
+        )
+
+        let summary = await coordinator.run(
+            options: defaultRunOptions(),
+            capabilities: defaultCapabilities(),
+            callbacks: RunCallbacks()
+        )
+        let attemptCount = await analyzerState.attemptCountValue(for: asset.id)
+
+        XCTAssertEqual(summary.progress.changed, 0)
+        XCTAssertEqual(summary.progress.failed, 1)
+        XCTAssertEqual(attemptCount, 2)
+    }
+
+    func testWriteFailsTwiceThenMarksItemFailedOnce() async {
+        let asset = MediaAsset(id: "asset-write-fail", filename: "IMG_write_fail.jpg", captureDate: Date(), kind: .photo)
+        let metadata = [asset.id: ExistingMetadataState(caption: nil, keywords: [], ownershipTag: nil, isExternal: false)]
+        let writer = MockPhotosWriter(
+            assets: [asset],
+            metadataByID: metadata,
+            previewDataByID: [asset.id: Data(asset.id.utf8)],
+            writeFailuresByID: [asset.id: 2]
+        )
+        let coordinator = makeRetryingCoordinator(
+            photosWriter: writer,
+            analyzer: MockAnalyzer(result: GeneratedMetadata(caption: "caption", keywords: ["retry"]))
+        )
+
+        let summary = await coordinator.run(
+            options: defaultRunOptions(),
+            capabilities: defaultCapabilities(),
+            callbacks: RunCallbacks()
+        )
+        let writeAttemptCount = await writer.writeAttemptCountValue(for: asset.id)
+
+        XCTAssertEqual(summary.progress.changed, 0)
+        XCTAssertEqual(summary.progress.failed, 1)
+        XCTAssertEqual(writeAttemptCount, 2)
+    }
+
+    func testBatchWriteRetriesOnlyFailedItems() async {
+        let assets = [
+            MediaAsset(id: "asset-batch-0", filename: "IMG_batch_0.jpg", captureDate: Date(), kind: .photo),
+            MediaAsset(id: "asset-batch-1", filename: "IMG_batch_1.jpg", captureDate: Date(), kind: .photo)
+        ]
+        let metadata = Dictionary(uniqueKeysWithValues: assets.map { asset in
+            (asset.id, ExistingMetadataState(caption: nil, keywords: [], ownershipTag: nil, isExternal: false))
+        })
+        let previewData = Dictionary(uniqueKeysWithValues: assets.map { asset in
+            (asset.id, Data(asset.id.utf8))
+        })
+        let writer = MockPhotosWriter(
+            assets: assets,
+            metadataByID: metadata,
+            previewDataByID: previewData,
+            writeFailuresByID: [assets[0].id: 1]
+        )
+        let coordinator = makeRetryingCoordinator(
+            photosWriter: writer,
+            analyzer: MockAnalyzer(result: GeneratedMetadata(caption: "caption", keywords: ["retry"])),
+            writeBatchSize: 16
+        )
+
+        let summary = await coordinator.run(
+            options: defaultRunOptions(),
+            capabilities: defaultCapabilities(),
+            callbacks: RunCallbacks()
+        )
+        let batchWriteSizes = await writer.batchWriteSizesValue()
+        let firstAssetWriteAttemptCount = await writer.writeAttemptCountValue(for: assets[0].id)
+        let secondAssetWriteAttemptCount = await writer.writeAttemptCountValue(for: assets[1].id)
+        let writeOrder = await writer.writeOrderValue()
+
+        XCTAssertEqual(summary.progress.changed, 2)
+        XCTAssertEqual(summary.progress.failed, 0)
+        XCTAssertEqual(batchWriteSizes.reduce(0, +), assets.count)
+        XCTAssertTrue(batchWriteSizes.allSatisfy { $0 <= 16 })
+        XCTAssertEqual(firstAssetWriteAttemptCount, 2)
+        XCTAssertEqual(secondAssetWriteAttemptCount, 1)
+        XCTAssertEqual(writeOrder, assets.map(\.id))
+    }
+
+    func testCancellationDuringRetryDelayStopsFurtherRetryWork() async {
+        let asset = MediaAsset(id: "asset-cancel-retry", filename: "IMG_cancel.jpg", captureDate: Date(), kind: .photo)
+        let metadata = [asset.id: ExistingMetadataState(caption: nil, keywords: [], ownershipTag: nil, isExternal: false)]
+        let statusRecorder = StatusRecorder()
+        let writer = MockPhotosWriter(
+            assets: [asset],
+            metadataByID: metadata,
+            exportFailuresByID: [asset.id: 1]
+        )
+        let coordinator = makeRetryingCoordinator(
+            photosWriter: writer,
+            analyzer: MockAnalyzer(result: GeneratedMetadata(caption: "caption", keywords: ["retry"])),
+            stageRetryDelaySeconds: 0.2
+        )
+
+        let runTask = Task {
+            await coordinator.run(
+                options: defaultRunOptions(),
+                capabilities: defaultCapabilities(),
+                callbacks: RunCallbacks(
+                    onStatusChanged: { status in
+                        statusRecorder.record(status: status)
+                    }
+                )
+            )
+        }
+
+        while !statusRecorder.values().contains(where: { $0.contains("Retrying asset acquisition") }) {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        coordinator.cancel()
+
+        let summary = await runTask.value
+        let exportAttemptCount = await writer.exportAttemptCountValue(for: asset.id)
+        XCTAssertEqual(exportAttemptCount, 1)
+        XCTAssertEqual(summary.progress.changed, 0)
+        XCTAssertEqual(summary.progress.failed, 1)
+    }
+
     func testTraversalOrderOldestToNewestUsesCaptureDate() async {
         let assets = [
             MediaAsset(id: "asset-c", filename: "IMG_c.jpg", captureDate: Date(timeIntervalSince1970: 300), kind: .photo),
@@ -2312,6 +2580,21 @@ final class RunCoordinatorTests: XCTestCase {
         )
     }
 
+    private func makeRetryingCoordinator(
+        photosWriter: PhotosWriter,
+        analyzer: Analyzer,
+        writeBatchSize: Int = 16,
+        stageRetryDelaySeconds: TimeInterval = 0
+    ) -> RunCoordinator {
+        RunCoordinator(
+            photosWriter: photosWriter,
+            analyzer: analyzer,
+            writeBatchSize: writeBatchSize,
+            stageRetryDelaySeconds: stageRetryDelaySeconds,
+            previewRenderer: DefaultPreviewRenderer(videoFrameSampler: VideoFrameSampler())
+        )
+    }
+
     private func makeAssets(count: Int) -> [MediaAsset] {
         (0..<count).map { index in
             MediaAsset(
@@ -2700,6 +2983,8 @@ private actor MockPhotosWriter: PhotosWriter, PhotosProcessMonitoring, PhotosLif
     private let listedAlbums: [AlbumSummary]
     private let albumAssetIDSequenceByID: [String: [[String]]]
     private let removeWrittenAssetsFromAllAlbums: Bool
+    private var exportFailuresRemainingByID: [String: Int]
+    private var writeFailuresRemainingByID: [String: Int]
     private var metadataByID: [String: ExistingMetadataState]
     private var albumAssetIDsByID: [String: [String]]
     private var directEnumerateTimeoutsRemainingByAlbumID: [String: Int]
@@ -2713,6 +2998,8 @@ private actor MockPhotosWriter: PhotosWriter, PhotosProcessMonitoring, PhotosLif
     private(set) var previewRequests: [String] = []
     private(set) var previewRequestedPixelSizes: [Int] = []
     private(set) var exportRequests: [String] = []
+    private(set) var exportAttemptCounts: [String: Int] = [:]
+    private(set) var writeAttemptCounts: [String: Int] = [:]
     private(set) var batchReadSizes: [Int] = []
     private(set) var batchWriteSizes: [Int] = []
     private(set) var enumeratePageCallCount = 0
@@ -2732,6 +3019,8 @@ private actor MockPhotosWriter: PhotosWriter, PhotosProcessMonitoring, PhotosLif
         enumerateTimeoutWhenLimitExceeds: Int? = nil,
         exportDelayNanoseconds: UInt64 = 0,
         exportDelayByID: [String: UInt64] = [:],
+        exportFailuresByID: [String: Int] = [:],
+        writeFailuresByID: [String: Int] = [:],
         quitResults: [Bool] = [],
         waitForReadyResults: [Bool] = [],
         listedAlbums: [AlbumSummary] = [],
@@ -2749,6 +3038,8 @@ private actor MockPhotosWriter: PhotosWriter, PhotosProcessMonitoring, PhotosLif
         self.enumerateTimeoutWhenLimitExceeds = enumerateTimeoutWhenLimitExceeds
         self.exportDelayNanoseconds = exportDelayNanoseconds
         self.exportDelayByID = exportDelayByID
+        self.exportFailuresRemainingByID = exportFailuresByID
+        self.writeFailuresRemainingByID = writeFailuresByID
         self.quitResults = quitResults
         self.waitForReadyResults = waitForReadyResults
         self.listedAlbums = listedAlbums
@@ -2895,6 +3186,16 @@ private actor MockPhotosWriter: PhotosWriter, PhotosProcessMonitoring, PhotosLif
         if firstWriteAfterEnumeratePageCount == nil {
             firstWriteAfterEnumeratePageCount = enumeratePageCallCount
         }
+        writeAttemptCounts[id, default: 0] += 1
+        if let remainingFailures = writeFailuresRemainingByID[id], remainingFailures > 0 {
+            writeFailuresRemainingByID[id] = remainingFailures - 1
+            await timelineRecorder?.record("write-end:\(id)")
+            throw NSError(
+                domain: "MockPhotosWriter",
+                code: 2,
+                userInfo: [NSLocalizedDescriptionKey: "intentional write failure"]
+            )
+        }
         writes[id] = (caption: caption, keywords: keywords)
         writeOrder.append(id)
         if removeWrittenAssetsFromAllAlbums {
@@ -2936,10 +3237,20 @@ private actor MockPhotosWriter: PhotosWriter, PhotosProcessMonitoring, PhotosLif
 
     func exportAssetToTemporaryURL(id: String, kind _: MediaKind) async throws -> URL {
         exportRequests.append(id)
+        exportAttemptCounts[id, default: 0] += 1
         await timelineRecorder?.record("export-start:\(id)")
         let delayNanoseconds = exportDelayByID[id] ?? exportDelayNanoseconds
         if delayNanoseconds > 0 {
             try await Task.sleep(nanoseconds: delayNanoseconds)
+        }
+        if let remainingFailures = exportFailuresRemainingByID[id], remainingFailures > 0 {
+            exportFailuresRemainingByID[id] = remainingFailures - 1
+            await timelineRecorder?.record("export-end:\(id)")
+            throw NSError(
+                domain: "MockPhotosWriter",
+                code: 3,
+                userInfo: [NSLocalizedDescriptionKey: "intentional export failure"]
+            )
         }
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("pdc-tests", isDirectory: true)
@@ -3015,12 +3326,20 @@ private actor MockPhotosWriter: PhotosWriter, PhotosProcessMonitoring, PhotosLif
         exportRequests
     }
 
+    func exportAttemptCountValue(for id: String) async -> Int {
+        exportAttemptCounts[id, default: 0]
+    }
+
     func previewRequestedPixelSizesValue() async -> [Int] {
         previewRequestedPixelSizes
     }
 
     func writeOrderValue() async -> [String] {
         writeOrder
+    }
+
+    func writeAttemptCountValue(for id: String) async -> Int {
+        writeAttemptCounts[id, default: 0]
     }
 
     func batchReadSizesValue() async -> [Int] {
@@ -3098,6 +3417,55 @@ private struct ConditionalFailAnalyzer: Analyzer {
             throw NSError(domain: "test", code: 1, userInfo: [NSLocalizedDescriptionKey: "intentional failure"])
         }
         return successResult
+    }
+}
+
+private enum MockAnalyzerOutcome: Sendable {
+    case success(GeneratedMetadata)
+    case invalidJSON
+    case failure(String)
+}
+
+private actor RetryingAnalyzerState {
+    private var outcomesByAssetID: [String: [MockAnalyzerOutcome]]
+    private var attemptCounts: [String: Int] = [:]
+
+    init(outcomesByAssetID: [String: [MockAnalyzerOutcome]]) {
+        self.outcomesByAssetID = outcomesByAssetID
+    }
+
+    func resolve(assetID: String, fallback: GeneratedMetadata) throws -> GeneratedMetadata {
+        attemptCounts[assetID, default: 0] += 1
+        var outcomes = outcomesByAssetID[assetID] ?? []
+        let nextOutcome: MockAnalyzerOutcome
+        if outcomes.isEmpty {
+            nextOutcome = .success(fallback)
+        } else {
+            nextOutcome = outcomes.removeFirst()
+        }
+        outcomesByAssetID[assetID] = outcomes
+
+        switch nextOutcome {
+        case let .success(metadata):
+            return metadata
+        case .invalidJSON:
+            throw QwenAnalyzerError.invalidResponse("Qwen output was not valid JSON.")
+        case let .failure(message):
+            throw NSError(domain: "RetryingAnalyzer", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
+        }
+    }
+
+    func attemptCountValue(for assetID: String) -> Int {
+        attemptCounts[assetID, default: 0]
+    }
+}
+
+private struct RetryingAnalyzer: Analyzer {
+    let state: RetryingAnalyzerState
+    let fallback: GeneratedMetadata
+
+    func analyze(input: AnalysisInput, kind _: MediaKind) async throws -> GeneratedMetadata {
+        try await state.resolve(assetID: analysisInputAssetID(input), fallback: fallback)
     }
 }
 

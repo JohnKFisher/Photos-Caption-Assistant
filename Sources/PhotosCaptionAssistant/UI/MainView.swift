@@ -310,8 +310,6 @@ final class AppViewModel: ObservableObject {
         }
     }
 
-    private static let previewDirectoryName = AppStoragePaths.previewTempDirectoryName
-
     @Published var capabilities = AppCapabilities(
         photosAutomationAvailable: false,
         ollamaAvailability: .installedNotRunning,
@@ -1299,7 +1297,8 @@ final class AppViewModel: ObservableObject {
     }
 
     private static func cleanupPreviewFile(at fileURL: URL) {
-        guard fileURL.deletingLastPathComponent().lastPathComponent == previewDirectoryName else {
+        let previewRoot = AppStoragePaths.make().previewTempRoot
+        guard AppStoragePaths.contains(fileURL, within: previewRoot) else {
             return
         }
         try? FileManager.default.removeItem(at: fileURL)
@@ -1437,7 +1436,7 @@ final class AppViewModel: ObservableObject {
             return "Ollama is running, but qwen2.5vl:7b is not installed yet. The app will ask before downloading it."
         case .ready:
             return "Ollama and Qwen 2.5VL 7B are ready."
-        case let .failure(reason):
+        case let .failure(reason, _, _):
             return reason
         }
     }
@@ -1468,7 +1467,7 @@ final class AppViewModel: ObservableObject {
             guard confirmed else { return false }
             openOllamaDownloadPage()
             return false
-        case let .failure(reason):
+        case let .failure(reason, _, _):
             showMessage(title: "Ollama Unavailable", message: reason)
             return false
         case .installedNotRunning, .installedRunningModelMissing, .ready:

@@ -490,6 +490,15 @@ actor PhotoLibraryScanBenchmarkRunner {
 
     private func cleanupTemporaryArtifact(at url: URL) {
         let root = url.deletingLastPathComponent()
+        let storagePaths = AppStoragePaths.make(fileManager: fileManager)
+        let allowedRoots = [
+            storagePaths.photoExportTempRoot,
+            storagePaths.videoExportTempRoot,
+            storagePaths.photoPreviewTempRoot
+        ]
+        guard allowedRoots.contains(where: { AppStoragePaths.contains(root, within: $0) }) else {
+            return
+        }
         try? fileManager.removeItem(at: root)
     }
 

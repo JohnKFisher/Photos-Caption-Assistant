@@ -27,6 +27,13 @@ public struct OllamaPreparationResult: Sendable, Equatable {
 }
 
 public actor OllamaManager: OllamaAvailabilityProbing {
+    private enum ProbeFailure: Error {
+        case httpStatus(Int)
+        case invalidResponse
+        case network(URLError)
+        case other(Error)
+    }
+
     private let modelName: String
     private let tagsURL: URL
     private let generateURL: URL
@@ -62,13 +69,51 @@ public actor OllamaManager: OllamaAvailabilityProbing {
             return .notInstalled
         }
 
-        let serviceReachable = await isServiceReachable()
-        let modelAvailable = serviceReachable ? await isModelAvailable() : false
-        return .detected(
-            isInstalled: executableInstalled,
-            serviceReachable: serviceReachable,
-            modelAvailable: modelAvailable
-        )
+        switch await fetchTagsForProbe(timeout: 2) {
+        case let .success(tags):
+            let modelAvailable = tags.models.contains { model in
+                model.name.lowercased().hasPrefix(modelName.lowercased())
+            }
+            return .detected(
+                isInstalled: executableInstalled,
+                serviceReachable: true,
+                modelAvailable: modelAvailable
+            )
+        case let .failure(error):
+            switch error {
+            case let .network(urlError):
+                if urlError.code == .cannotConnectToHost
+                    || urlError.code == .cannotFindHost
+                    || urlError.code == .networkConnectionLost
+                    || urlError.code == .timedOut
+                {
+                    return .installedNotRunning
+                }
+                return .failure(
+                    reason: "Ollama is installed, but its local service check failed: \(urlError.localizedDescription)",
+                    isInstalled: true,
+                    serviceReachable: false
+                )
+            case let .httpStatus(statusCode):
+                return .failure(
+                    reason: "Ollama responded from localhost:11434 with HTTP \(statusCode).",
+                    isInstalled: true,
+                    serviceReachable: true
+                )
+            case .invalidResponse:
+                return .failure(
+                    reason: "Ollama responded from localhost:11434, but its model list could not be read.",
+                    isInstalled: true,
+                    serviceReachable: true
+                )
+            case let .other(error):
+                return .failure(
+                    reason: "Ollama availability check failed: \(error.localizedDescription)",
+                    isInstalled: true,
+                    serviceReachable: false
+                )
+            }
+        }
     }
 
     public func prepareForRun(
@@ -91,14 +136,14 @@ public actor OllamaManager: OllamaAvailabilityProbing {
             } catch {
                 return OllamaPreparationResult(
                     action: .failure,
-                    message: "Unable to start Ollama: \(error.localizedDescription)"
+                    message: "Unable to start the local Ollama service: \(error.localizedDescription)"
                 )
             }
 
             guard await waitForServiceStartup(timeoutSeconds: 20) else {
                 return OllamaPreparationResult(
                     action: .failure,
-                    message: "Ollama service did not become ready on localhost:11434."
+                    message: "Ollama did not become reachable on localhost:11434 within 20 seconds."
                 )
             }
         }
@@ -110,7 +155,7 @@ public actor OllamaManager: OllamaAvailabilityProbing {
 
         return OllamaPreparationResult(
             action: .downloadRequired,
-            message: "\(modelName) is not installed locally yet. The app can download it before the run starts."
+            message: "\(modelName) is not installed locally yet. The app can ask Ollama to download it before the run starts."
         )
     }
 
@@ -134,14 +179,14 @@ public actor OllamaManager: OllamaAvailabilityProbing {
             } catch {
                 return OllamaBootstrapResult(
                     ready: false,
-                    message: "Unable to start Ollama: \(error.localizedDescription)"
+                    message: "Unable to start the local Ollama service: \(error.localizedDescription)"
                 )
             }
 
             guard await waitForServiceStartup(timeoutSeconds: 20) else {
                 return OllamaBootstrapResult(
                     ready: false,
-                    message: "Ollama service did not become ready on localhost:11434."
+                    message: "Ollama did not become reachable on localhost:11434 within 20 seconds."
                 )
             }
         }
@@ -152,7 +197,7 @@ public actor OllamaManager: OllamaAvailabilityProbing {
         } catch {
             return OllamaBootstrapResult(
                 ready: false,
-                message: "Model download failed: \(error.localizedDescription)"
+                message: "The local Ollama model download failed: \(error.localizedDescription)"
             )
         }
 
@@ -168,7 +213,7 @@ public actor OllamaManager: OllamaAvailabilityProbing {
     }
 
     public func isModelAvailable() async -> Bool {
-        guard let tags = try? await fetchTags(timeout: 4) else {
+        guard case let .success(tags) = await fetchTagsForProbe(timeout: 4) else {
             return false
         }
         return tags.models.contains { model in
@@ -177,7 +222,10 @@ public actor OllamaManager: OllamaAvailabilityProbing {
     }
 
     public func isServiceReachable() async -> Bool {
-        (try? await fetchTags(timeout: 2)) != nil
+        if case .success = await fetchTagsForProbe(timeout: 2) {
+            return true
+        }
+        return false
     }
 
     public func ensureModelReady(
@@ -207,6 +255,41 @@ public actor OllamaManager: OllamaAvailabilityProbing {
         }
 
         return try JSONDecoder().decode(OllamaTagsResponse.self, from: data)
+    }
+
+    private func fetchTagsForProbe(timeout: TimeInterval) async -> Result<OllamaTagsResponse, ProbeFailure> {
+        do {
+            return .success(try await fetchTags(timeout: timeout))
+        } catch let error as URLError {
+            return .failure(.network(error))
+        } catch let error as DecodingError {
+            _ = error
+            return .failure(.invalidResponse)
+        } catch let error as OllamaManagerError {
+            switch error {
+            case .serviceUnavailable:
+                return .failure(.invalidResponse)
+            case .ollamaNotInstalled, .modelPullFailed:
+                return .failure(.other(error))
+            }
+        } catch {
+            let nsError = error as NSError
+            if nsError.domain == NSURLErrorDomain {
+                let urlError = URLError.Code(rawValue: nsError.code)
+                return .failure(.network(URLError(urlError)))
+            }
+            if let statusCode = httpStatusCode(from: nsError.localizedDescription) {
+                return .failure(.httpStatus(statusCode))
+            }
+            return .failure(.other(error))
+        }
+    }
+
+    private func httpStatusCode(from message: String) -> Int? {
+        guard let range = message.range(of: #"\b\d{3}\b"#, options: .regularExpression) else {
+            return nil
+        }
+        return Int(message[range])
     }
 
     private func startManagedServeIfNeeded() throws {

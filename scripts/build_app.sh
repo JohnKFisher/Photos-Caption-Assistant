@@ -19,23 +19,6 @@ plist_read() {
   /usr/libexec/PlistBuddy -c "Print :$2" "$1"
 }
 
-plist_set() {
-  /usr/libexec/PlistBuddy -c "Set :$2 $3" "$1"
-}
-
-increment_patch_version() {
-  local version="$1"
-  local major minor patch
-  IFS='.' read -r major minor patch <<<"$version"
-
-  if [[ ! "$major" =~ ^[0-9]+$ || ! "$minor" =~ ^[0-9]+$ || ! "$patch" =~ ^[0-9]+$ ]]; then
-    echo "Version must be in major.minor.patch form: $version" >&2
-    exit 1
-  fi
-
-  echo "$major.$minor.$((patch + 1))"
-}
-
 if [[ ! -f "$INFO_PLIST_SOURCE" ]]; then
   echo "Missing source Info.plist: $INFO_PLIST_SOURCE" >&2
   exit 1
@@ -46,28 +29,23 @@ if [[ ! -f "$PROMPTS_SOURCE_DIR/photoprompt.txt" || ! -f "$PROMPTS_SOURCE_DIR/vi
   exit 1
 fi
 
+if [[ ! -f "$ICON_PATH" ]]; then
+  echo "Missing app icon: $ICON_PATH" >&2
+  exit 1
+fi
+
 CURRENT_VERSION="$(plist_read "$INFO_PLIST_SOURCE" CFBundleShortVersionString)"
 CURRENT_BUILD="$(plist_read "$INFO_PLIST_SOURCE" CFBundleVersion)"
-NEXT_VERSION="$(increment_patch_version "$CURRENT_VERSION")"
 
-MAX_KNOWN_BUILD=0
-if [[ "$CURRENT_BUILD" =~ ^[0-9]+$ ]]; then
-  MAX_KNOWN_BUILD="$CURRENT_BUILD"
+if [[ ! "$CURRENT_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  echo "CFBundleShortVersionString must be in major.minor.patch form: $CURRENT_VERSION" >&2
+  exit 1
 fi
 
-if [[ -f "$APP_BUNDLE/Contents/Info.plist" ]]; then
-  DIST_BUILD="$(plist_read "$APP_BUNDLE/Contents/Info.plist" CFBundleVersion || true)"
-  if [[ "$DIST_BUILD" =~ ^[0-9]+$ && "$DIST_BUILD" -gt "$MAX_KNOWN_BUILD" ]]; then
-    MAX_KNOWN_BUILD="$DIST_BUILD"
-  fi
+if [[ ! "$CURRENT_BUILD" =~ ^[0-9]+$ ]]; then
+  echo "CFBundleVersion must be an integer build number: $CURRENT_BUILD" >&2
+  exit 1
 fi
-
-NEXT_BUILD=$((MAX_KNOWN_BUILD + 1))
-
-plist_set "$INFO_PLIST_SOURCE" CFBundleShortVersionString "$NEXT_VERSION"
-plist_set "$INFO_PLIST_SOURCE" CFBundleVersion "$NEXT_BUILD"
-
-bash "$ROOT_DIR/scripts/generate_app_icon.sh"
 
 swift build -c release --triple "$ARM64_TRIPLE" --package-path "$ROOT_DIR" --product "$EXECUTABLE_NAME"
 swift build -c release --triple "$X86_64_TRIPLE" --package-path "$ROOT_DIR" --product "$EXECUTABLE_NAME"
@@ -120,9 +98,9 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>$NEXT_VERSION</string>
+    <string>$CURRENT_VERSION</string>
     <key>CFBundleVersion</key>
-    <string>$NEXT_BUILD</string>
+    <string>$CURRENT_BUILD</string>
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
     <key>LSMinimumSystemVersion</key>
@@ -142,5 +120,5 @@ codesign --force --deep --sign - "$APP_BUNDLE"
 codesign --verify --deep --strict --verbose=2 "$APP_BUNDLE"
 
 echo "Built: $APP_BUNDLE"
-echo "Version: $NEXT_VERSION ($NEXT_BUILD)"
+echo "Version: $CURRENT_VERSION ($CURRENT_BUILD)"
 echo "Architectures: $UNIVERSAL_ARCHS"

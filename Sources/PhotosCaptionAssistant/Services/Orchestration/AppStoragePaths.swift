@@ -54,4 +54,10 @@ struct AppStoragePaths: Sendable, Equatable {
             photoPreviewTempRoot: temporaryDirectory.appendingPathComponent(photoPreviewTempDirectoryName, isDirectory: true)
         )
     }
+
+    static func contains(_ candidate: URL, within root: URL) -> Bool {
+        let normalizedCandidate = candidate.standardizedFileURL.path
+        let normalizedRoot = root.standardizedFileURL.path
+        return normalizedCandidate == normalizedRoot || normalizedCandidate.hasPrefix(normalizedRoot + "/")
+    }
 }

@@ -226,6 +226,11 @@ struct DataStoragePanelView: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
 
+                Text("Those temporary files stay local to this Mac and may be cleared between runs or after cleanup.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
                 pathRow("Data Folder", storagePaths.applicationSupportDirectory.path)
                 pathRow("Resume State", storagePaths.runResumeStateFile.path)
                 pathRow("Queued Albums Config", storagePaths.captionWorkflowConfigurationFile.path)
@@ -303,7 +308,7 @@ struct DiagnosticsPanelView: View {
                     .font(.footnote)
                     .foregroundStyle(.secondary)
 
-                Text("Use the Diagnostics menu to run the scan benchmark and identity write probe after updating the fields below.")
+                Text("Use the Diagnostics menu to run the scan benchmark and identity write probe after updating the fields below. Reports stay local on this Mac.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

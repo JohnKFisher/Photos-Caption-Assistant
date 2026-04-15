@@ -1,0 +1,98 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - Sources/PhotosCaptionAssistant/Resources/Info.plist
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  release:
+    runs-on: macos-15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Verify package and tests
+        run: |
+          swift build -v
+          swift test -v
+
+      - name: Build packaged app
+        run: ./scripts/build_app.sh
+
+      - name: Build release DMG
+        run: ./scripts/create_dmg.sh
+
+      - name: Read release metadata
+        id: metadata
+        run: |
+          INFO_PLIST="Sources/PhotosCaptionAssistant/Resources/Info.plist"
+          VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$INFO_PLIST")"
+          BUILD="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$INFO_PLIST")"
+          TAG="v$VERSION"
+          RELEASE_NAME="Photos Caption Assistant v$VERSION (build $BUILD)"
+          DMG_PATH="$(find dist -maxdepth 1 -name '*.dmg' -print -quit)"
+
+          if [[ -z "$DMG_PATH" ]]; then
+            echo "Release DMG was not created." >&2
+            exit 1
+          fi
+
+          {
+            echo "version=$VERSION"
+            echo "build=$BUILD"
+            echo "tag=$TAG"
+            echo "release_name=$RELEASE_NAME"
+            echo "dmg_path=$DMG_PATH"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Verify tag safety
+        env:
+          TAG: ${{ steps.metadata.outputs.tag }}
+        run: |
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            EXISTING_SHA="$(git rev-list -n 1 "$TAG")"
+            if [[ "$EXISTING_SHA" != "$GITHUB_SHA" ]]; then
+              echo "Tag $TAG already points at $EXISTING_SHA, not $GITHUB_SHA." >&2
+              exit 1
+            fi
+          fi
+
+      - name: Generate release notes
+        id: notes
+        env:
+          RELEASE_TAG: ${{ steps.metadata.outputs.tag }}
+        run: |
+          NOTES_FILE="$(mktemp)"
+          ./scripts/release_notes.sh "$RELEASE_TAG" > "$NOTES_FILE"
+          echo "notes_file=$NOTES_FILE" >> "$GITHUB_OUTPUT"
+
+      - name: Create or update GitHub release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.metadata.outputs.tag }}
+          RELEASE_NAME: ${{ steps.metadata.outputs.release_name }}
+          NOTES_FILE: ${{ steps.notes.outputs.notes_file }}
+          DMG_PATH: ${{ steps.metadata.outputs.dmg_path }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --title "$RELEASE_NAME" --notes-file "$NOTES_FILE"
+            gh release upload "$TAG" "$DMG_PATH" --clobber
+          else
+            gh release create "$TAG" "$DMG_PATH" \
+              --target "$GITHUB_SHA" \
+              --title "$RELEASE_NAME" \
+              --notes-file "$NOTES_FILE"
+          fi

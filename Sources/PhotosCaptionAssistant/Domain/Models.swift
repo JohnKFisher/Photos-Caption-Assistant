@@ -419,7 +419,7 @@ public enum OllamaAvailability: Sendable, Equatable {
     case installedNotRunning
     case installedRunningModelMissing
     case ready
-    case failure(reason: String)
+    case failure(reason: String, isInstalled: Bool, serviceReachable: Bool)
 
     public static func detected(
         isInstalled: Bool,
@@ -450,8 +450,10 @@ public enum OllamaAvailability: Sendable, Equatable {
 
     public var isInstalled: Bool {
         switch self {
-        case .notInstalled, .failure:
+        case .notInstalled:
             return false
+        case let .failure(_, isInstalled, _):
+            return isInstalled
         case .installedNotRunning, .installedRunningModelMissing, .ready:
             return true
         }
@@ -461,8 +463,10 @@ public enum OllamaAvailability: Sendable, Equatable {
         switch self {
         case .installedRunningModelMissing, .ready:
             return true
-        case .notInstalled, .installedNotRunning, .failure:
+        case .notInstalled, .installedNotRunning:
             return false
+        case let .failure(_, _, serviceReachable):
+            return serviceReachable
         }
     }
 
