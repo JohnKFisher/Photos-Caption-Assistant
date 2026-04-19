@@ -2,13 +2,14 @@ import XCTest
 @testable import PhotosCaptionAssistant
 
 final class AppSettingsTests: XCTestCase {
-    func testAppSettingsLoadConservativeDefaults() {
+    func testAppSettingsLoadProjectDefaults() {
         let defaults = UserDefaults(suiteName: #function)!
         defaults.removePersistentDomain(forName: #function)
 
         let snapshot = AppSettings.load(from: defaults)
 
         XCTAssertEqual(snapshot, .default)
+        XCTAssertTrue(snapshot.defaultAlwaysOverwriteExternalMetadata)
     }
 
     func testAppSettingsLoadStoredValues() {
@@ -29,6 +30,16 @@ final class AppSettingsTests: XCTestCase {
         XCTAssertEqual(snapshot.previewOpenBehavior, .fullScreenOnOpen)
     }
 
+    func testAppSettingsLoadStoredFalseForExternalOverwrite() {
+        let defaults = UserDefaults(suiteName: #function)!
+        defaults.removePersistentDomain(forName: #function)
+        defaults.set(false, forKey: AppSettings.Keys.defaultAlwaysOverwriteExternalMetadata)
+
+        let snapshot = AppSettings.load(from: defaults)
+
+        XCTAssertFalse(snapshot.defaultAlwaysOverwriteExternalMetadata)
+    }
+
     @MainActor
     func testViewModelAppliesStoredDefaultsAndPreviewState() {
         let defaults = UserDefaults(suiteName: #function)!
@@ -43,6 +54,7 @@ final class AppSettingsTests: XCTestCase {
         XCTAssertEqual(viewModel.sourceSelection, .captionWorkflow)
         XCTAssertEqual(viewModel.traversalOrder, .newestToOldest)
         XCTAssertTrue(viewModel.overwriteAppOwnedSameOrNewer)
+        XCTAssertTrue(viewModel.alwaysOverwriteExternalMetadata)
         XCTAssertEqual(viewModel.previewOpenBehavior, .fullScreenOnOpen)
         XCTAssertFalse(viewModel.canOpenPreviewWindow)
 

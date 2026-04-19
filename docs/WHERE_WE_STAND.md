@@ -1,10 +1,10 @@
 # Photos Caption Assistant
 
-Current version/build: 3.6.1 (20)
+Current version/build: 4.6.2 (22)
 Current description logic version: 3.0.0
 
 Current overall status:
-The current source tree builds locally as version 3.6.1 build 20 and now uses a more Mac-native scene model: a toolbar-first hybrid workbench, dedicated Settings and Preview windows, stronger menu/keyboard access, more Finder-style reveal actions, and the existing deterministic version-triggered GitHub release flow. The core local captioning workflow is working, but this is still a personal hobby app built around Apple Photos automation rather than a polished public-distribution product.
+The current source tree builds locally as version 4.6.2 build 22 and now uses a more Mac-native scene model: a toolbar-first hybrid workbench, dedicated Settings and Preview windows, stronger menu/keyboard access, more Finder-style reveal actions, and the existing deterministic version-triggered GitHub release flow. The core local captioning workflow is working, but this is still a personal hobby app built around Apple Photos automation rather than a polished public-distribution product.
 
 What is working now:
 - Local photo and video analysis through Ollama with the `qwen2.5vl:7b` model.
@@ -12,6 +12,7 @@ What is working now:
 - Library, album, picker, and Queued Albums runs.
 - Visible run-summary/preflight UI showing source scope, exact count where practical, overwrite behavior, model status, and local Ollama service status.
 - The main screen now uses a resizable Mac workbench layout with a primary setup pane, an optional summary pane, and toolbar-first run actions instead of the older bottom action tray.
+- The main workbench window now opens at a shorter display-clamped size so it stays within the visible screen instead of stretching under the Dock.
 - A dedicated Settings window now owns durable app-wide defaults for source mode, traversal order, overwrite defaults, and preview-window behavior.
 - A dedicated Preview window now owns completed-item playback, and it can either open in a normal window or jump straight into full screen based on the saved preference.
 - Run actions are now available from the toolbar, the `Run` menu, and keyboard shortcuts in addition to the main workbench UI.
@@ -22,7 +23,7 @@ What is working now:
 - Aspect-fit immersive media now uses a restrained ambient matte instead of a flat black letterbox, and empty immersive state copy is centered until a completed preview exists.
 - Capture dates now come across from AppleScript as stable local wall-clock timestamps so immersive timestamps match the Mac's local time instead of drifting through the earlier pseudo-epoch conversion.
 - Data & Storage and Diagnostics remain separate utility windows, now with more specific Finder reveal actions for app-owned files and recent diagnostics outputs.
-- Safer startup defaults remain conservative: `Album` is selected by default, and no-prompt overwrite of non-app metadata is off by default unless explicitly changed in Settings.
+- Startup defaults now select `Album` and keep no-prompt overwrite of non-app metadata enabled unless explicitly changed in Settings.
 - Whole-library runs require explicit confirmation before write work starts.
 - Runs that overwrite non-app metadata without per-item prompts require explicit confirmation.
 - Core per-item stages now retry once automatically after a short pause when asset acquisition, caption generation/JSON decode, or Photos metadata write fails transiently.

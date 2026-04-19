@@ -31,3 +31,7 @@ Rationale: The app’s core job is still a run-centric setup and monitoring work
 ## 2026-04-15 — Use a dedicated Preview window and Settings scene for macOS defaults
 Status: approved
 Rationale: Completed-item preview now lives in its own macOS window, with optional full-screen behavior, and durable app-wide defaults now live in a proper Settings scene. This keeps the main workbench focused on the current run while matching standard Mac window and menu expectations.
+
+## 2026-04-19 — Clamp the main workbench to the visible display and enable non-app overwrite by default
+Status: approved
+Rationale: The main window should open at a shorter Dock-respecting size on real Macs, and this personal workflow now prefers promptless overwrite of non-app metadata as the startup default while keeping the existing run-start confirmation.

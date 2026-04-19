@@ -2,9 +2,9 @@ import XCTest
 @testable import PhotosCaptionAssistant
 
 final class RunPreflightTests: XCTestCase {
-    func testRunSetupDefaultsAreConservative() {
+    func testRunSetupDefaultsMatchProjectDefaults() {
         XCTAssertEqual(RunSetupDefaults.sourceSelection, .album)
-        XCTAssertFalse(RunSetupDefaults.alwaysOverwriteExternalMetadata)
+        XCTAssertTrue(RunSetupDefaults.alwaysOverwriteExternalMetadata)
     }
 
     func testWholeLibraryPreflightRequiresConfirmationForLibraryScopeAndMissingModel() {

@@ -36,7 +36,7 @@ struct AppSettingsSnapshot: Equatable {
         defaultSourceSelection: .album,
         defaultTraversalOrder: .photosOrderFast,
         defaultOverwriteAppOwnedSameOrNewer: false,
-        defaultAlwaysOverwriteExternalMetadata: false,
+        defaultAlwaysOverwriteExternalMetadata: true,
         previewOpenBehavior: .windowed
     )
 }
