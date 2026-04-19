@@ -1,9 +1,9 @@
 import SwiftUI
 
-private enum MainWorkbenchWindowLayout {
+enum MainWorkbenchWindowLayout {
     static let preferredSize = CGSize(width: 1280, height: 760)
     static let idealSize = CGSize(width: 1400, height: 820)
-    private static let minimumSize = CGSize(width: 1040, height: 700)
+    static let minimumSize = CGSize(width: 1040, height: 700)
     private static let horizontalInset: CGFloat = 48
     private static let verticalInset: CGFloat = 72
 
@@ -13,6 +13,17 @@ private enum MainWorkbenchWindowLayout {
         let width = min(max(minimumSize.width, min(preferredSize.width, maxWidth)), visibleRect.width)
         let height = min(max(minimumSize.height, min(preferredSize.height, maxHeight)), visibleRect.height)
         return CGSize(width: width, height: height)
+    }
+
+    static func fittedFrame(for frame: CGRect, in visibleRect: CGRect) -> CGRect {
+        let size = fittedSize(for: frame.size, in: visibleRect)
+        let maxX = max(visibleRect.maxX - size.width, visibleRect.minX)
+        let maxY = max(visibleRect.maxY - size.height, visibleRect.minY)
+        let origin = CGPoint(
+            x: min(max(frame.origin.x, visibleRect.minX), maxX),
+            y: min(max(frame.origin.y, visibleRect.minY), maxY)
+        )
+        return CGRect(origin: origin, size: size)
     }
 }
 

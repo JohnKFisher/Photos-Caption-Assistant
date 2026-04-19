@@ -2032,6 +2032,8 @@ struct MainView: View {
     @ObservedObject var viewModel: AppViewModel
     @Environment(\.openWindow) private var openWindow
     @SceneStorage("main.summaryPaneVisible") private var showsSummaryPane = true
+    @State private var window: NSWindow?
+    @State private var hasScheduledWindowClamp = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -2137,6 +2139,15 @@ struct MainView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(mainBackground.ignoresSafeArea())
+        .background(
+            WindowReferenceReader { resolvedWindow in
+                if window !== resolvedWindow {
+                    window = resolvedWindow
+                    hasScheduledWindowClamp = false
+                }
+                scheduleMainWindowClampIfNeeded()
+            }
+        )
         .toolbar {
             ToolbarItemGroup(placement: .automatic) {
                 Button("Reload Setup") {
@@ -2233,6 +2244,41 @@ struct MainView: View {
                     endPoint: .bottomTrailing
                 )
             )
+    }
+
+    private func scheduleMainWindowClampIfNeeded() {
+        guard let window else { return }
+        guard !hasScheduledWindowClamp else {
+            clampMainWindowFrame(window)
+            return
+        }
+
+        hasScheduledWindowClamp = true
+        clampMainWindowFrame(window)
+
+        DispatchQueue.main.async {
+            clampMainWindowFrame(window)
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+            clampMainWindowFrame(window)
+        }
+    }
+
+    private func clampMainWindowFrame(_ window: NSWindow) {
+        if window.minSize != MainWorkbenchWindowLayout.minimumSize {
+            window.minSize = MainWorkbenchWindowLayout.minimumSize
+        }
+
+        guard let visibleFrame = window.screen?.visibleFrame ?? NSScreen.main?.visibleFrame
+        else {
+            return
+        }
+
+        let fittedFrame = MainWorkbenchWindowLayout.fittedFrame(for: window.frame, in: visibleFrame)
+        guard fittedFrame != window.frame else { return }
+
+        window.setFrame(fittedFrame, display: true, animate: false)
     }
 
     private var statusOverview: some View {
