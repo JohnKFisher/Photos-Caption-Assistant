@@ -1,10 +1,10 @@
 # Photos Caption Assistant
 
-Current version/build: 3.6.0 (19)
+Current version/build: 3.6.1 (20)
 Current description logic version: 3.0.0
 
 Current overall status:
-The current source tree builds locally as version 3.6.0 build 19 and now uses a more Mac-native scene model: a toolbar-first hybrid workbench, dedicated Settings and Preview windows, stronger menu/keyboard access, more Finder-style reveal actions, and the existing deterministic version-triggered GitHub release flow. The core local captioning workflow is working, but this is still a personal hobby app built around Apple Photos automation rather than a polished public-distribution product.
+The current source tree builds locally as version 3.6.1 build 20 and now uses a more Mac-native scene model: a toolbar-first hybrid workbench, dedicated Settings and Preview windows, stronger menu/keyboard access, more Finder-style reveal actions, and the existing deterministic version-triggered GitHub release flow. The core local captioning workflow is working, but this is still a personal hobby app built around Apple Photos automation rather than a polished public-distribution product.
 
 What is working now:
 - Local photo and video analysis through Ollama with the `qwen2.5vl:7b` model.

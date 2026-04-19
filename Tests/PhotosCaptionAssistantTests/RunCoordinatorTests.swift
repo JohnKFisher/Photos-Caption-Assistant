@@ -1797,14 +1797,14 @@ final class RunCoordinatorTests: XCTestCase {
             metadataByID: metadata,
             exportDelayByID: [
                 "asset-0": 10_000_000,
-                "asset-1": 150_000_000
+                "asset-1": 50_000_000
             ],
             timelineRecorder: timeline
         )
         let analyzerState = PreparedOverlapAnalyzerState(
             result: GeneratedMetadata(caption: "caption", keywords: ["k1"]),
             preparationDelayNanoseconds: 60_000_000,
-            analysisDelayNanoseconds: 180_000_000,
+            analysisDelayNanoseconds: 300_000_000,
             timelineRecorder: timeline
         )
         let coordinator = RunCoordinator(
