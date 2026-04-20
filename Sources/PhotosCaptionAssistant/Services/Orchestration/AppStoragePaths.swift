@@ -8,6 +8,7 @@ struct AppStoragePaths: Sendable, Equatable {
     static let photoExportTempDirectoryName = "PhotosCaptionAssistantExports"
     static let videoExportTempDirectoryName = "PhotosCaptionAssistantVideoExports"
     static let photoPreviewTempDirectoryName = "PhotosCaptionAssistantPreviews"
+    static let qwenResponseDiagnosticsTempDirectoryName = "PhotosCaptionAssistantQwenDiagnostics"
 
     let applicationSupportDirectory: URL
     let legacyApplicationSupportDirectory: URL
@@ -20,6 +21,7 @@ struct AppStoragePaths: Sendable, Equatable {
     let photoExportTempRoot: URL
     let videoExportTempRoot: URL
     let photoPreviewTempRoot: URL
+    let qwenResponseDiagnosticsTempRoot: URL
 
     static func make(
         fileManager: FileManager = .default,
@@ -51,7 +53,11 @@ struct AppStoragePaths: Sendable, Equatable {
             previewTempRoot: temporaryDirectory.appendingPathComponent(previewTempDirectoryName, isDirectory: true),
             photoExportTempRoot: temporaryDirectory.appendingPathComponent(photoExportTempDirectoryName, isDirectory: true),
             videoExportTempRoot: temporaryDirectory.appendingPathComponent(videoExportTempDirectoryName, isDirectory: true),
-            photoPreviewTempRoot: temporaryDirectory.appendingPathComponent(photoPreviewTempDirectoryName, isDirectory: true)
+            photoPreviewTempRoot: temporaryDirectory.appendingPathComponent(photoPreviewTempDirectoryName, isDirectory: true),
+            qwenResponseDiagnosticsTempRoot: temporaryDirectory.appendingPathComponent(
+                qwenResponseDiagnosticsTempDirectoryName,
+                isDirectory: true
+            )
         )
     }
 

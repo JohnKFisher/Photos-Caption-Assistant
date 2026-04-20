@@ -2,6 +2,13 @@ import AppKit
 import CoreGraphics
 import Foundation
 
+private struct InvalidQwenResponseDiagnostic: Encodable {
+    let capturedAt: String
+    let model: String
+    let reason: String
+    let rawResponse: String
+}
+
 private enum PromptCatalog {
     static let photoPrompt = loadRequiredPrompt(named: "photoprompt.txt")
     static let videoPrompt = loadRequiredPrompt(named: "videoprompt.txt")
@@ -44,6 +51,7 @@ public struct QwenVisionLanguageAnalyzer: PreparedInputAnalyzer {
     private let requestRetryCount: Int
     private let maxImageDimension: CGFloat
     private let jpegCompression: CGFloat
+    private let diagnosticsRootURL: URL
     private let keepAliveDuration = "30m"
     private let generationOptions: [String: Double] = [
         "temperature": 0.2,
@@ -62,7 +70,8 @@ public struct QwenVisionLanguageAnalyzer: PreparedInputAnalyzer {
         requestTimeoutSeconds: TimeInterval = 420,
         requestRetryCount: Int = 0,
         maxImageDimension: CGFloat = 1024,
-        jpegCompression: CGFloat = 0.82
+        jpegCompression: CGFloat = 0.82,
+        diagnosticsRootURL: URL? = nil
     ) {
         self.frameSampler = frameSampler
         self.endpointURL = endpointURL
@@ -71,6 +80,7 @@ public struct QwenVisionLanguageAnalyzer: PreparedInputAnalyzer {
         self.requestRetryCount = max(0, requestRetryCount)
         self.maxImageDimension = max(512, maxImageDimension)
         self.jpegCompression = min(max(jpegCompression, 0.5), 0.95)
+        self.diagnosticsRootURL = diagnosticsRootURL ?? AppStoragePaths.make().qwenResponseDiagnosticsTempRoot
     }
 
     public func analyze(input: AnalysisInput, kind: MediaKind) async throws -> GeneratedMetadata {
@@ -107,7 +117,11 @@ public struct QwenVisionLanguageAnalyzer: PreparedInputAnalyzer {
             prompt: preparedPayload.prompt,
             images: preparedPayload.images
         )
-        return try decodeGeneratedMetadata(from: generatedText)
+        do {
+            return try decodeGeneratedMetadata(from: generatedText)
+        } catch let error as QwenAnalyzerError {
+            throw enrichInvalidResponseError(error, rawResponse: generatedText)
+        }
     }
 
     private func request(prompt: String, images: [Data]) async throws -> String {
@@ -184,7 +198,7 @@ public struct QwenVisionLanguageAnalyzer: PreparedInputAnalyzer {
         }
     }
 
-    private func decodeGeneratedMetadata(from text: String) throws -> GeneratedMetadata {
+    func decodeGeneratedMetadata(from text: String) throws -> GeneratedMetadata {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         let decoded: QwenOutput
 
@@ -192,9 +206,7 @@ public struct QwenVisionLanguageAnalyzer: PreparedInputAnalyzer {
            let direct = try? JSONDecoder().decode(QwenOutput.self, from: directData)
         {
             decoded = direct
-        } else if let jsonString = extractJSONObject(from: trimmed),
-                  let jsonData = jsonString.data(using: .utf8),
-                  let parsed = try? JSONDecoder().decode(QwenOutput.self, from: jsonData)
+        } else if let parsed = parseQwenOutputLoosely(from: trimmed)
         {
             decoded = parsed
         } else {
@@ -229,12 +241,200 @@ public struct QwenVisionLanguageAnalyzer: PreparedInputAnalyzer {
         )
     }
 
+    func enrichInvalidResponseError(_ error: QwenAnalyzerError, rawResponse: String) -> QwenAnalyzerError {
+        guard case let .invalidResponse(message) = error else {
+            return error
+        }
+
+        guard let diagnosticURL = saveInvalidResponseDiagnostic(rawResponse: rawResponse, reason: message) else {
+            return error
+        }
+
+        return .invalidResponse("\(message) Saved raw response to \(diagnosticURL.path).")
+    }
+
+    private func parseQwenOutputLoosely(from text: String) -> QwenOutput? {
+        for candidate in jsonCandidates(from: text) {
+            if let data = candidate.data(using: .utf8),
+               let parsed = try? JSONDecoder().decode(QwenOutput.self, from: data)
+            {
+                return parsed
+            }
+        }
+        return nil
+    }
+
     private func extractJSONObject(from text: String) -> String? {
         guard let start = text.firstIndex(of: "{"), let end = text.lastIndex(of: "}") else {
             return nil
         }
         guard start <= end else { return nil }
         return String(text[start...end])
+    }
+
+    private func jsonCandidates(from text: String) -> [String] {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let extracted = extractJSONObject(from: trimmed)
+        let baseCandidates = [trimmed, extracted].compactMap { $0 }.filter { !$0.isEmpty }
+
+        var candidates: [String] = []
+        var seen = Set<String>()
+
+        for base in baseCandidates {
+            let normalized = normalizedJSONCandidate(base)
+            if seen.insert(base).inserted {
+                candidates.append(base)
+            }
+            if normalized != base, seen.insert(normalized).inserted {
+                candidates.append(normalized)
+            }
+        }
+
+        return candidates
+    }
+
+    private func normalizedJSONCandidate(_ text: String) -> String {
+        let scalars = text.unicodeScalars.filter { scalar in
+            switch scalar.value {
+            case 0x09, 0x0A, 0x0D:
+                return true
+            case 0x20...0x10FFFF:
+                return true
+            default:
+                return false
+            }
+        }
+
+        var normalized = String(String.UnicodeScalarView(scalars))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "\u{FEFF}", with: "")
+            .replacingOccurrences(of: "\u{201C}", with: "\"")
+            .replacingOccurrences(of: "\u{201D}", with: "\"")
+            .replacingOccurrences(of: "\u{2018}", with: "'")
+            .replacingOccurrences(of: "\u{2019}", with: "'")
+
+        normalized = removingTrailingCommas(from: normalized)
+        return normalized
+    }
+
+    private func removingTrailingCommas(from text: String) -> String {
+        let characters = Array(text)
+        var result = ""
+        var index = 0
+        var insideString = false
+        var isEscaped = false
+
+        while index < characters.count {
+            let character = characters[index]
+            if insideString {
+                result.append(character)
+                if isEscaped {
+                    isEscaped = false
+                } else if character == "\\" {
+                    isEscaped = true
+                } else if character == "\"" {
+                    insideString = false
+                }
+                index += 1
+                continue
+            }
+
+            if character == "\"" {
+                insideString = true
+                result.append(character)
+                index += 1
+                continue
+            }
+
+            if character == "," {
+                var lookaheadIndex = index + 1
+                while lookaheadIndex < characters.count, characters[lookaheadIndex].isWhitespace {
+                    lookaheadIndex += 1
+                }
+
+                if lookaheadIndex < characters.count,
+                   characters[lookaheadIndex] == "}" || characters[lookaheadIndex] == "]"
+                {
+                    while index + 1 < lookaheadIndex {
+                        index += 1
+                        result.append(characters[index])
+                    }
+                    index = lookaheadIndex
+                    continue
+                }
+            }
+
+            result.append(character)
+            index += 1
+        }
+
+        return result
+    }
+
+    private func saveInvalidResponseDiagnostic(rawResponse: String, reason: String) -> URL? {
+        let fileManager = FileManager.default
+        do {
+            try fileManager.createDirectory(
+                at: diagnosticsRootURL,
+                withIntermediateDirectories: true,
+                attributes: nil
+            )
+
+            let timestamp = Self.diagnosticTimestamp()
+            let filename = "qwen-invalid-response-\(timestamp)-\(UUID().uuidString.prefix(8)).json"
+            let diagnosticURL = diagnosticsRootURL.appendingPathComponent(filename, isDirectory: false)
+
+            let payload = InvalidQwenResponseDiagnostic(
+                capturedAt: Self.iso8601Timestamp(),
+                model: modelName,
+                reason: reason,
+                rawResponse: rawResponse
+            )
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            let data = try encoder.encode(payload)
+            try data.write(to: diagnosticURL, options: [.atomic])
+            pruneOldDiagnostics(in: diagnosticsRootURL, keepingMostRecent: 20, fileManager: fileManager)
+            return diagnosticURL
+        } catch {
+            return nil
+        }
+    }
+
+    private func pruneOldDiagnostics(in rootURL: URL, keepingMostRecent limit: Int, fileManager: FileManager) {
+        guard limit > 0 else { return }
+        guard let urls = try? fileManager.contentsOfDirectory(
+            at: rootURL,
+            includingPropertiesForKeys: [.contentModificationDateKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return
+        }
+
+        let sortedURLs = urls.sorted { lhs, rhs in
+            let lhsDate = (try? lhs.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+            let rhsDate = (try? rhs.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+            return lhsDate > rhsDate
+        }
+
+        for staleURL in sortedURLs.dropFirst(limit) {
+            try? fileManager.removeItem(at: staleURL)
+        }
+    }
+
+    private static func iso8601Timestamp() -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter.string(from: Date())
+    }
+
+    private static func diagnosticTimestamp() -> String {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "yyyyMMdd'T'HHmmssSSS'Z'"
+        return formatter.string(from: Date())
     }
 
     static func selectVideoKeyFrames(from candidates: [SampledVideoFrame]) -> [SampledVideoFrame] {

@@ -69,6 +69,45 @@ final class QwenVisionLanguageAnalyzerTests: XCTestCase {
         XCTAssertEqual(progresses[2], 0.9, accuracy: 0.001)
     }
 
+    func testDecodeGeneratedMetadataRepairsSmartQuotesAndTrailingCommas() throws {
+        let analyzer = QwenVisionLanguageAnalyzer()
+        let raw = """
+        Here is the JSON:
+        ```json
+        {“caption”:“person standing near a bright window indoors”,“keywords”:[“person”,“window”,“indoor”,“light”,“wall”,“room”,],}
+        ```
+        """
+
+        let decoded = try analyzer.decodeGeneratedMetadata(from: raw)
+
+        XCTAssertEqual(decoded.caption, "person standing near a bright window indoors")
+        XCTAssertEqual(decoded.keywords, ["person", "window", "indoor", "light", "wall", "room"])
+    }
+
+    func testInvalidResponseSavesLocalDiagnosticArtifact() throws {
+        let root = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let analyzer = QwenVisionLanguageAnalyzer(diagnosticsRootURL: root)
+        let enriched = analyzer.enrichInvalidResponseError(
+            .invalidResponse("Qwen output was not valid JSON."),
+            rawResponse: "caption: definitely not json"
+        )
+
+        let files = try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil)
+        XCTAssertEqual(files.count, 1)
+
+        let payload = try String(contentsOf: files[0], encoding: .utf8)
+        XCTAssertTrue(payload.contains("caption: definitely not json"))
+        XCTAssertTrue(payload.contains("Qwen output was not valid JSON."))
+
+        guard case let .invalidResponse(message) = enriched else {
+            return XCTFail("Expected invalidResponse error")
+        }
+        XCTAssertTrue(message.contains("Saved raw response to"))
+        XCTAssertTrue(message.contains(root.path))
+    }
+
     private func makeFrame(progress: Double, color: NSColor) -> SampledVideoFrame {
         let time = CMTime(seconds: progress * 10.0, preferredTimescale: 600)
         return SampledVideoFrame(
@@ -110,5 +149,12 @@ final class QwenVisionLanguageAnalyzerTests: XCTestCase {
         url.deleteLastPathComponent()
         url.deleteLastPathComponent()
         return try String(contentsOf: url.appendingPathComponent("Prompts/\(filename)"), encoding: .utf8)
+    }
+
+    private func makeTemporaryDirectory() -> URL {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true, attributes: nil)
+        return root
     }
 }

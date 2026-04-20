@@ -1,10 +1,10 @@
 # Photos Caption Assistant
 
-Current version/build: 4.6.2 (22)
+Current version/build: 4.6.3 (23)
 Current description logic version: 3.0.0
 
 Current overall status:
-The current source tree builds locally as version 4.6.2 build 22 and now uses a more Mac-native scene model: a toolbar-first hybrid workbench, dedicated Settings and Preview windows, stronger menu/keyboard access, more Finder-style reveal actions, and the existing deterministic version-triggered GitHub release flow. The core local captioning workflow is working, but this is still a personal hobby app built around Apple Photos automation rather than a polished public-distribution product.
+The current source tree builds locally as version 4.6.3 build 23 and now uses a more Mac-native scene model: a toolbar-first hybrid workbench, dedicated Settings and Preview windows, stronger menu/keyboard access, more Finder-style reveal actions, and the existing deterministic version-triggered GitHub release flow. The core local captioning workflow is working, but this is still a personal hobby app built around Apple Photos automation rather than a polished public-distribution product.
 
 What is working now:
 - Local photo and video analysis through Ollama with the `qwen2.5vl:7b` model.
@@ -27,6 +27,8 @@ What is working now:
 - Whole-library runs require explicit confirmation before write work starts.
 - Runs that overwrite non-app metadata without per-item prompts require explicit confirmation.
 - Core per-item stages now retry once automatically after a short pause when asset acquisition, caption generation/JSON decode, or Photos metadata write fails transiently.
+- Common Qwen formatting slop such as smart quotes and trailing commas is now repaired before the strict JSON decode gives up.
+- If Qwen still returns malformed JSON, the app now saves the raw reply to an app-scoped temporary diagnostics file on this Mac and includes that path in the item failure message.
 - If Ollama is missing, the app now shows a setup card and can open the official macOS download page after explicit confirmation.
 - Missing model downloads still require explicit confirmation, while ordinary local Ollama startup does not.
 - Resume-state and queued-albums files are stored under Application Support and surfaced in the Data & Storage window.
@@ -46,6 +48,7 @@ What is not implemented yet:
 Known limitations and trust warnings:
 - The packaged app is ad-hoc signed for local use but not notarized.
 - The app depends on Apple Photos automation and local Ollama availability.
+- Raw malformed Qwen replies can now be written to an app-scoped temporary diagnostics folder for local troubleshooting when JSON parsing fails.
 - Photos.app must be open before starting a write run.
 - The bundle identifier is now `com.jkfisher.PhotosCaptionAssistant`, so macOS will likely prompt again for Photos and Apple Events permissions after the rename.
 - The core production write path still relies on AppleScript and Photos automation for metadata reads, writes, overwrite gating, picker resolution, queued-albums resolution, and Photos lifecycle handling.

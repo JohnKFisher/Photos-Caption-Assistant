@@ -11,9 +11,9 @@
 	<key>CFBundleName</key>
 	<string>PhotosCaptionAssistant</string>
 	<key>CFBundleShortVersionString</key>
-	<string>4.6.2</string>
+	<string>4.6.3</string>
 	<key>CFBundleVersion</key>
-	<string>22</string>
+	<string>23</string>
 	<key>NSAppleEventsUsageDescription</key>
 	<string>Photos Caption Assistant needs automation access to read from Photos and update captions and keywords in Photos.</string>
 	<key>NSPhotoLibraryUsageDescription</key>

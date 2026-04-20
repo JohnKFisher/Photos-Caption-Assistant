@@ -35,3 +35,7 @@ Rationale: Completed-item preview now lives in its own macOS window, with option
 ## 2026-04-19 — Clamp the main workbench to the visible display and enable non-app overwrite by default
 Status: approved
 Rationale: The main window should open at a shorter Dock-respecting size on real Macs, and this personal workflow now prefers promptless overwrite of non-app metadata as the startup default while keeping the existing run-start confirmation.
+
+## 2026-04-19 — Keep malformed Qwen diagnostics local and parser fallback formatting-only
+Status: approved
+Rationale: When Qwen returns malformed JSON, the app may save the raw model reply only to an app-scoped temporary diagnostics file on the local Mac so failures are diagnosable without adding any remote logging. Parser recovery stays limited to common formatting cleanup such as smart quotes and trailing commas rather than guessing missing fields or changing semantic content.
