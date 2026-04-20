@@ -75,21 +75,24 @@ enum WorkbenchPalette {
 struct WorkbenchCard<Content: View>: View {
     let title: String
     let subtitle: String?
+    let compact: Bool
     @ViewBuilder let content: () -> Content
 
     init(
         title: String,
         subtitle: String? = nil,
+        compact: Bool = false,
         @ViewBuilder content: @escaping () -> Content
     ) {
         self.title = title
         self.subtitle = subtitle
+        self.compact = compact
         self.content = content
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: compact ? 10 : 12) {
+            VStack(alignment: .leading, spacing: compact ? 3 : 4) {
                 Text(title)
                     .font(.headline)
                     .foregroundStyle(WorkbenchPalette.text)
@@ -104,14 +107,14 @@ struct WorkbenchCard<Content: View>: View {
 
             content()
         }
-        .padding(16)
+        .padding(compact ? 14 : 16)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
+            RoundedRectangle(cornerRadius: compact ? 18 : 20, style: .continuous)
                 .fill(.regularMaterial)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 20, style: .continuous)
+            RoundedRectangle(cornerRadius: compact ? 18 : 20, style: .continuous)
                 .strokeBorder(WorkbenchPalette.border, lineWidth: 1)
         )
     }
@@ -121,26 +124,29 @@ struct WorkbenchNotice: View {
     let text: String
     let fill: Color
     let textColor: Color
+    let compact: Bool
 
     init(
         _ text: String,
         fill: Color = WorkbenchPalette.accentSoft,
-        textColor: Color = WorkbenchPalette.muted
+        textColor: Color = WorkbenchPalette.muted,
+        compact: Bool = false
     ) {
         self.text = text
         self.fill = fill
         self.textColor = textColor
+        self.compact = compact
     }
 
     var body: some View {
         Text(text)
             .font(.footnote)
             .foregroundStyle(textColor)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 10)
+            .padding(.horizontal, compact ? 10 : 12)
+            .padding(.vertical, compact ? 8 : 10)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(fill)
-            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: compact ? 12 : 14, style: .continuous))
     }
 }
 
@@ -175,6 +181,7 @@ struct RunSetupView: View {
     let onRemoveCaptionWorkflowQueueRow: (Int) -> Void
     let onMoveCaptionWorkflowQueueRowUp: (Int) -> Void
     let onMoveCaptionWorkflowQueueRowDown: (Int) -> Void
+    let compactLayout: Bool
 
     @State private var pickerItems: [PhotosPickerItem] = []
 
@@ -217,7 +224,7 @@ struct RunSetupView: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: compactLayout ? 14 : 16) {
             sourceCard
             secondaryCards
         }
@@ -229,9 +236,10 @@ struct RunSetupView: View {
     private var sourceCard: some View {
         WorkbenchCard(
             title: "Source",
-            subtitle: sourceSelection.summary
+            subtitle: sourceSelection.summary,
+            compact: compactLayout
         ) {
-            VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: compactLayout ? 10 : 12) {
                 sourceSelectionOptions
 
                 sourceConfiguration
@@ -248,12 +256,12 @@ struct RunSetupView: View {
                     GridItem(.flexible(minimum: 140), spacing: 10)
                 ],
                 alignment: .leading,
-                spacing: 10
+                spacing: compactLayout ? 8 : 10
             ) {
                 sourceSelectionOptionButtons
             }
 
-            VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: compactLayout ? 8 : 10) {
                 sourceSelectionOptionButtons
             }
         }
@@ -264,8 +272,8 @@ struct RunSetupView: View {
             Button {
                 sourceSelection = source
             } label: {
-                HStack(alignment: .top, spacing: 12) {
-                    VStack(alignment: .leading, spacing: 4) {
+                HStack(alignment: .top, spacing: compactLayout ? 10 : 12) {
+                    VStack(alignment: .leading, spacing: 3) {
                         Text(source.title)
                             .font(.subheadline.weight(.semibold))
                             .foregroundStyle(WorkbenchPalette.text)
@@ -289,8 +297,8 @@ struct RunSetupView: View {
                         )
                         .padding(.top, 2)
                 }
-                .padding(14)
-                .frame(maxWidth: .infinity, minHeight: 96, alignment: .leading)
+                .padding(compactLayout ? 12 : 14)
+                .frame(maxWidth: .infinity, minHeight: compactLayout ? 74 : 84, alignment: .leading)
                 .background(
                     RoundedRectangle(cornerRadius: 16, style: .continuous)
                         .fill(sourceSelection == source ? WorkbenchPalette.accentSoft : WorkbenchPalette.surfaceAlt)
@@ -311,12 +319,12 @@ struct RunSetupView: View {
     @ViewBuilder
     private var secondaryCards: some View {
         ViewThatFits(in: .horizontal) {
-            HStack(alignment: .top, spacing: 16) {
+            HStack(alignment: .top, spacing: compactLayout ? 14 : 16) {
                 captureDateCard
                 runRulesCard
             }
 
-            VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: compactLayout ? 14 : 16) {
                 captureDateCard
                 runRulesCard
             }
@@ -326,19 +334,20 @@ struct RunSetupView: View {
     private var captureDateCard: some View {
         WorkbenchCard(
             title: "Capture Date Filter",
-            subtitle: "Optional scope guardrail before model preparation starts."
+            subtitle: "Optional scope guardrail before model preparation starts.",
+            compact: compactLayout
         ) {
-            VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: compactLayout ? 10 : 12) {
                 Toggle("Limit by capture date", isOn: $useDateFilter)
                     .workbenchFormControlAppearance()
 
                 if useDateFilter {
-                    HStack(alignment: .top, spacing: 14) {
+                    HStack(alignment: .top, spacing: compactLayout ? 12 : 14) {
                         dateField(title: "Start", selection: $startDate)
                         dateField(title: "End", selection: $endDate)
                     }
                 } else {
-                    WorkbenchNotice("All capture dates in the current source remain eligible.")
+                    WorkbenchNotice("All capture dates in the current source remain eligible.", compact: compactLayout)
                 }
             }
         }
@@ -347,10 +356,11 @@ struct RunSetupView: View {
 
     private var runRulesCard: some View {
         WorkbenchCard(
-            title: "Run Rules"
+            title: "Run Rules",
+            compact: compactLayout
         ) {
-            VStack(alignment: .leading, spacing: 12) {
-                VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: compactLayout ? 10 : 12) {
+                VStack(alignment: .leading, spacing: compactLayout ? 6 : 8) {
                     Text("Processing Order")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(WorkbenchPalette.muted)
@@ -374,7 +384,8 @@ struct RunSetupView: View {
                     .workbenchFormControlAppearance()
 
                 WorkbenchNotice(
-                    "External metadata stays protected unless you widen the overwrite rule and then confirm it at run start."
+                    "External metadata stays protected unless you widen the overwrite rule and then confirm it at run start.",
+                    compact: compactLayout
                 )
             }
         }
@@ -385,12 +396,12 @@ struct RunSetupView: View {
     private var sourceConfiguration: some View {
         switch sourceSelection {
         case .library:
-            WorkbenchNotice("Whole-library estimates and confirmation messaging appear in the Run Summary panel.")
+            WorkbenchNotice("Whole-library estimates and confirmation messaging appear in the Run Summary panel.", compact: compactLayout)
         case .album:
             albumSelectionSection
         case .picker:
             if pickerSupported {
-                VStack(alignment: .leading, spacing: 10) {
+                VStack(alignment: .leading, spacing: compactLayout ? 8 : 10) {
                     PhotosPicker(
                         selection: $pickerItems,
                         maxSelectionCount: nil,
@@ -403,14 +414,16 @@ struct RunSetupView: View {
                     WorkbenchNotice(
                         pickerIDs.isEmpty
                             ? "No picker items selected yet."
-                            : "\(pickerIDs.count) photo or video item(s) selected."
+                            : "\(pickerIDs.count) photo or video item(s) selected.",
+                        compact: compactLayout
                     )
                 }
             } else {
                 WorkbenchNotice(
                     pickerUnsupportedReason ?? "Picker mode is unavailable on this setup.",
                     fill: WorkbenchPalette.warningFill,
-                    textColor: WorkbenchPalette.warningText
+                    textColor: WorkbenchPalette.warningText,
+                    compact: compactLayout
                 )
             }
         case .captionWorkflow:
@@ -419,8 +432,11 @@ struct RunSetupView: View {
     }
 
     private var captionWorkflowConfiguration: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            WorkbenchNotice("Runs the configured albums in order and validates duplicate or missing selections before start.")
+        VStack(alignment: .leading, spacing: compactLayout ? 10 : 12) {
+            WorkbenchNotice(
+                "Runs the configured albums in order and validates duplicate or missing selections before start.",
+                compact: compactLayout
+            )
 
             if let notice = albumLoadingNotice {
                 albumLoadingNoticeView(
@@ -431,7 +447,7 @@ struct RunSetupView: View {
             }
 
             ForEach(Array(captionWorkflowQueueRows.enumerated()), id: \.element.id) { index, row in
-                HStack(alignment: .center, spacing: 10) {
+                HStack(alignment: .center, spacing: compactLayout ? 8 : 10) {
                     Text("\(index + 1)")
                         .font(.caption.monospacedDigit().weight(.semibold))
                         .foregroundStyle(WorkbenchPalette.muted)
@@ -481,7 +497,7 @@ struct RunSetupView: View {
                         }
                     }
                 }
-                .padding(12)
+                .padding(compactLayout ? 10 : 12)
                 .background(WorkbenchPalette.surfaceAlt)
                 .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
             }
@@ -500,7 +516,8 @@ struct RunSetupView: View {
                         : WorkbenchPalette.accentSoft,
                     textColor: captionWorkflowStatusMessage.contains("Needs repair") || captionWorkflowStatusMessage.contains("different album")
                         ? WorkbenchPalette.warningText
-                        : WorkbenchPalette.muted
+                        : WorkbenchPalette.muted,
+                    compact: compactLayout
                 )
             }
         }
@@ -508,7 +525,7 @@ struct RunSetupView: View {
 
     @ViewBuilder
     private func dateField(title: String, selection: Binding<Date>) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: compactLayout ? 6 : 8) {
             Text(title)
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(WorkbenchPalette.muted)
@@ -533,7 +550,7 @@ struct RunSetupView: View {
     }
 
     private var albumSelectionSection: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: compactLayout ? 8 : 10) {
             HStack(spacing: 8) {
                 Text("Album")
                     .font(.caption.weight(.semibold))
@@ -629,11 +646,11 @@ struct RunSetupView: View {
                 .foregroundStyle(isWarning ? WorkbenchPalette.warningText : WorkbenchPalette.muted)
                 .fixedSize(horizontal: false, vertical: true)
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
+        .padding(.horizontal, compactLayout ? 10 : 12)
+        .padding(.vertical, compactLayout ? 8 : 10)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(isWarning ? WorkbenchPalette.warningFill : WorkbenchPalette.accentSoft)
-        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: compactLayout ? 12 : 14, style: .continuous))
     }
 
     private func albumLabel(for album: AlbumSummary) -> String {

@@ -1606,15 +1606,41 @@ final class AppViewModel: ObservableObject {
 
     private func confirmationMessage(for summary: RunPreflightSummary) -> String {
         var lines: [String] = []
-        lines.append("Source: \(summary.sourceTitle)")
-        lines.append("Count: \(summary.countDescription)")
-        for description in summary.overwriteDescriptions {
-            lines.append(description)
+        let snapshot = currentRunSetupSnapshot
+
+        lines.append(summary.sourceTitle)
+
+        switch preflightCountState {
+        case .loading:
+            lines.append("Count: still estimating current scope.")
+        case let .exact(count):
+            let itemDescription = count == 1 ? "1 item" : "\(count) items"
+            if snapshot.useDateFilter, snapshot.sourceSelection != .picker {
+                lines.append("Count: \(itemDescription) before capture-date and overwrite checks.")
+            } else {
+                lines.append("Count: \(itemDescription) before overwrite checks.")
+            }
+        case let .message(message):
+            lines.append("Count: \(message)")
         }
-        lines.append(summary.modelDescription)
-        lines.append(summary.serviceDescription)
-        lines.append("")
-        lines.append(contentsOf: summary.confirmationReasons)
+
+        if let filterDescription = summary.filterDescription {
+            lines.append(filterDescription)
+        }
+
+        let appOwnedRule = snapshot.overwriteAppOwnedSameOrNewer
+            ? "App-owned same/newer metadata will be overwritten."
+            : "App-owned same/newer metadata will be preserved."
+        let externalRule = snapshot.alwaysOverwriteExternalMetadata
+            ? "Non-app metadata will be overwritten without prompts."
+            : "Non-app metadata will still ask per item."
+        lines.append("Overwrite: \(appOwnedRule) \(externalRule)")
+
+        if !summary.confirmationReasons.isEmpty {
+            lines.append("")
+            lines.append(contentsOf: summary.confirmationReasons)
+        }
+
         return lines.joined(separator: "\n")
     }
 
@@ -2032,108 +2058,20 @@ struct MainView: View {
     @ObservedObject var viewModel: AppViewModel
     @Environment(\.openWindow) private var openWindow
     @SceneStorage("main.summaryPaneVisible") private var showsSummaryPane = true
+    @SceneStorage("main.compactSummaryExpanded") private var compactSummaryExpanded = true
+    @SceneStorage("main.compactProgressExpanded") private var compactProgressExpanded = false
     @State private var window: NSWindow?
     @State private var hasScheduledWindowClamp = false
 
     var body: some View {
-        VStack(spacing: 0) {
-            statusOverview
-                .padding(.horizontal, 20)
-                .padding(.top, 20)
-                .padding(.bottom, 12)
+        GeometryReader { geometry in
+            let layoutMode = MainWorkbenchLayoutMode(size: geometry.size, showsSummaryPane: showsSummaryPane)
 
-            HSplitView {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 18) {
-                        if viewModel.shouldShowOllamaSetupCard {
-                            OllamaSetupCardView(
-                                isBusy: viewModel.isRunning || viewModel.isPreparingModel,
-                                onOpenDownloadPage: {
-                                    Task {
-                                        await viewModel.confirmAndOpenOllamaDownloadPage()
-                                    }
-                                },
-                                onRecheckSetup: {
-                                    Task {
-                                        await viewModel.recheckOllamaSetup()
-                                    }
-                                }
-                            )
-                        }
-
-                        RunSetupView(
-                            sourceSelection: $viewModel.sourceSelection,
-                            selectedAlbumID: $viewModel.selectedAlbumID,
-                            albums: viewModel.albums,
-                            albumLoadState: viewModel.albumLoadState,
-                            captionWorkflowQueueRows: viewModel.captionWorkflowQueueRows,
-                            captionWorkflowStatusMessage: viewModel.captionWorkflowStatusMessage,
-                            useDateFilter: $viewModel.useDateFilter,
-                            startDate: $viewModel.startDate,
-                            endDate: $viewModel.endDate,
-                            traversalOrder: $viewModel.traversalOrder,
-                            overwriteAppOwnedSameOrNewer: $viewModel.overwriteAppOwnedSameOrNewer,
-                            alwaysOverwriteExternalMetadata: $viewModel.alwaysOverwriteExternalMetadata,
-                            pickerSupported: viewModel.pickerSupported,
-                            pickerUnsupportedReason: viewModel.pickerUnavailableReason,
-                            pickerIDs: $viewModel.pickerIDs,
-                            onCaptionWorkflowAlbumSelectionChanged: { index, albumID in
-                                Task {
-                                    await viewModel.setCaptionWorkflowAlbumSelection(albumID, at: index)
-                                }
-                            },
-                            onAddCaptionWorkflowQueueRow: {
-                                Task {
-                                    await viewModel.addCaptionWorkflowQueueRow()
-                                }
-                            },
-                            onRemoveCaptionWorkflowQueueRow: { index in
-                                Task {
-                                    await viewModel.removeCaptionWorkflowQueueRow(at: index)
-                                }
-                            },
-                            onMoveCaptionWorkflowQueueRowUp: { index in
-                                Task {
-                                    await viewModel.moveCaptionWorkflowQueueRowUp(from: index)
-                                }
-                            },
-                            onMoveCaptionWorkflowQueueRowDown: { index in
-                                Task {
-                                    await viewModel.moveCaptionWorkflowQueueRowDown(from: index)
-                                }
-                            }
-                        )
-                    }
-                    .padding(.horizontal, 20)
-                    .padding(.bottom, 20)
-                    .frame(maxWidth: .infinity, alignment: .topLeading)
-                }
-                .frame(minWidth: 640, idealWidth: 760, maxWidth: .infinity)
-
-                if showsSummaryPane {
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: 16) {
-                            RunPreflightPanelView(summary: viewModel.runPreflightSummary)
-
-                            ProcessingProgressView(
-                                progress: viewModel.progress,
-                                performance: viewModel.performance,
-                                isRunning: viewModel.isRunning,
-                                isOpeningImmersivePreview: viewModel.isOpeningImmersivePreview,
-                                statusMessage: viewModel.runStatusMessage,
-                                summary: viewModel.lastSummary,
-                                liveErrors: viewModel.recentRunErrors,
-                                lastCompletedItemPreview: viewModel.lastCompletedItemPreview,
-                                onOpenImmersivePreview: viewModel.canOpenPreviewWindow ? {
-                                    openPreviewWindow()
-                                } : nil
-                            )
-                        }
-                        .padding(.trailing, 20)
-                        .padding(.bottom, 20)
-                        .frame(maxWidth: .infinity, alignment: .topLeading)
-                    }
-                    .frame(minWidth: 340, idealWidth: 400, maxWidth: 500)
+            Group {
+                if layoutMode == .compact {
+                    compactWorkbench
+                } else {
+                    wideWorkbench
                 }
             }
         }
@@ -2232,6 +2170,198 @@ struct MainView: View {
         }
     }
 
+    private var wideWorkbench: some View {
+        VStack(spacing: 0) {
+            statusOverview(compactLayout: false)
+                .padding(.horizontal, 18)
+                .padding(.top, 18)
+                .padding(.bottom, 10)
+
+            HSplitView {
+                ScrollView {
+                    setupWorkbenchContent(compactLayout: false)
+                        .padding(.horizontal, 18)
+                        .padding(.bottom, 18)
+                        .frame(maxWidth: .infinity, alignment: .topLeading)
+                }
+                .frame(minWidth: 620, idealWidth: 760, maxWidth: .infinity)
+
+                if showsSummaryPane {
+                    ScrollView {
+                        summaryWorkbenchContent(compactLayout: false, showsCards: true)
+                            .padding(.trailing, 18)
+                            .padding(.bottom, 18)
+                            .frame(maxWidth: .infinity, alignment: .topLeading)
+                    }
+                    .frame(minWidth: 320, idealWidth: 390, maxWidth: 480)
+                }
+            }
+        }
+    }
+
+    private var compactWorkbench: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                statusOverview(compactLayout: true)
+
+                setupWorkbenchContent(compactLayout: true)
+
+                if showsSummaryPane {
+                    compactSummarySections
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 16)
+            .padding(.bottom, 20)
+            .frame(maxWidth: .infinity, alignment: .topLeading)
+        }
+    }
+
+    private func setupWorkbenchContent(compactLayout: Bool) -> some View {
+        VStack(alignment: .leading, spacing: compactLayout ? 12 : 14) {
+            if viewModel.shouldShowOllamaSetupCard {
+                OllamaSetupCardView(
+                    isBusy: viewModel.isRunning || viewModel.isPreparingModel,
+                    compactLayout: compactLayout,
+                    onOpenDownloadPage: {
+                        Task {
+                            await viewModel.confirmAndOpenOllamaDownloadPage()
+                        }
+                    },
+                    onRecheckSetup: {
+                        Task {
+                            await viewModel.recheckOllamaSetup()
+                        }
+                    }
+                )
+            }
+
+            RunSetupView(
+                sourceSelection: $viewModel.sourceSelection,
+                selectedAlbumID: $viewModel.selectedAlbumID,
+                albums: viewModel.albums,
+                albumLoadState: viewModel.albumLoadState,
+                captionWorkflowQueueRows: viewModel.captionWorkflowQueueRows,
+                captionWorkflowStatusMessage: viewModel.captionWorkflowStatusMessage,
+                useDateFilter: $viewModel.useDateFilter,
+                startDate: $viewModel.startDate,
+                endDate: $viewModel.endDate,
+                traversalOrder: $viewModel.traversalOrder,
+                overwriteAppOwnedSameOrNewer: $viewModel.overwriteAppOwnedSameOrNewer,
+                alwaysOverwriteExternalMetadata: $viewModel.alwaysOverwriteExternalMetadata,
+                pickerSupported: viewModel.pickerSupported,
+                pickerUnsupportedReason: viewModel.pickerUnavailableReason,
+                pickerIDs: $viewModel.pickerIDs,
+                onCaptionWorkflowAlbumSelectionChanged: { index, albumID in
+                    Task {
+                        await viewModel.setCaptionWorkflowAlbumSelection(albumID, at: index)
+                    }
+                },
+                onAddCaptionWorkflowQueueRow: {
+                    Task {
+                        await viewModel.addCaptionWorkflowQueueRow()
+                    }
+                },
+                onRemoveCaptionWorkflowQueueRow: { index in
+                    Task {
+                        await viewModel.removeCaptionWorkflowQueueRow(at: index)
+                    }
+                },
+                onMoveCaptionWorkflowQueueRowUp: { index in
+                    Task {
+                        await viewModel.moveCaptionWorkflowQueueRowUp(from: index)
+                    }
+                },
+                onMoveCaptionWorkflowQueueRowDown: { index in
+                    Task {
+                        await viewModel.moveCaptionWorkflowQueueRowDown(from: index)
+                    }
+                },
+                compactLayout: compactLayout
+            )
+        }
+    }
+
+    private func summaryWorkbenchContent(compactLayout: Bool, showsCards: Bool) -> some View {
+        VStack(alignment: .leading, spacing: compactLayout ? 12 : 14) {
+            RunPreflightPanelView(
+                summary: viewModel.runPreflightSummary,
+                compactLayout: compactLayout,
+                showsCard: showsCards
+            )
+
+            ProcessingProgressView(
+                progress: viewModel.progress,
+                performance: viewModel.performance,
+                isRunning: viewModel.isRunning,
+                isOpeningImmersivePreview: viewModel.isOpeningImmersivePreview,
+                statusMessage: viewModel.runStatusMessage,
+                summary: viewModel.lastSummary,
+                liveErrors: viewModel.recentRunErrors,
+                lastCompletedItemPreview: viewModel.lastCompletedItemPreview,
+                compactLayout: compactLayout,
+                showsCard: showsCards,
+                onOpenImmersivePreview: viewModel.canOpenPreviewWindow ? {
+                    openPreviewWindow()
+                } : nil
+            )
+        }
+    }
+
+    private var compactSummarySections: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            WorkbenchCard(
+                title: "Run Summary",
+                subtitle: "Current scope, filters, overwrite behavior, and start warnings.",
+                compact: true
+            ) {
+                DisclosureGroup(isExpanded: $compactSummaryExpanded) {
+                    RunPreflightPanelView(
+                        summary: viewModel.runPreflightSummary,
+                        compactLayout: true,
+                        showsCard: false
+                    )
+                    .padding(.top, 8)
+                } label: {
+                    Text("Show the current scope and confirmation warnings before you start.")
+                        .font(.footnote)
+                        .foregroundStyle(WorkbenchPalette.muted)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            WorkbenchCard(
+                title: "Progress & Preview",
+                subtitle: "Latest completed item, run progress, and recent errors.",
+                compact: true
+            ) {
+                DisclosureGroup(isExpanded: $compactProgressExpanded) {
+                    ProcessingProgressView(
+                        progress: viewModel.progress,
+                        performance: viewModel.performance,
+                        isRunning: viewModel.isRunning,
+                        isOpeningImmersivePreview: viewModel.isOpeningImmersivePreview,
+                        statusMessage: viewModel.runStatusMessage,
+                        summary: viewModel.lastSummary,
+                        liveErrors: viewModel.recentRunErrors,
+                        lastCompletedItemPreview: viewModel.lastCompletedItemPreview,
+                        compactLayout: true,
+                        showsCard: false,
+                        onOpenImmersivePreview: viewModel.canOpenPreviewWindow ? {
+                            openPreviewWindow()
+                        } : nil
+                    )
+                    .padding(.top, 8)
+                } label: {
+                    Text("Show the latest completed item, progress, and diagnostics in this smaller layout.")
+                        .font(.footnote)
+                        .foregroundStyle(WorkbenchPalette.muted)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+    }
+
     private var mainBackground: some View {
         Color(nsColor: .windowBackgroundColor)
             .overlay(
@@ -2281,34 +2411,34 @@ struct MainView: View {
         window.setFrame(fittedFrame, display: true, animate: false)
     }
 
-    private var statusOverview: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack(alignment: .top, spacing: 16) {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(AppPresentation.appName)
-                        .font(.largeTitle.weight(.bold))
-
-                    Text("Local-first captions and keywords for Apple Photos, with separate Mac windows for setup, diagnostics, storage, and preview.")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
+    private func statusOverview(compactLayout: Bool) -> some View {
+        VStack(alignment: .leading, spacing: compactLayout ? 10 : 12) {
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .top, spacing: compactLayout ? 12 : 16) {
+                    titleBlock(compactLayout: compactLayout)
+                    Spacer(minLength: 0)
+                    capabilityBadgeGrid(compactLayout: compactLayout)
                 }
 
-                Spacer(minLength: 0)
+                VStack(alignment: .leading, spacing: compactLayout ? 10 : 12) {
+                    titleBlock(compactLayout: compactLayout)
+                    capabilityBadgeGrid(compactLayout: compactLayout)
+                }
+            }
 
+            ViewThatFits(in: .horizontal) {
                 HStack(spacing: 8) {
-                    capabilityBadge("Automation", available: viewModel.capabilities.photosAutomationAvailable)
-                    capabilityBadge("Qwen 2.5VL 7B", available: viewModel.capabilities.qwenModelAvailable)
-                    capabilityBadge("Picker", available: viewModel.pickerSupported)
+                    detailBadge(VersionDisplay.appVersionLine, compactLayout: compactLayout)
+                    detailBadge(VersionDisplay.logicVersionLine, compactLayout: compactLayout)
+                }
+
+                VStack(alignment: .leading, spacing: 6) {
+                    detailBadge(VersionDisplay.appVersionLine, compactLayout: compactLayout)
+                    detailBadge(VersionDisplay.logicVersionLine, compactLayout: compactLayout)
                 }
             }
 
-            HStack(spacing: 10) {
-                detailBadge(VersionDisplay.appVersionLine)
-                detailBadge(VersionDisplay.logicVersionLine)
-            }
-
-            VStack(alignment: .leading, spacing: 6) {
+            VStack(alignment: .leading, spacing: compactLayout ? 4 : 6) {
                 statusLine(text: viewModel.ollamaStatusMessage, isBusy: viewModel.isPreparingModel)
 
                 if let benchmarkStatusMessage = viewModel.benchmarkStatusMessage {
@@ -2324,32 +2454,57 @@ struct MainView: View {
                 }
             }
         }
-        .padding(20)
+        .padding(compactLayout ? 16 : 18)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: compactLayout ? 18 : 22, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 22, style: .continuous)
+            RoundedRectangle(cornerRadius: compactLayout ? 18 : 22, style: .continuous)
                 .strokeBorder(Color.primary.opacity(0.08), lineWidth: 1)
         )
     }
 
+    private func titleBlock(compactLayout: Bool) -> some View {
+        VStack(alignment: .leading, spacing: compactLayout ? 4 : 6) {
+            Text(AppPresentation.appName)
+                .font((compactLayout ? Font.title2 : .largeTitle).weight(.bold))
+
+            Text("Local-first captions and keywords for Apple Photos, with separate Mac windows for setup, diagnostics, storage, and preview.")
+                .font(compactLayout ? .footnote : .callout)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func capabilityBadgeGrid(compactLayout: Bool) -> some View {
+        LazyVGrid(
+            columns: [GridItem(.adaptive(minimum: compactLayout ? 128 : 150), spacing: 8)],
+            alignment: .trailing,
+            spacing: 8
+        ) {
+            capabilityBadge("Automation", available: viewModel.capabilities.photosAutomationAvailable, compactLayout: compactLayout)
+            capabilityBadge("Qwen 2.5VL 7B", available: viewModel.capabilities.qwenModelAvailable, compactLayout: compactLayout)
+            capabilityBadge("Picker", available: viewModel.pickerSupported, compactLayout: compactLayout)
+        }
+        .frame(maxWidth: compactLayout ? .infinity : 460, alignment: .trailing)
+    }
+
     @ViewBuilder
-    private func capabilityBadge(_ title: String, available: Bool) -> some View {
+    private func capabilityBadge(_ title: String, available: Bool, compactLayout: Bool) -> some View {
         Text("\(title): \(available ? "Available" : "Unavailable")")
             .font(.caption.weight(.semibold))
             .foregroundStyle(available ? Color.accentColor : .orange)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6)
+            .padding(.horizontal, compactLayout ? 10 : 12)
+            .padding(.vertical, compactLayout ? 5 : 6)
             .background(available ? Color.accentColor.opacity(0.12) : Color.orange.opacity(0.18))
             .clipShape(Capsule())
     }
 
-    private func detailBadge(_ text: String) -> some View {
+    private func detailBadge(_ text: String, compactLayout: Bool) -> some View {
         Text(text)
             .font(.caption)
             .foregroundStyle(.secondary)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
+            .padding(.horizontal, compactLayout ? 8 : 10)
+            .padding(.vertical, compactLayout ? 5 : 6)
             .background(Color.secondary.opacity(0.08))
             .clipShape(Capsule())
     }
@@ -2375,6 +2530,17 @@ struct MainView: View {
     private func openPreviewWindow() {
         viewModel.openImmersivePreview()
         openWindow(id: AppSceneID.preview)
+    }
+}
+
+private enum MainWorkbenchLayoutMode {
+    case wide
+    case compact
+
+    init(size: CGSize, showsSummaryPane: Bool) {
+        let compactForHeight = size.height < 660
+        let compactForWidth = showsSummaryPane ? size.width < 1200 : size.width < 980
+        self = (compactForHeight || compactForWidth) ? .compact : .wide
     }
 }
 

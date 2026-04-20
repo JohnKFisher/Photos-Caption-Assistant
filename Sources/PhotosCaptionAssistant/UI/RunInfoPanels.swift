@@ -79,21 +79,26 @@ struct AboutWindowView: View {
 
 struct OllamaSetupCardView: View {
     let isBusy: Bool
+    let compactLayout: Bool
     let onOpenDownloadPage: () -> Void
     let onRecheckSetup: () -> Void
 
     var body: some View {
         WorkbenchCard(
             title: "Ollama Setup",
-            subtitle: "Runs stay local-first, and third-party installation remains explicit."
+            subtitle: "Runs stay local-first, and third-party installation remains explicit.",
+            compact: compactLayout
         ) {
-            VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: compactLayout ? 8 : 10) {
                 Text("The app does not download or install third-party software automatically. When you choose to continue, it opens the official Ollama macOS download page in your browser so you can install it yourself.")
                     .font(.footnote)
                     .foregroundStyle(WorkbenchPalette.muted)
                     .fixedSize(horizontal: false, vertical: true)
 
-                WorkbenchNotice("1. Open the official download page.\n2. Install Ollama.\n3. Return here and click Re-check Setup.")
+                WorkbenchNotice(
+                    "1. Open the official download page.\n2. Install Ollama.\n3. Return here and click Re-check Setup.",
+                    compact: compactLayout
+                )
 
                 HStack {
                     Button("Open Ollama Download Page", action: onOpenDownloadPage)
@@ -117,62 +122,75 @@ struct OllamaSetupCardView: View {
 
 struct RunPreflightPanelView: View {
     let summary: RunPreflightSummary
+    let compactLayout: Bool
+    let showsCard: Bool
 
     var body: some View {
-        WorkbenchCard(
-            title: "Run Summary"
-        ) {
-            VStack(alignment: .leading, spacing: 9) {
-                Text(summary.sourceTitle)
-                    .font(.headline)
-                    .foregroundStyle(WorkbenchPalette.text)
-
-                if !summary.sourceDetails.isEmpty {
-                    ForEach(summary.sourceDetails, id: \.self) { detail in
-                        Text(detail)
-                            .font(.footnote)
-                            .foregroundStyle(WorkbenchPalette.muted)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
+        Group {
+            if showsCard {
+                WorkbenchCard(
+                    title: "Run Summary",
+                    compact: compactLayout
+                ) {
+                    panelContent
                 }
+            } else {
+                panelContent
+            }
+        }
+    }
 
-                labeledRow("Count", text: summary.countDescription, showSpinner: summary.countIsLoading)
+    private var panelContent: some View {
+        VStack(alignment: .leading, spacing: compactLayout ? 7 : 9) {
+            Text(summary.sourceTitle)
+                .font(.headline)
+                .foregroundStyle(WorkbenchPalette.text)
 
-                if let filterDescription = summary.filterDescription {
-                    labeledRow("Filter", text: filterDescription)
-                }
-
-                labeledRow("Writes", text: summary.writeDescription)
-
-                ForEach(Array(summary.overwriteDescriptions.enumerated()), id: \.offset) { _, description in
-                    labeledRow("Overwrite", text: description)
-                }
-
-                labeledRow("Model", text: summary.modelDescription)
-                labeledRow("Ollama", text: summary.serviceDescription)
-
-                if !summary.blockingReasons.isEmpty {
-                    Divider()
-                    ForEach(summary.blockingReasons, id: \.self) { reason in
-                        callout(
-                            text: reason,
-                            fill: WorkbenchPalette.warningFill,
-                            textColor: WorkbenchPalette.warningText
-                        )
-                    }
-                } else if !summary.confirmationReasons.isEmpty {
-                    Divider()
-                    ForEach(summary.confirmationReasons, id: \.self) { reason in
-                        callout(
-                            text: reason,
-                            fill: WorkbenchPalette.warningFill,
-                            textColor: WorkbenchPalette.warningText
-                        )
-                    }
+            if !summary.sourceDetails.isEmpty {
+                ForEach(summary.sourceDetails, id: \.self) { detail in
+                    Text(detail)
+                        .font(.footnote)
+                        .foregroundStyle(WorkbenchPalette.muted)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
+
+            labeledRow("Count", text: summary.countDescription, showSpinner: summary.countIsLoading)
+
+            if let filterDescription = summary.filterDescription {
+                labeledRow("Filter", text: filterDescription)
+            }
+
+            labeledRow("Writes", text: summary.writeDescription)
+
+            ForEach(Array(summary.overwriteDescriptions.enumerated()), id: \.offset) { _, description in
+                labeledRow("Overwrite", text: description)
+            }
+
+            labeledRow("Model", text: summary.modelDescription)
+            labeledRow("Ollama", text: summary.serviceDescription)
+
+            if !summary.blockingReasons.isEmpty {
+                Divider()
+                ForEach(summary.blockingReasons, id: \.self) { reason in
+                    callout(
+                        text: reason,
+                        fill: WorkbenchPalette.warningFill,
+                        textColor: WorkbenchPalette.warningText
+                    )
+                }
+            } else if !summary.confirmationReasons.isEmpty {
+                Divider()
+                ForEach(summary.confirmationReasons, id: \.self) { reason in
+                    callout(
+                        text: reason,
+                        fill: WorkbenchPalette.warningFill,
+                        textColor: WorkbenchPalette.warningText
+                    )
+                }
+            }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     @ViewBuilder
@@ -181,7 +199,7 @@ struct RunPreflightPanelView: View {
             Text(title)
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(WorkbenchPalette.muted)
-                .frame(width: 72, alignment: .leading)
+                .frame(width: compactLayout ? 66 : 72, alignment: .leading)
 
             HStack(alignment: .top, spacing: 8) {
                 if showSpinner {
@@ -203,11 +221,11 @@ struct RunPreflightPanelView: View {
         Text(text)
             .font(.footnote)
             .foregroundStyle(textColor)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 8)
+            .padding(.horizontal, compactLayout ? 9 : 10)
+            .padding(.vertical, compactLayout ? 7 : 8)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(fill)
-            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: compactLayout ? 7 : 8, style: .continuous))
     }
 }
 

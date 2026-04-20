@@ -1,9 +1,9 @@
 import SwiftUI
 
 enum MainWorkbenchWindowLayout {
-    static let preferredSize = CGSize(width: 1280, height: 760)
-    static let idealSize = CGSize(width: 1400, height: 820)
-    static let minimumSize = CGSize(width: 1040, height: 700)
+    static let preferredSize = CGSize(width: 1240, height: 720)
+    static let idealSize = CGSize(width: 1360, height: 780)
+    static let minimumSize = CGSize(width: 960, height: 620)
     private static let horizontalInset: CGFloat = 48
     private static let verticalInset: CGFloat = 72
 

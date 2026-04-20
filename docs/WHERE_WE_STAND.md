@@ -1,10 +1,10 @@
 # Photos Caption Assistant
 
-Current version/build: 4.6.3 (23)
+Current version/build: 4.6.4 (24)
 Current description logic version: 3.0.0
 
 Current overall status:
-The current source tree builds locally as version 4.6.3 build 23 and now uses a more Mac-native scene model: a toolbar-first hybrid workbench, dedicated Settings and Preview windows, stronger menu/keyboard access, more Finder-style reveal actions, and the existing deterministic version-triggered GitHub release flow. The core local captioning workflow is working, but this is still a personal hobby app built around Apple Photos automation rather than a polished public-distribution product.
+The current source tree builds locally as version 4.6.4 build 24 and now uses a more Mac-native scene model: a toolbar-first hybrid workbench, dedicated Settings and Preview windows, stronger menu/keyboard access, more Finder-style reveal actions, and the existing deterministic version-triggered GitHub release flow. The core local captioning workflow is working, but this is still a personal hobby app built around Apple Photos automation rather than a polished public-distribution product.
 
 What is working now:
 - Local photo and video analysis through Ollama with the `qwen2.5vl:7b` model.
@@ -13,6 +13,8 @@ What is working now:
 - Visible run-summary/preflight UI showing source scope, exact count where practical, overwrite behavior, model status, and local Ollama service status.
 - The main screen now uses a resizable Mac workbench layout with a primary setup pane, an optional summary pane, and toolbar-first run actions instead of the older bottom action tray.
 - The main workbench window now opens at a shorter display-clamped size so it stays within the visible screen instead of stretching under the Dock.
+- The main workbench now switches into a denser single-column compact mode on tighter windows, with collapsible Run Summary and Progress sections so the full setup stays reachable through the main scroll view.
+- Run-start confirmation now stays in the native alert flow, but uses a shorter high-signal summary instead of the older oversized multiline message.
 - A dedicated Settings window now owns durable app-wide defaults for source mode, traversal order, overwrite defaults, and preview-window behavior.
 - A dedicated Preview window now owns completed-item playback, and it can either open in a normal window or jump straight into full screen based on the saved preference.
 - Run actions are now available from the toolbar, the `Run` menu, and keyboard shortcuts in addition to the main workbench UI.

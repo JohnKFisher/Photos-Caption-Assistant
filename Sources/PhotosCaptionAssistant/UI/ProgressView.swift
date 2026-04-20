@@ -11,6 +11,8 @@ struct ProcessingProgressView: View {
     let summary: RunSummary?
     let liveErrors: [String]
     let lastCompletedItemPreview: CompletedItemPreview?
+    let compactLayout: Bool
+    let showsCard: Bool
     var onOpenImmersivePreview: (() -> Void)? = nil
 
     private var completionFraction: Double {
@@ -23,71 +25,82 @@ struct ProcessingProgressView: View {
     }
 
     var body: some View {
-        WorkbenchCard(
-            title: "Last Completed Item"
-        ) {
-            VStack(alignment: .leading, spacing: 14) {
-                HStack(alignment: .top, spacing: 12) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(lastCompletedItemPreview?.filename ?? "Waiting for a completed item")
-                            .font(.headline)
-                            .foregroundStyle(WorkbenchPalette.text)
+        Group {
+            if showsCard {
+                WorkbenchCard(
+                    title: "Last Completed Item",
+                    compact: compactLayout
+                ) {
+                    panelContent
+                }
+            } else {
+                panelContent
+            }
+        }
+    }
 
-                        Text(runStatusText)
-                            .font(.footnote)
-                            .foregroundStyle(WorkbenchPalette.muted)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
+    private var panelContent: some View {
+        VStack(alignment: .leading, spacing: compactLayout ? 12 : 14) {
+            HStack(alignment: .top, spacing: compactLayout ? 10 : 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(lastCompletedItemPreview?.filename ?? "Waiting for a completed item")
+                        .font(.headline)
+                        .foregroundStyle(WorkbenchPalette.text)
 
-                    Spacer(minLength: 0)
+                    Text(runStatusText)
+                        .font(.footnote)
+                        .foregroundStyle(WorkbenchPalette.muted)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
 
-                    if isRunning || lastCompletedItemPreview != nil {
-                        Button {
-                            onOpenImmersivePreview?()
-                        } label: {
-                            HStack(spacing: 6) {
-                                if isOpeningImmersivePreview {
-                                    SwiftUI.ProgressView()
-                                        .controlSize(.small)
-                                } else {
-                                    Image(systemName: "macwindow")
-                                }
+                Spacer(minLength: 0)
 
-                                Text(isOpeningImmersivePreview ? "Opening…" : "Preview Window")
+                if isRunning || lastCompletedItemPreview != nil {
+                    Button {
+                        onOpenImmersivePreview?()
+                    } label: {
+                        HStack(spacing: 6) {
+                            if isOpeningImmersivePreview {
+                                SwiftUI.ProgressView()
+                                    .controlSize(.small)
+                            } else {
+                                Image(systemName: "macwindow")
                             }
+
+                            Text(isOpeningImmersivePreview ? "Opening…" : "Preview Window")
                         }
-                        .buttonStyle(.bordered)
-                        .font(.caption)
-                        .disabled(onOpenImmersivePreview == nil || isOpeningImmersivePreview)
                     }
+                    .buttonStyle(.bordered)
+                    .font(.caption)
+                    .disabled(onOpenImmersivePreview == nil || isOpeningImmersivePreview)
+                }
+            }
+
+            previewHero
+
+            VStack(alignment: .leading, spacing: compactLayout ? 8 : 10) {
+                HStack {
+                    Text("Run Progress")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(WorkbenchPalette.text)
+                    Spacer(minLength: 0)
+                    Text(completionPercentText)
+                        .font(.caption.monospacedDigit().weight(.semibold))
+                        .foregroundStyle(WorkbenchPalette.muted)
                 }
 
-                previewHero
+                SwiftUI.ProgressView(value: completionFraction)
+                    .controlSize(.large)
+            }
 
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack {
-                        Text("Run Progress")
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(WorkbenchPalette.text)
-                        Spacer(minLength: 0)
-                        Text(completionPercentText)
-                            .font(.caption.monospacedDigit().weight(.semibold))
-                            .foregroundStyle(WorkbenchPalette.muted)
-                    }
+            metricsGrid
 
-                    SwiftUI.ProgressView(value: completionFraction)
-                        .controlSize(.large)
-                }
+            if !displayedErrors.isEmpty {
+                errorPanel
+            }
 
-                metricsGrid
-
-                if !displayedErrors.isEmpty {
-                    errorPanel
-                }
-
-                if let diagnostics = summary?.diagnostics {
-                    diagnosticsPanel(diagnostics)
-                }
+            if let diagnostics = summary?.diagnostics {
+                diagnosticsPanel(diagnostics)
             }
         }
     }
@@ -126,7 +139,7 @@ struct ProcessingProgressView: View {
             VStack(alignment: .leading, spacing: 10) {
                 RoundedRectangle(cornerRadius: 18, style: .continuous)
                     .fill(WorkbenchPalette.accentSoft)
-                    .frame(height: 190)
+                    .frame(height: compactLayout ? 138 : 164)
                     .overlay(
                         VStack(spacing: 8) {
                             Image(systemName: "photo.on.rectangle.angled")
@@ -149,9 +162,9 @@ struct ProcessingProgressView: View {
 
     private var metricsGrid: some View {
         LazyVGrid(
-            columns: [GridItem(.adaptive(minimum: 96), spacing: 10)],
+            columns: [GridItem(.adaptive(minimum: compactLayout ? 84 : 96), spacing: compactLayout ? 8 : 10)],
             alignment: .leading,
-            spacing: 10
+            spacing: compactLayout ? 8 : 10
         ) {
             metricTile("Discovered", value: "\(progress.totalDiscovered)")
             metricTile("Processed", value: "\(progress.processed)")
@@ -176,10 +189,10 @@ struct ProcessingProgressView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .textSelection(.enabled)
         }
-        .padding(12)
+        .padding(compactLayout ? 10 : 12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(WorkbenchPalette.warningFill)
-        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: compactLayout ? 14 : 16, style: .continuous))
     }
 
     private func diagnosticsPanel(_ diagnostics: RunDiagnostics) -> some View {
@@ -212,10 +225,10 @@ struct ProcessingProgressView: View {
                 }
             }
         }
-        .padding(12)
+        .padding(compactLayout ? 10 : 12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(WorkbenchPalette.surfaceAlt)
-        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: compactLayout ? 14 : 16, style: .continuous))
     }
 
     @ViewBuilder
@@ -225,12 +238,12 @@ struct ProcessingProgressView: View {
                 .resizable()
                 .scaledToFill()
                 .frame(maxWidth: .infinity)
-                .frame(height: 190)
+                .frame(height: compactLayout ? 138 : 164)
                 .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         } else {
             RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .fill(WorkbenchPalette.accentSoft)
-                .frame(height: 190)
+                .frame(height: compactLayout ? 138 : 164)
                 .overlay(
                     Text("No Preview")
                         .font(.caption)
@@ -273,10 +286,10 @@ struct ProcessingProgressView: View {
                 .font(.footnote.monospacedDigit().weight(.semibold))
                 .foregroundStyle(WorkbenchPalette.text)
         }
-        .padding(10)
+        .padding(compactLayout ? 8 : 10)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(WorkbenchPalette.surfaceAlt)
-        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: compactLayout ? 14 : 16, style: .continuous))
     }
 
     private var runStatusText: String {
