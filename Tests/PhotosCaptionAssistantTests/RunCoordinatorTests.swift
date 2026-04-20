@@ -2728,6 +2728,10 @@ private actor PreparedOverlapAnalyzerState {
         return preparationDelayNanoseconds
     }
 
+    func recordAnalysisStart(assetID: String) async {
+        await timelineRecorder?.record("analyze-start:\(assetID)")
+    }
+
     func endPreparation(assetID: String) async {
         await timelineRecorder?.record("prepare-end:\(assetID)")
     }
@@ -2735,7 +2739,6 @@ private actor PreparedOverlapAnalyzerState {
     func beginAnalysis(assetID: String) async -> (delayNanoseconds: UInt64, result: GeneratedMetadata) {
         activeCount += 1
         maxActiveCount = max(maxActiveCount, activeCount)
-        await timelineRecorder?.record("analyze-start:\(assetID)")
         return (analysisDelayNanoseconds, result)
     }
 
@@ -2767,6 +2770,7 @@ private struct PreparedOverlapAnalyzer: PreparedInputAnalyzer {
 
     func analyze(preparedPayload: PreparedAnalysisPayload) async throws -> GeneratedMetadata {
         let assetID = preparedPayload.prompt
+        await state.recordAnalysisStart(assetID: assetID)
         let (delayNanoseconds, result) = await state.beginAnalysis(assetID: assetID)
         try await Task.sleep(nanoseconds: delayNanoseconds)
         await state.endAnalysis(assetID: assetID)
