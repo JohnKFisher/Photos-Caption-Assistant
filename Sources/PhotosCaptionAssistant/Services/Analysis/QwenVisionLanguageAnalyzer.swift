@@ -264,18 +264,14 @@ public struct QwenVisionLanguageAnalyzer: PreparedInputAnalyzer {
         return nil
     }
 
-    private func extractJSONObject(from text: String) -> String? {
-        guard let start = text.firstIndex(of: "{"), let end = text.lastIndex(of: "}") else {
-            return nil
-        }
-        guard start <= end else { return nil }
-        return String(text[start...end])
-    }
-
     private func jsonCandidates(from text: String) -> [String] {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         let extracted = extractJSONObject(from: trimmed)
-        let baseCandidates = [trimmed, extracted].compactMap { $0 }.filter { !$0.isEmpty }
+        let fenced = Array(fencedJSONBlocks(from: trimmed).reversed())
+        let balancedObjects = Array(balancedJSONObjects(from: trimmed).reversed())
+        let baseCandidates = (fenced + balancedObjects + [trimmed, extracted])
+            .compactMap { $0 }
+            .filter { !$0.isEmpty }
 
         var candidates: [String] = []
         var seen = Set<String>()
@@ -291,6 +287,103 @@ public struct QwenVisionLanguageAnalyzer: PreparedInputAnalyzer {
         }
 
         return candidates
+    }
+
+    private func extractJSONObject(from text: String) -> String? {
+        guard let start = text.firstIndex(of: "{"), let end = text.lastIndex(of: "}") else {
+            return nil
+        }
+        guard start <= end else { return nil }
+        return String(text[start...end])
+    }
+
+    private func fencedJSONBlocks(from text: String) -> [String] {
+        let fence = "```"
+        var blocks: [String] = []
+        var searchStart = text.startIndex
+
+        while let openingFence = text.range(of: fence, range: searchStart..<text.endIndex) {
+            let languageStart = openingFence.upperBound
+            guard let lineBreak = text[languageStart...].firstIndex(of: "\n") else {
+                break
+            }
+
+            let language = text[languageStart..<lineBreak]
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+
+            let contentStart = text.index(after: lineBreak)
+            guard let closingFence = text.range(of: fence, range: contentStart..<text.endIndex) else {
+                break
+            }
+
+            if language.isEmpty || language == "json" {
+                let block = text[contentStart..<closingFence.lowerBound]
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if !block.isEmpty {
+                    blocks.append(String(block))
+                }
+            }
+
+            searchStart = closingFence.upperBound
+        }
+
+        return blocks
+    }
+
+    private func balancedJSONObjects(from text: String) -> [String] {
+        let characters = Array(text)
+        guard !characters.isEmpty else { return [] }
+
+        var objects: [String] = []
+
+        for start in characters.indices where characters[start] == "{" {
+            if let object = balancedJSONObject(in: characters, startingAt: start) {
+                objects.append(object)
+            }
+        }
+
+        return objects
+    }
+
+    private func balancedJSONObject(in characters: [Character], startingAt start: Int) -> String? {
+        var depth = 0
+        var insideString = false
+        var isEscaped = false
+
+        for index in start..<characters.count {
+            let character = characters[index]
+
+            if insideString {
+                if isEscaped {
+                    isEscaped = false
+                } else if character == "\\" {
+                    isEscaped = true
+                } else if character == "\"" {
+                    insideString = false
+                }
+                continue
+            }
+
+            if character == "\"" {
+                insideString = true
+                continue
+            }
+
+            if character == "{" {
+                depth += 1
+            } else if character == "}" {
+                depth -= 1
+                if depth == 0 {
+                    return String(characters[start...index])
+                }
+                if depth < 0 {
+                    return nil
+                }
+            }
+        }
+
+        return nil
     }
 
     private func normalizedJSONCandidate(_ text: String) -> String {

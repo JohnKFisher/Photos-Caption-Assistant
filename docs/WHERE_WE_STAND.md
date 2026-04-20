@@ -1,10 +1,10 @@
 # Photos Caption Assistant
 
-Current version/build: 4.6.4 (24)
+Current version/build: 4.6.5 (25)
 Current description logic version: 3.0.0
 
 Current overall status:
-The current source tree builds locally as version 4.6.4 build 24 and now uses a more Mac-native scene model: a toolbar-first hybrid workbench, dedicated Settings and Preview windows, stronger menu/keyboard access, more Finder-style reveal actions, and the existing deterministic version-triggered GitHub release flow. The core local captioning workflow is working, but this is still a personal hobby app built around Apple Photos automation rather than a polished public-distribution product.
+The current source tree builds locally as version 4.6.5 build 25 and now uses a more Mac-native scene model: a toolbar-first hybrid workbench, dedicated Settings and Preview windows, stronger menu/keyboard access, more Finder-style reveal actions, and the existing deterministic version-triggered GitHub release flow. The core local captioning workflow is working, but this is still a personal hobby app built around Apple Photos automation rather than a polished public-distribution product.
 
 What is working now:
 - Local photo and video analysis through Ollama with the `qwen2.5vl:7b` model.
@@ -30,6 +30,7 @@ What is working now:
 - Runs that overwrite non-app metadata without per-item prompts require explicit confirmation.
 - Core per-item stages now retry once automatically after a short pause when asset acquisition, caption generation/JSON decode, or Photos metadata write fails transiently.
 - Common Qwen formatting slop such as smart quotes and trailing commas is now repaired before the strict JSON decode gives up.
+- If Qwen emits a broken JSON prefix and then later returns a complete JSON object, including fenced `json` output, the analyzer now recovers that later valid object instead of failing the item outright.
 - If Qwen still returns malformed JSON, the app now saves the raw reply to an app-scoped temporary diagnostics file on this Mac and includes that path in the item failure message.
 - If Ollama is missing, the app now shows a setup card and can open the official macOS download page after explicit confirmation.
 - Missing model downloads still require explicit confirmation, while ordinary local Ollama startup does not.

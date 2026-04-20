@@ -84,6 +84,71 @@ final class QwenVisionLanguageAnalyzerTests: XCTestCase {
         XCTAssertEqual(decoded.keywords, ["person", "window", "indoor", "light", "wall", "room"])
     }
 
+    func testDecodeGeneratedMetadataRecoversLaterValidJSONObjectAfterCorruptedPrefix() throws {
+        let analyzer = QwenVisionLanguageAnalyzer()
+        let raw = """
+        {
+          "caption": "child building snowman with adult in snowy yard",
+          "keywords": ["child", "snowman", "adult", "snow", "yard", "winter", "play", "out
+        <|im_start|><|endoftext|> addCriterion
+        Sure, here is the JSON object with the provided caption and keywords:
+
+        ```json
+        {
+          "caption": "child building snowman with adult in snowy yard",
+          "keywords": ["child", "snowman", "adult", "snow", "yard", "winter", "play", "outdoor", "fun"]
+        }
+        ```
+        """
+
+        let decoded = try analyzer.decodeGeneratedMetadata(from: raw)
+
+        XCTAssertEqual(decoded.caption, "child building snowman with adult in snowy yard")
+        XCTAssertEqual(decoded.keywords, ["child", "snowman", "adult", "snow", "yard", "winter", "play", "outdoor", "fun"])
+    }
+
+    func testDecodeGeneratedMetadataPrefersLaterValidJSONObject() throws {
+        let analyzer = QwenVisionLanguageAnalyzer()
+        let raw = """
+        ```json
+        {
+          "caption": "earlier caption that should be ignored",
+          "keywords": ["earlier", "caption"]
+        }
+        ```
+
+        ```json
+        {
+          "caption": "later caption that should be used",
+          "keywords": ["later", "caption", "preferred"]
+        }
+        ```
+        """
+
+        let decoded = try analyzer.decodeGeneratedMetadata(from: raw)
+
+        XCTAssertEqual(decoded.caption, "later caption that should be used")
+        XCTAssertEqual(decoded.keywords, ["later", "caption", "preferred"])
+    }
+
+    func testDecodeGeneratedMetadataStillRejectsBrokenAddCriterionOutput() {
+        let analyzer = QwenVisionLanguageAnalyzer()
+        let raw = """
+        {
+          "caption": "family taking selfie in forest with heart-shaped sunglasses",
+          "keywords": ["family", "selfie", "forest", "heart-shaped", "sunglasses", "nature", "out
+        <|im_start|><|im_start|><|im_start|><|im_start|>
+         addCriterion("family", "selfie", "forest", "heart-shaped", "sunglasses", "nature", "outdoor", "people", "smile", "outdoor"]
+        """
+
+        XCTAssertThrowsError(try analyzer.decodeGeneratedMetadata(from: raw)) { error in
+            guard case let QwenAnalyzerError.invalidResponse(message) = error else {
+                return XCTFail("Expected invalidResponse, got \(error)")
+            }
+            XCTAssertEqual(message, "Qwen output was not valid JSON.")
+        }
+    }
+
     func testInvalidResponseSavesLocalDiagnosticArtifact() throws {
         let root = makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: root) }

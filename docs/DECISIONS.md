@@ -40,6 +40,10 @@ Rationale: The main window should open at a shorter Dock-respecting size on real
 Status: approved
 Rationale: When Qwen returns malformed JSON, the app may save the raw model reply only to an app-scoped temporary diagnostics file on the local Mac so failures are diagnosable without adding any remote logging. Parser recovery stays limited to common formatting cleanup such as smart quotes and trailing commas rather than guessing missing fields or changing semantic content.
 
+## 2026-04-19 — Prefer later complete JSON objects over broken Qwen prefixes
+Status: approved
+Rationale: Some malformed Qwen replies start a JSON object, truncate it, and then emit a second valid JSON object afterward. The analyzer may recover that later complete object, including fenced `json` blocks, but it should still reject outputs that never return to valid JSON.
+
 ## 2026-04-19 — Use an adaptive compact workbench on constrained windows
 Status: approved
 Rationale: The main run workbench should stay fully reachable on shorter and narrower Mac windows by switching from the roomy two-pane layout to a single-column compact mode with collapsible summary and progress sections. Run confirmation remains a native alert, but its message should stay intentionally brief because the full detail already lives in the visible Run Summary panel.
