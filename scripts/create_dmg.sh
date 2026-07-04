@@ -6,6 +6,7 @@ APP_NAME="Photos Caption Assistant"
 APP_BUNDLE="${1:-$ROOT_DIR/dist/$APP_NAME.app}"
 OUTPUT_DIR="${2:-$ROOT_DIR/dist}"
 VOLUME_NAME="$APP_NAME"
+CODE_SIGN_IDENTITY="${MACOS_CODESIGN_IDENTITY:-}"
 
 plist_read() {
   /usr/libexec/PlistBuddy -c "Print :$2" "$1"
@@ -50,5 +51,10 @@ hdiutil create \
   "$RW_DMG"
 
 hdiutil convert "$RW_DMG" -ov -format UDZO -imagekey zlib-level=9 -o "$FINAL_DMG"
+
+if [[ -n "$CODE_SIGN_IDENTITY" ]]; then
+  codesign --force --sign "$CODE_SIGN_IDENTITY" --timestamp "$FINAL_DMG"
+  codesign --verify --verbose=2 "$FINAL_DMG"
+fi
 
 echo "Built DMG: $FINAL_DMG"

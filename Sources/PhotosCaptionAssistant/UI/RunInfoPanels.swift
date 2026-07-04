@@ -49,23 +49,32 @@ struct AboutPanelView: View {
                 Text("Copyright")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
-                Text("Copyright © \(AppPresentation.ownerName)")
+                Text(AppPresentation.copyrightLine)
 
                 Text("GitHub")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
-                Link(destination: AppPresentation.repositoryURL) {
-                    Text(AppPresentation.repositoryURL.absoluteString)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .multilineTextAlignment(.leading)
-                }
-                .buttonStyle(.plain)
+                aboutLink(AppPresentation.repositoryURL)
+
+                Text("Sidelark Labs")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                aboutLink(AppPresentation.sidelarkLabsURL)
             }
 
             Spacer(minLength: 0)
         }
         .frame(maxWidth: .infinity, alignment: .topLeading)
+    }
+
+    private func aboutLink(_ url: URL) -> some View {
+        Link(destination: url) {
+            Text(url.absoluteString)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .multilineTextAlignment(.leading)
+        }
+        .buttonStyle(.plain)
     }
 }
 

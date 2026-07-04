@@ -14,6 +14,7 @@ X86_64_BINARY="$ROOT_DIR/.build/x86_64-apple-macosx/release/$EXECUTABLE_NAME"
 UNIVERSAL_DIR="$ROOT_DIR/.build/universal-apple-macosx/release"
 UNIVERSAL_BINARY="$UNIVERSAL_DIR/$EXECUTABLE_NAME"
 ICON_PATH="$ROOT_DIR/Sources/PhotosCaptionAssistant/Resources/AppIcon.icns"
+CODE_SIGN_IDENTITY="${MACOS_CODESIGN_IDENTITY:-}"
 
 plist_read() {
   /usr/libexec/PlistBuddy -c "Print :$2" "$1"
@@ -117,9 +118,20 @@ PLIST
 
 printf 'APPL????' > "$APP_BUNDLE/Contents/PkgInfo"
 xattr -cr "$APP_BUNDLE"
-codesign --force --deep --sign - "$APP_BUNDLE"
+
+if [[ -n "$CODE_SIGN_IDENTITY" ]]; then
+  codesign --force --sign "$CODE_SIGN_IDENTITY" --options runtime --timestamp "$APP_BUNDLE"
+else
+  codesign --force --sign - "$APP_BUNDLE"
+fi
+
 codesign --verify --deep --strict --verbose=2 "$APP_BUNDLE"
 
 echo "Built: $APP_BUNDLE"
 echo "Version: $CURRENT_VERSION ($CURRENT_BUILD)"
 echo "Architectures: $UNIVERSAL_ARCHS"
+if [[ -n "$CODE_SIGN_IDENTITY" ]]; then
+  echo "Signing: Developer ID ($CODE_SIGN_IDENTITY)"
+else
+  echo "Signing: ad-hoc"
+fi

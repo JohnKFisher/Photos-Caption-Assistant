@@ -4,7 +4,7 @@ Current version/build: 4.6.5 (25)
 Current description logic version: 3.0.0
 
 Current overall status:
-The current source tree builds locally as version 4.6.5 build 25 and now uses a more Mac-native scene model: a toolbar-first hybrid workbench, dedicated Settings and Preview windows, stronger menu/keyboard access, more Finder-style reveal actions, and the existing deterministic version-triggered GitHub release flow. The core local captioning workflow is working, but this is still a personal hobby app built around Apple Photos automation rather than a polished public-distribution product.
+The current source tree builds locally as version 4.6.5 build 25 and now uses a more Mac-native scene model: a toolbar-first hybrid workbench, dedicated Settings and Preview windows, stronger menu/keyboard access, more Finder-style reveal actions, and a deterministic version-triggered GitHub release flow that signs, notarizes, staples, and Gatekeeper-checks release DMGs when the required Apple secrets are configured. The core local captioning workflow is working, but this is still a personal hobby app built around Apple Photos automation rather than a polished public-distribution product.
 
 What is working now:
 - Local photo and video analysis through Ollama with the `qwen2.5vl:7b` model.
@@ -37,6 +37,7 @@ What is working now:
 - Resume-state and queued-albums files are stored under Application Support and surfaced in the Data & Storage window.
 - The build script now creates a universal `arm64` + `x86_64` app bundle in `dist/`.
 - GitHub Actions now separate ordinary build/test verification from version-triggered release publishing, and releases package a DMG from committed source.
+- Version-triggered GitHub releases import the Developer ID certificate from repository secrets, sign the app with hardened runtime and timestamping, sign the DMG, notarize and staple it, and run Gatekeeper assessment before upload.
 - Existing long-run progress, cancellation, resume-state persistence, diagnostics, and restart safeguards remain in place.
 
 What is partially implemented:
@@ -46,17 +47,17 @@ What is partially implemented:
 
 What is not implemented yet:
 - No dedicated prompt comparison or prompt selection UI.
-- No notarized public-distribution flow.
 
 Known limitations and trust warnings:
-- The packaged app is ad-hoc signed for local use but not notarized.
+- Local packaged apps are ad-hoc signed by default unless a Developer ID signing identity is provided.
+- Notarized GitHub Release DMGs require valid Apple Developer ID and notarization secrets in the repository.
 - The app depends on Apple Photos automation and local Ollama availability.
 - Raw malformed Qwen replies can now be written to an app-scoped temporary diagnostics folder for local troubleshooting when JSON parsing fails.
 - Photos.app must be open before starting a write run.
 - The bundle identifier is now `com.jkfisher.PhotosCaptionAssistant`, so macOS will likely prompt again for Photos and Apple Events permissions after the rename.
 - The core production write path still relies on AppleScript and Photos automation for metadata reads, writes, overwrite gating, picker resolution, queued-albums resolution, and Photos lifecycle handling.
 - The app does not install Ollama itself. It uses a manual browser handoff to the official download page when Ollama is missing.
-- The app is still distributed as an ad-hoc-signed, non-notarized build, so Gatekeeper may still require Finder `Open` or `Privacy & Security -> Open Anyway`.
+- Local ad-hoc builds may still require Finder `Open` or `Privacy & Security -> Open Anyway`; successful GitHub release DMGs should follow the Developer ID notarized path instead.
 - This repo is source-first. Built app bundles and temp outputs should not be treated as source-of-truth artifacts.
 - The Preview window is now its own scene, so the old “take over the main window” immersive behavior is no longer the default presentation path.
 
@@ -77,7 +78,6 @@ Important operational risks:
 - Whole-library runs and no-prompt overwrite modes are intentionally possible, but they still deserve caution even with the new confirmations.
 
 Recommended next priorities:
-- Decide whether this project will stay source-first and local-only, or gain a real notarized distribution path.
 - Add a small, repeatable smoke-test checklist for future known-good anchors and releases.
 - Consider whether the diagnostics tools should eventually become a more structured inspector-style utility window rather than a free-form form.
 

@@ -17,12 +17,16 @@ Status: approved
 Rationale: `Sources/PhotosCaptionAssistant/Resources/Info.plist` is the canonical source for marketing version and build number. Local or CI packaging must not auto-bump or derive version/build from generated artifacts.
 
 ## 2026-04-14 — Keep distribution ad-hoc signed and non-notarized for now
-Status: approved
-Rationale: This repo distributes personal-use, ad-hoc-signed macOS builds and does not currently use Developer ID signing or notarization. README and release notes must describe the Gatekeeper implications honestly.
+Status: superseded by the 2026-07-04 Developer ID release workflow decision
+Rationale: This repo previously distributed personal-use, ad-hoc-signed macOS builds and did not use Developer ID signing or notarization. README and release notes had to describe the Gatekeeper implications honestly.
 
 ## 2026-04-14 — Publish GitHub releases from version changes on main
 Status: approved
 Rationale: A checked-in version/build change on `main` is the publish signal. CI should create or update the corresponding GitHub Release using the existing `vX.Y.Z` tag shape and attach a DMG built from committed source.
+
+## 2026-07-04 — Use Developer ID signing and notarization for GitHub release DMGs
+Status: approved
+Rationale: Version-triggered GitHub releases now import a Developer ID certificate from repository secrets, sign the app with hardened runtime and timestamping, sign the DMG, notarize and staple the DMG, and run Gatekeeper assessment before upload. Local builds may still fall back to ad-hoc signing unless a Developer ID signing identity is provided.
 
 ## 2026-04-15 — Keep the main app as a hybrid workbench, not a sidebar-first redesign
 Status: approved
