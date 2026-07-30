@@ -55,7 +55,10 @@ struct RunCommands: Commands {
                 viewModel.cancelRun()
             }
             .keyboardShortcut(".", modifiers: [.command])
-            .disabled(!viewModel.isRunning || viewModel.isCancelRequested)
+            .disabled(
+                (!viewModel.isRunning && !viewModel.isRunAdmissionActive)
+                    || viewModel.isCancelRequested
+            )
 
             Divider()
 
@@ -65,7 +68,7 @@ struct RunCommands: Commands {
                 }
             }
             .keyboardShortcut("r", modifiers: [.command])
-            .disabled(viewModel.isRunning || viewModel.isPreparingModel)
+            .disabled(viewModel.isRunning || viewModel.isRunAdmissionActive || viewModel.isPreparingModel)
 
             Button("Resume Previous Run") {
                 Task {

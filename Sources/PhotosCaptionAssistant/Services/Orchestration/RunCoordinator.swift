@@ -18,26 +18,26 @@ public struct RunSafetyPausePrompt: Sendable, Equatable {
 }
 
 public struct RunCallbacks {
-    public var onProgress: (RunProgress) -> Void
-    public var onPreparationProgress: (Int, Int) -> Void
-    public var onStatusChanged: (String?) -> Void
-    public var onItemCompleted: (CompletedItemPreview) -> Void
-    public var onPendingIDsUpdated: ([String]) -> Void
-    public var onError: (String) -> Void
-    public var confirmExternalOverwrite: (MediaAsset, ExistingMetadataState) async -> Bool
-    public var confirmContinueAfterCheckpoint: (Int) async -> Bool
-    public var confirmSafetyPause: (RunSafetyPausePrompt) async -> Bool
+    public var onProgress: @MainActor (RunProgress) -> Void
+    public var onPreparationProgress: @MainActor (Int, Int) -> Void
+    public var onStatusChanged: @MainActor (String?) -> Void
+    public var onItemCompleted: @MainActor (CompletedItemPreview) -> Void
+    public var onPendingIDsUpdated: @MainActor ([String]) -> Void
+    public var onError: @MainActor (String) -> Void
+    public var confirmExternalOverwrite: @MainActor (MediaAsset, ExistingMetadataState) async -> Bool
+    public var confirmContinueAfterCheckpoint: @MainActor (Int) async -> Bool
+    public var confirmSafetyPause: @MainActor (RunSafetyPausePrompt) async -> Bool
 
     public init(
-        onProgress: @escaping (RunProgress) -> Void = { _ in },
-        onPreparationProgress: @escaping (Int, Int) -> Void = { _, _ in },
-        onStatusChanged: @escaping (String?) -> Void = { _ in },
-        onItemCompleted: @escaping (CompletedItemPreview) -> Void = { _ in },
-        onPendingIDsUpdated: @escaping ([String]) -> Void = { _ in },
-        onError: @escaping (String) -> Void = { _ in },
-        confirmExternalOverwrite: @escaping (MediaAsset, ExistingMetadataState) async -> Bool = { _, _ in false },
-        confirmContinueAfterCheckpoint: @escaping (Int) async -> Bool = { _ in true },
-        confirmSafetyPause: @escaping (RunSafetyPausePrompt) async -> Bool = { _ in true }
+        onProgress: @escaping @MainActor (RunProgress) -> Void = { _ in },
+        onPreparationProgress: @escaping @MainActor (Int, Int) -> Void = { _, _ in },
+        onStatusChanged: @escaping @MainActor (String?) -> Void = { _ in },
+        onItemCompleted: @escaping @MainActor (CompletedItemPreview) -> Void = { _ in },
+        onPendingIDsUpdated: @escaping @MainActor ([String]) -> Void = { _ in },
+        onError: @escaping @MainActor (String) -> Void = { _ in },
+        confirmExternalOverwrite: @escaping @MainActor (MediaAsset, ExistingMetadataState) async -> Bool = { _, _ in false },
+        confirmContinueAfterCheckpoint: @escaping @MainActor (Int) async -> Bool = { _ in true },
+        confirmSafetyPause: @escaping @MainActor (RunSafetyPausePrompt) async -> Bool = { _ in true }
     ) {
         self.onProgress = onProgress
         self.onPreparationProgress = onPreparationProgress
@@ -463,6 +463,7 @@ public final class RunCoordinator {
     private let stageRetryDelaySeconds: TimeInterval
     private let stageRetryDelayNanoseconds: UInt64
 
+    private var activeRunSessionID: UUID?
     private var isCancelled = false
 
     public convenience init(
@@ -581,16 +582,50 @@ public final class RunCoordinator {
         return photosWriter as? IncrementalPhotosWriter
     }
 
-    public func cancel() {
+    @discardableResult
+    public func reserveRunSession(_ sessionID: UUID) -> Bool {
+        guard activeRunSessionID == nil else {
+            return false
+        }
+        activeRunSessionID = sessionID
+        isCancelled = false
+        return true
+    }
+
+    public func releaseRunSession(_ sessionID: UUID) {
+        guard activeRunSessionID == sessionID else {
+            return
+        }
+        activeRunSessionID = nil
+        isCancelled = false
+    }
+
+    public func cancel(sessionID: UUID? = nil) {
+        guard let activeRunSessionID,
+              sessionID == nil || sessionID == activeRunSessionID
+        else {
+            return
+        }
         isCancelled = true
     }
 
     public func run(
         options: RunOptions,
         capabilities: AppCapabilities,
-        callbacks: RunCallbacks
+        callbacks: RunCallbacks,
+        sessionID: UUID? = nil
     ) async -> RunSummary {
-        isCancelled = false
+        let sessionID = sessionID ?? UUID()
+        if activeRunSessionID == nil {
+            guard reserveRunSession(sessionID) else {
+                return RunSummary(progress: .init(), errors: ["Another run is already in progress."])
+            }
+        } else if activeRunSessionID != sessionID {
+            return RunSummary(progress: .init(), errors: ["Another run is already in progress."])
+        }
+        defer {
+            releaseRunSession(sessionID)
+        }
 
         if case .picker = options.source,
            case let .unsupported(reason) = capabilities.pickerCapability {
@@ -932,7 +967,7 @@ public final class RunCoordinator {
             let priorTask = pendingPreviewTasks.last
             let previewRenderer = self.previewRenderer
 
-            let task = Task(priority: .utility) { [timingRecorder] in
+            let task = Task(priority: .utility) { @MainActor [timingRecorder] in
                 _ = await priorTask?.value
 
                 let previewStart = DispatchTime.now().uptimeNanoseconds
@@ -1312,6 +1347,10 @@ public final class RunCoordinator {
                                 }
                             case .skip:
                                 shouldWrite = false
+                            }
+
+                            if isCancelled {
+                                break
                             }
 
                             if shouldWrite {

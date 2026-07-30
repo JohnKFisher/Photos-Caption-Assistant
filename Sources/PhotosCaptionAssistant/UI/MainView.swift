@@ -342,6 +342,7 @@ final class AppViewModel: ObservableObject {
     @Published var alwaysOverwriteExternalMetadata: Bool
 
     @Published var isRunning = false
+    @Published private(set) var isRunAdmissionActive = false
     @Published var isCancelRequested = false
     @Published var isPreparingModel = false
     @Published var preflightCountState: RunPreflightCountState = .message("Select an album to estimate the current scope.")
@@ -366,6 +367,7 @@ final class AppViewModel: ObservableObject {
 
     private var conflictContinuation: CheckedContinuation<Bool, Never>?
     private var confirmationContinuation: CheckedContinuation<Bool, Never>?
+    private var activeRunID: UUID?
     private var lastRunOptions: RunOptions?
     private var lastFailedAssetIDs: [String] = []
     private var fastTraversalTotalCountTask: Task<Void, Never>?
@@ -375,6 +377,9 @@ final class AppViewModel: ObservableObject {
     private var lastPersistedPendingCount: Int?
     private var persistedRunOptionsForResume: PersistedRunOptions?
     private var persistedRunState: PersistedRunState?
+    private var lastPersistenceErrorMessage: String?
+    private var captionWorkflowPersistenceErrorMessage: String?
+    private var runPersistenceTasks: [Task<Void, Never>] = []
     private var preparationStatusMessage: String?
     private var automaticRestartStatusMessage: String?
     private var hasShownStartupAutomationAlert = false
@@ -483,11 +488,40 @@ final class AppViewModel: ObservableObject {
     }
 
     var canStartRun: Bool {
-        !isRunning && !isPreparingModel && runPreflightSummary.blockingReasons.isEmpty
+        !isRunning && !isRunAdmissionActive && !isPreparingModel && runPreflightSummary.blockingReasons.isEmpty
+    }
+
+    private func claimRunAdmission() -> UUID? {
+        guard !isRunning, !isRunAdmissionActive, !isPreparingModel else {
+            return nil
+        }
+
+        let runID = UUID()
+        guard coordinator.reserveRunSession(runID) else {
+            return nil
+        }
+        activeRunID = runID
+        isRunAdmissionActive = true
+        isCancelRequested = false
+        return runID
+    }
+
+    private func releaseRunAdmission(_ runID: UUID) {
+        guard activeRunID == runID else {
+            return
+        }
+        activeRunID = nil
+        isRunAdmissionActive = false
+        isCancelRequested = false
+        coordinator.releaseRunSession(runID)
+    }
+
+    private func shouldContinueRunAdmission(_ runID: UUID) -> Bool {
+        activeRunID == runID && !isCancelRequested
     }
 
     func applyAppDefaultsIfPossible() {
-        guard !isRunning, !isPreparingModel else { return }
+        guard !isRunning, !isRunAdmissionActive, !isPreparingModel else { return }
         let snapshot = AppSettings.load(from: appSettingsDefaults)
         sourceSelection = snapshot.defaultSourceSelection
         traversalOrder = snapshot.defaultTraversalOrder
@@ -569,7 +603,8 @@ final class AppViewModel: ObservableObject {
     }
 
     func startRun() async {
-        guard !isRunning, !isPreparingModel else { return }
+        guard let runID = claimRunAdmission() else { return }
+        defer { releaseRunAdmission(runID) }
 
         guard capabilities.photosAutomationAvailable else {
             showMessage(
@@ -586,10 +621,12 @@ final class AppViewModel: ObservableObject {
         guard await ensureOllamaInstalledForRunIfNeeded() else {
             return
         }
+        guard shouldContinueRunAdmission(runID) else { return }
 
         guard await ensurePhotosReadyForWriteRun() else {
             return
         }
+        guard shouldContinueRunAdmission(runID) else { return }
 
         let summary = runPreflightSummary
         if !summary.confirmationReasons.isEmpty {
@@ -601,16 +638,19 @@ final class AppViewModel: ObservableObject {
             )
             guard confirmed else { return }
         }
+        guard shouldContinueRunAdmission(runID) else { return }
 
         guard await prepareModelForRunIfNeeded() else {
             return
         }
+        guard shouldContinueRunAdmission(runID) else { return }
 
-        await run(options: options)
+        await run(options: options, runID: runID)
     }
 
     func retryFailedItems() async {
-        guard !isRunning, !isPreparingModel else { return }
+        guard let runID = claimRunAdmission() else { return }
+        defer { releaseRunAdmission(runID) }
         guard capabilities.photosAutomationAvailable else {
             showMessage(
                 title: "Automation Required",
@@ -629,9 +669,11 @@ final class AppViewModel: ObservableObject {
         guard await ensureOllamaInstalledForRunIfNeeded() else {
             return
         }
+        guard shouldContinueRunAdmission(runID) else { return }
         guard await ensurePhotosReadyForWriteRun() else {
             return
         }
+        guard shouldContinueRunAdmission(runID) else { return }
 
         let overwrite = lastRunOptions?.overwriteAppOwnedSameOrNewer ?? overwriteAppOwnedSameOrNewer
         let overwriteExternal = lastRunOptions?.alwaysOverwriteExternalMetadata ?? alwaysOverwriteExternalMetadata
@@ -646,11 +688,13 @@ final class AppViewModel: ObservableObject {
         guard await prepareModelForRunIfNeeded() else {
             return
         }
-        await run(options: retryOptions)
+        guard shouldContinueRunAdmission(runID) else { return }
+        await run(options: retryOptions, runID: runID)
     }
 
     func resumeSavedRun() async {
-        guard !isRunning, !isPreparingModel else { return }
+        guard let runID = claimRunAdmission() else { return }
+        defer { releaseRunAdmission(runID) }
         guard capabilities.photosAutomationAvailable else {
             showMessage(
                 title: "Automation Required",
@@ -669,9 +713,11 @@ final class AppViewModel: ObservableObject {
         guard await ensureOllamaInstalledForRunIfNeeded() else {
             return
         }
+        guard shouldContinueRunAdmission(runID) else { return }
         guard await ensurePhotosReadyForWriteRun() else {
             return
         }
+        guard shouldContinueRunAdmission(runID) else { return }
 
         let restoredBaseOptions = persistedRunState.options.toRunOptions()
         let resumeOptions = RunOptions(
@@ -684,10 +730,16 @@ final class AppViewModel: ObservableObject {
         guard await prepareModelForRunIfNeeded() else {
             return
         }
-        await run(options: resumeOptions, persistedOptionsOverride: persistedRunState.options)
+        guard shouldContinueRunAdmission(runID) else { return }
+        await run(options: resumeOptions, persistedOptionsOverride: persistedRunState.options, runID: runID)
     }
 
-    private func run(options: RunOptions, persistedOptionsOverride: PersistedRunOptions? = nil) async {
+    private func run(
+        options: RunOptions,
+        persistedOptionsOverride: PersistedRunOptions? = nil,
+        runID: UUID
+    ) async {
+        guard activeRunID == runID else { return }
         let persistedOptions = persistedOptionsOverride ?? PersistedRunOptions(runOptions: options)
         persistedRunOptionsForResume = persistedOptions
 
@@ -705,74 +757,70 @@ final class AppViewModel: ObservableObject {
         lastFailedAssetIDs = []
         latestPendingIDs = []
         lastPersistedPendingCount = nil
+        lastPersistenceErrorMessage = nil
         runStartedAt = Date()
         fastTraversalTotalCountTask?.cancel()
         fastTraversalTotalCountTask = nil
         startFastTraversalTotalCountTaskIfNeeded(options: options)
         startPerformanceTicker()
-        await persistRunStateIfNeeded(pendingIDs: [], force: true)
+        await runResumeStore.beginSession(runID)
+        await persistRunStateIfNeeded(pendingIDs: [], force: true, runID: runID)
 
         let callbacks = RunCallbacks(
             onProgress: { [weak self] updated in
-                Task { @MainActor in
-                    guard let self else { return }
-                    let mergedDiscovered = max(self.progress.totalDiscovered, updated.totalDiscovered)
-                    self.progress = RunProgress(
-                        totalDiscovered: mergedDiscovered,
-                        processed: updated.processed,
-                        changed: updated.changed,
-                        skipped: updated.skipped,
-                        failed: updated.failed
-                    )
-                    self.refreshPerformance()
-                    if updated.processed > 0 {
-                        self.setPreparationStatus(nil)
-                    }
+                guard let self, self.activeRunID == runID else { return }
+                let mergedDiscovered = max(self.progress.totalDiscovered, updated.totalDiscovered)
+                self.progress = RunProgress(
+                    totalDiscovered: mergedDiscovered,
+                    processed: updated.processed,
+                    changed: updated.changed,
+                    skipped: updated.skipped,
+                    failed: updated.failed
+                )
+                self.refreshPerformance()
+                if updated.processed > 0 {
+                    self.setPreparationStatus(nil)
                 }
             },
             onPreparationProgress: { [weak self] enumerated, total in
                 guard total > 0 else { return }
-                Task { @MainActor in
-                    guard let self, self.isRunning else { return }
-                    self.setPreparationStatus("Preparing ordered run (\(enumerated)/\(total) enumerated)")
-                }
+                guard let self, self.activeRunID == runID, self.isRunning else { return }
+                self.setPreparationStatus("Preparing ordered run (\(enumerated)/\(total) enumerated)")
             },
             onStatusChanged: { [weak self] status in
-                Task { @MainActor in
-                    self?.setAutomaticRestartStatus(status)
-                }
+                guard let self, self.activeRunID == runID else { return }
+                self.setAutomaticRestartStatus(status)
             },
             onItemCompleted: { [weak self] preview in
-                Task { @MainActor in
-                    self?.receiveCompletedItemPreview(preview)
-                }
+                guard let self, self.activeRunID == runID else { return }
+                self.receiveCompletedItemPreview(preview)
             },
             onPendingIDsUpdated: { [weak self] pendingIDs in
-                Task { @MainActor in
-                    guard let self else { return }
-                    self.latestPendingIDs = pendingIDs
-                    self.resumablePendingCount = pendingIDs.count
+                guard let self, self.activeRunID == runID else { return }
+                self.latestPendingIDs = pendingIDs
+                let persistenceTask = Task { @MainActor [weak self] in
+                    guard let self, self.activeRunID == runID else { return }
                     await self.persistRunStateIfNeeded(
                         pendingIDs: pendingIDs,
-                        force: pendingIDs.isEmpty
+                        force: pendingIDs.isEmpty,
+                        runID: runID
                     )
                 }
+                self.runPersistenceTasks.append(persistenceTask)
             },
             onError: { [weak self] message in
-                Task { @MainActor in
-                    guard let self else { return }
-                    self.recentRunErrors.append(message)
-                    if self.recentRunErrors.count > 12 {
-                        self.recentRunErrors.removeFirst(self.recentRunErrors.count - 12)
-                    }
+                guard let self, self.activeRunID == runID else { return }
+                self.recentRunErrors.append(message)
+                if self.recentRunErrors.count > 12 {
+                    self.recentRunErrors.removeFirst(self.recentRunErrors.count - 12)
                 }
             },
             confirmExternalOverwrite: { [weak self] asset, existing in
-                guard let self else { return false }
+                guard let self, self.activeRunID == runID else { return false }
                 return await self.requestConflictDecision(asset: asset, existing: existing)
             },
             confirmSafetyPause: { [weak self] prompt in
-                guard let self else { return false }
+                guard let self, self.activeRunID == runID else { return false }
                 return await self.requestConfirmation(
                     title: prompt.title,
                     message: prompt.message,
@@ -782,7 +830,17 @@ final class AppViewModel: ObservableObject {
             }
         )
 
-        let summary = await coordinator.run(options: options, capabilities: capabilities, callbacks: callbacks)
+        let summary = await coordinator.run(
+            options: options,
+            capabilities: capabilities,
+            callbacks: callbacks,
+            sessionID: runID
+        )
+        await drainRunPersistenceTasks()
+        guard activeRunID == runID else {
+            await runResumeStore.endSession(runID)
+            return
+        }
         fastTraversalTotalCountTask?.cancel()
         fastTraversalTotalCountTask = nil
         performanceTickTask?.cancel()
@@ -797,7 +855,8 @@ final class AppViewModel: ObservableObject {
         lastFailedAssetIDs = summary.failedAssets.map(\.id)
         synchronizeRetainedPreviewFiles()
 
-        await finalizePersistedRunState()
+        await finalizePersistedRunState(runID: runID)
+        await runResumeStore.endSession(runID)
 
         if !summary.errors.isEmpty {
             showMessage(
@@ -861,7 +920,7 @@ final class AppViewModel: ObservableObject {
     }
 
     func clearSavedRunState() async {
-        guard !isRunning, !isPreparingModel else { return }
+        guard !isRunning, !isRunAdmissionActive, !isPreparingModel else { return }
 
         let confirmed = await requestConfirmation(
             title: "Clear Saved Run State?",
@@ -871,12 +930,19 @@ final class AppViewModel: ObservableObject {
         )
         guard confirmed else { return }
 
-        await runResumeStore.clear()
-        persistedRunState = nil
-        resumablePendingCount = 0
-        latestPendingIDs = []
-        lastPersistedPendingCount = nil
-        showMessage(title: "Saved Run State Cleared", message: "The resumable pending-ID snapshot was removed.")
+        switch await runResumeStore.clear() {
+        case .success:
+            persistedRunState = nil
+            resumablePendingCount = 0
+            latestPendingIDs = []
+            lastPersistedPendingCount = nil
+            showMessage(title: "Saved Run State Cleared", message: "The resumable pending-ID snapshot was removed.")
+        case let .failure(error):
+            showMessage(
+                title: "Could Not Clear Saved Run State",
+                message: "The saved run state was kept because the app could not remove it.\n\n\(error.localizedDescription)"
+            )
+        }
     }
 
     func confirmAndOpenOllamaDownloadPage() async {
@@ -960,14 +1026,19 @@ final class AppViewModel: ObservableObject {
     }
 
     func cancelRun() {
-        guard isRunning else { return }
+        guard let activeRunID else { return }
         guard !isCancelRequested else { return }
         isCancelRequested = true
-        coordinator.cancel()
+        cancelPendingRunPrompts()
+        coordinator.cancel(sessionID: activeRunID)
+    }
+
+    func cancelPendingRunPromptsForTeardown() {
+        cancelPendingRunPrompts()
     }
 
     func runScanBenchmarkFromMenu() async {
-        guard !isRunning, !isPreparingModel, !isRunningScanBenchmark, !isRunningIdentityWriteProbe else { return }
+        guard !isRunning, !isRunAdmissionActive, !isPreparingModel, !isRunningScanBenchmark, !isRunningIdentityWriteProbe else { return }
 
         isRunningScanBenchmark = true
         benchmarkStatusMessage = "Preparing scan benchmark..."
@@ -1045,7 +1116,7 @@ final class AppViewModel: ObservableObject {
     }
 
     func runIdentityWriteProbeFromMenu() async {
-        guard !isRunning, !isPreparingModel, !isRunningScanBenchmark, !isRunningIdentityWriteProbe else { return }
+        guard !isRunning, !isRunAdmissionActive, !isPreparingModel, !isRunningScanBenchmark, !isRunningIdentityWriteProbe else { return }
 
         guard let configuration = PhotoLibraryIdentityWriteProbeConfiguration(
             sacrificialAssetID: identityProbeSacrificialAssetID,
@@ -1171,15 +1242,11 @@ final class AppViewModel: ObservableObject {
     }
 
     func resolveConflictPrompt(overwrite: Bool) {
-        conflictContinuation?.resume(returning: overwrite)
-        conflictContinuation = nil
-        pendingConflictPrompt = nil
+        finishConflictPrompt(returning: overwrite)
     }
 
     func resolveConfirmationPrompt(confirmed: Bool) {
-        confirmationContinuation?.resume(returning: confirmed)
-        confirmationContinuation = nil
-        activeAlert = nil
+        finishConfirmationPrompt(returning: confirmed)
     }
 
     func clearMessagePrompt() {
@@ -1482,9 +1549,18 @@ final class AppViewModel: ObservableObject {
     }
 
     private func loadPersistedRunState() async {
-        let loaded = await runResumeStore.load()
-        persistedRunState = loaded
-        resumablePendingCount = loaded?.pendingIDs.count ?? 0
+        switch await runResumeStore.load() {
+        case let .success(loaded):
+            persistedRunState = loaded
+            resumablePendingCount = loaded?.pendingIDs.count ?? 0
+        case let .failure(error):
+            persistedRunState = nil
+            resumablePendingCount = 0
+            showMessage(
+                title: "Saved Run State Unavailable",
+                message: "The app could not read the saved resumable run state. The file was kept for recovery or inspection.\n\n\(error.localizedDescription)"
+            )
+        }
     }
 
     private var currentRunSetupSnapshot: RunSetupSnapshot {
@@ -1677,8 +1753,12 @@ final class AppViewModel: ObservableObject {
         return notes.joined(separator: "\n")
     }
 
-    private func persistRunStateIfNeeded(pendingIDs: [String], force: Bool) async {
-        guard let persistedRunOptionsForResume else { return }
+    private func persistRunStateIfNeeded(
+        pendingIDs: [String],
+        force: Bool,
+        runID: UUID
+    ) async {
+        guard activeRunID == runID, let persistedRunOptionsForResume else { return }
         let shouldPersist: Bool
         if force || lastPersistedPendingCount == nil {
             shouldPersist = true
@@ -1689,29 +1769,73 @@ final class AppViewModel: ObservableObject {
         guard shouldPersist else { return }
 
         let snapshot = PersistedRunState(
+            runSessionID: runID,
             savedAt: Date(),
             options: persistedRunOptionsForResume,
             pendingIDs: pendingIDs
         )
-        await runResumeStore.save(snapshot)
-        persistedRunState = snapshot
-        lastPersistedPendingCount = pendingIDs.count
+        switch await runResumeStore.save(snapshot, for: runID) {
+        case .success:
+            guard activeRunID == runID else { return }
+            persistedRunState = snapshot
+            resumablePendingCount = pendingIDs.count
+            lastPersistedPendingCount = pendingIDs.count
+        case .failure(.staleSession):
+            return
+        case let .failure(error):
+            reportRunPersistenceFailure(error)
+        }
     }
 
-    private func finalizePersistedRunState() async {
-        if latestPendingIDs.isEmpty {
-            await runResumeStore.clear()
-            persistedRunState = nil
-            resumablePendingCount = 0
-            lastPersistedPendingCount = nil
+    private func drainRunPersistenceTasks() async {
+        let tasks = runPersistenceTasks
+        runPersistenceTasks.removeAll(keepingCapacity: true)
+        for task in tasks {
+            await task.value
+        }
+    }
+
+    private func reportRunPersistenceFailure(_ error: PersistenceStoreError) {
+        if case .staleSession = error {
             return
         }
-        await persistRunStateIfNeeded(pendingIDs: latestPendingIDs, force: true)
+        let message = error.localizedDescription
+        guard lastPersistenceErrorMessage != message else { return }
+        lastPersistenceErrorMessage = message
+        showMessage(
+            title: "Saved Run State Unavailable",
+            message: "The run is continuing, but the app could not update its resumable pending-ID snapshot. The last confirmed saved state was kept.\n\n\(message)"
+        )
+    }
+
+    private func finalizePersistedRunState(runID: UUID) async {
+        guard activeRunID == runID else { return }
+        if latestPendingIDs.isEmpty {
+            switch await runResumeStore.clear(for: runID) {
+            case .success:
+                guard activeRunID == runID else { return }
+                persistedRunState = nil
+                resumablePendingCount = 0
+                lastPersistedPendingCount = nil
+            case .failure(.staleSession):
+                return
+            case let .failure(error):
+                reportRunPersistenceFailure(error)
+            }
+            return
+        }
+        await persistRunStateIfNeeded(pendingIDs: latestPendingIDs, force: true, runID: runID)
     }
 
     private func loadCaptionWorkflowConfiguration() async {
-        let configuration = await captionWorkflowConfigurationStore.load()
-        applyCaptionWorkflowConfiguration(configuration)
+        switch await captionWorkflowConfigurationStore.load() {
+        case let .success(configuration):
+            captionWorkflowPersistenceErrorMessage = nil
+            applyCaptionWorkflowConfiguration(configuration)
+        case let .failure(error):
+            captionWorkflowPersistenceErrorMessage = "Saved \(AppPresentation.queuedAlbumsTitle) could not be loaded. The file was kept for recovery or inspection. \(error.localizedDescription)"
+            refreshCaptionWorkflowStatus()
+        }
     }
 
     func setCaptionWorkflowAlbumSelection(_ albumID: String?, at index: Int) async {
@@ -1791,11 +1915,24 @@ final class AppViewModel: ObservableObject {
     }
 
     private func persistCaptionWorkflowConfiguration() async {
+        defer {
+            refreshCaptionWorkflowStatus()
+        }
         guard let configuration = makeCaptionWorkflowConfiguration() else {
-            await captionWorkflowConfigurationStore.clear()
+            switch await captionWorkflowConfigurationStore.clear() {
+            case .success:
+                captionWorkflowPersistenceErrorMessage = nil
+            case let .failure(error):
+                captionWorkflowPersistenceErrorMessage = "Saved \(AppPresentation.queuedAlbumsTitle) could not be cleared. The existing file was kept. \(error.localizedDescription)"
+            }
             return
         }
-        await captionWorkflowConfigurationStore.save(configuration)
+        switch await captionWorkflowConfigurationStore.save(configuration) {
+        case .success:
+            captionWorkflowPersistenceErrorMessage = nil
+        case let .failure(error):
+            captionWorkflowPersistenceErrorMessage = "Saved \(AppPresentation.queuedAlbumsTitle) could not be saved. The prior file was kept. \(error.localizedDescription)"
+        }
     }
 
     private func makeCaptionWorkflowConfiguration() -> CaptionWorkflowConfiguration? {
@@ -1817,6 +1954,10 @@ final class AppViewModel: ObservableObject {
     }
 
     private func refreshCaptionWorkflowStatus() {
+        if let captionWorkflowPersistenceErrorMessage {
+            captionWorkflowStatusMessage = captionWorkflowPersistenceErrorMessage
+            return
+        }
         let currentAlbumsByID = Dictionary(uniqueKeysWithValues: albums.map { ($0.id, $0) })
         let queueConfiguration = CaptionWorkflowConfiguration(
             queue: normalizedCaptionWorkflowQueueRows(captionWorkflowQueueRows).map(\.persistedEntry)
@@ -1977,9 +2118,20 @@ final class AppViewModel: ObservableObject {
     private func requestConflictDecision(asset: MediaAsset, existing: ExistingMetadataState) async -> Bool {
         dismissImmersiveIfNeededForPrompt()
         pendingConflictPrompt = ConflictPromptData(asset: asset, existing: existing)
-        return await withCheckedContinuation { continuation in
-            conflictContinuation = continuation
-        }
+        return await withTaskCancellationHandler(operation: {
+            await withCheckedContinuation { continuation in
+                if Task.isCancelled {
+                    pendingConflictPrompt = nil
+                    continuation.resume(returning: false)
+                } else {
+                    conflictContinuation = continuation
+                }
+            }
+        }, onCancel: { [weak self] in
+            Task { @MainActor in
+                self?.finishConflictPrompt(returning: false)
+            }
+        })
     }
 
     private func requestConfirmation(
@@ -1997,9 +2149,39 @@ final class AppViewModel: ObservableObject {
             cancelLabel: cancelLabel
             )
         )
-        return await withCheckedContinuation { continuation in
-            confirmationContinuation = continuation
-        }
+        return await withTaskCancellationHandler(operation: {
+            await withCheckedContinuation { continuation in
+                if Task.isCancelled {
+                    activeAlert = nil
+                    continuation.resume(returning: false)
+                } else {
+                    confirmationContinuation = continuation
+                }
+            }
+        }, onCancel: { [weak self] in
+            Task { @MainActor in
+                self?.finishConfirmationPrompt(returning: false)
+            }
+        })
+    }
+
+    private func cancelPendingRunPrompts() {
+        finishConflictPrompt(returning: false)
+        finishConfirmationPrompt(returning: false)
+    }
+
+    private func finishConflictPrompt(returning result: Bool) {
+        let continuation = conflictContinuation
+        conflictContinuation = nil
+        pendingConflictPrompt = nil
+        continuation?.resume(returning: result)
+    }
+
+    private func finishConfirmationPrompt(returning result: Bool) {
+        let continuation = confirmationContinuation
+        confirmationContinuation = nil
+        activeAlert = nil
+        continuation?.resume(returning: result)
     }
 
     private func showMessage(title: String, message: String) {
@@ -2046,11 +2228,11 @@ final class AppViewModel: ObservableObject {
     }
 
     var canRetryFailedItems: Bool {
-        !isRunning && !isPreparingModel && !lastFailedAssetIDs.isEmpty
+        !isRunning && !isRunAdmissionActive && !isPreparingModel && !lastFailedAssetIDs.isEmpty
     }
 
     var canResumeSavedRun: Bool {
-        !isRunning && !isPreparingModel && resumablePendingCount > 0
+        !isRunning && !isRunAdmissionActive && !isPreparingModel && resumablePendingCount > 0
     }
 }
 
@@ -2093,7 +2275,7 @@ struct MainView: View {
                         await viewModel.loadInitialData()
                     }
                 }
-                .disabled(viewModel.isRunning || viewModel.isPreparingModel)
+                .disabled(viewModel.isRunning || viewModel.isRunAdmissionActive || viewModel.isPreparingModel)
 
                 if viewModel.canResumeSavedRun {
                     Button("Resume") {
@@ -2111,8 +2293,12 @@ struct MainView: View {
                     }
                 }
 
-                Button(viewModel.isRunning ? (viewModel.isCancelRequested ? "Canceling" : "Cancel Run") : "Start Run") {
-                    if viewModel.isRunning {
+                Button(
+                    viewModel.isRunning || viewModel.isRunAdmissionActive
+                        ? (viewModel.isCancelRequested ? "Canceling" : "Cancel Run")
+                        : "Start Run"
+                ) {
+                    if viewModel.isRunning || viewModel.isRunAdmissionActive {
                         viewModel.cancelRun()
                     } else {
                         Task {
@@ -2120,7 +2306,11 @@ struct MainView: View {
                         }
                     }
                 }
-                .disabled(viewModel.isRunning ? viewModel.isCancelRequested : !viewModel.canStartRun)
+                .disabled(
+                    viewModel.isRunning || viewModel.isRunAdmissionActive
+                        ? viewModel.isCancelRequested
+                        : !viewModel.canStartRun
+                )
             }
 
             ToolbarItemGroup(placement: .secondaryAction) {
@@ -2139,6 +2329,9 @@ struct MainView: View {
         }
         .task(id: viewModel.runPreflightRefreshToken) {
             await viewModel.refreshRunPreflightCount()
+        }
+        .onDisappear {
+            viewModel.cancelPendingRunPromptsForTeardown()
         }
         .sheet(item: $viewModel.pendingConflictPrompt) { prompt in
             ConflictPromptView(prompt: prompt) { overwrite in

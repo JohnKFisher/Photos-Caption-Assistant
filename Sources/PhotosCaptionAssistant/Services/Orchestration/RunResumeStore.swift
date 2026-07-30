@@ -1,9 +1,37 @@
 import Foundation
 
 struct PersistedRunState: Codable, Equatable {
+    let runSessionID: UUID?
     let savedAt: Date
     let options: PersistedRunOptions
     let pendingIDs: [String]
+
+    init(
+        runSessionID: UUID? = nil,
+        savedAt: Date,
+        options: PersistedRunOptions,
+        pendingIDs: [String]
+    ) {
+        self.runSessionID = runSessionID
+        self.savedAt = savedAt
+        self.options = options
+        self.pendingIDs = pendingIDs
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case runSessionID
+        case savedAt
+        case options
+        case pendingIDs
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        runSessionID = try container.decodeIfPresent(UUID.self, forKey: .runSessionID)
+        savedAt = try container.decode(Date.self, forKey: .savedAt)
+        options = try container.decode(PersistedRunOptions.self, forKey: .options)
+        pendingIDs = try container.decode([String].self, forKey: .pendingIDs)
+    }
 }
 
 struct PersistedRunOptions: Codable, Equatable {
@@ -117,38 +145,172 @@ struct PersistedRunOptions: Codable, Equatable {
     }
 }
 
+enum PersistenceStoreError: LocalizedError, Equatable, Sendable {
+    case operationFailed(operation: String, path: String, reason: String)
+    case corruptData(path: String, reason: String)
+    case staleSession
+
+    var errorDescription: String? {
+        switch self {
+        case let .operationFailed(operation, path, reason):
+            return "\(operation) failed for \(path): \(reason)"
+        case let .corruptData(path, reason):
+            return "Saved data at \(path) is unreadable: \(reason)"
+        case .staleSession:
+            return "The saved state belongs to an earlier run session and was ignored."
+        }
+    }
+}
+
+struct PersistenceFileAccess: @unchecked Sendable {
+    let fileExists: (URL) -> Bool
+    let read: (URL) throws -> Data
+    let createDirectory: (URL) throws -> Void
+    let write: (Data, URL) throws -> Void
+    let remove: (URL) throws -> Void
+
+    init(
+        fileExists: @escaping (URL) -> Bool,
+        read: @escaping (URL) throws -> Data,
+        createDirectory: @escaping (URL) throws -> Void,
+        write: @escaping (Data, URL) throws -> Void,
+        remove: @escaping (URL) throws -> Void
+    ) {
+        self.fileExists = fileExists
+        self.read = read
+        self.createDirectory = createDirectory
+        self.write = write
+        self.remove = remove
+    }
+
+    static func live(fileManager: FileManager = .default) -> PersistenceFileAccess {
+        PersistenceFileAccess(
+            fileExists: { url in
+                fileManager.fileExists(atPath: url.path)
+            },
+            read: { url in
+                try Data(contentsOf: url)
+            },
+            createDirectory: { url in
+                try fileManager.createDirectory(at: url, withIntermediateDirectories: true)
+            },
+            write: { data, url in
+                try data.write(to: url, options: [.atomic])
+            },
+            remove: { url in
+                try fileManager.removeItem(at: url)
+            }
+        )
+    }
+}
+
 actor RunResumeStore {
-    private let fileManager: FileManager
+    private let fileAccess: PersistenceFileAccess
     private let stateFileURL: URL
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
+    private var activeSessionID: UUID?
 
     init(fileManager: FileManager = .default) {
-        self.fileManager = fileManager
+        self.fileAccess = .live(fileManager: fileManager)
         self.encoder = JSONEncoder()
         self.decoder = JSONDecoder()
         self.stateFileURL = AppStoragePaths.make(fileManager: fileManager).runResumeStateFile
     }
 
-    func load() -> PersistedRunState? {
-        guard let data = try? Data(contentsOf: stateFileURL) else {
-            return nil
-        }
-        return try? decoder.decode(PersistedRunState.self, from: data)
+    init(fileURL: URL, fileAccess: PersistenceFileAccess = .live()) {
+        self.fileAccess = fileAccess
+        self.encoder = JSONEncoder()
+        self.decoder = JSONDecoder()
+        self.stateFileURL = fileURL
     }
 
-    func save(_ state: PersistedRunState) {
+    func beginSession(_ sessionID: UUID) {
+        activeSessionID = sessionID
+    }
+
+    func endSession(_ sessionID: UUID) {
+        guard activeSessionID == sessionID else { return }
+        activeSessionID = nil
+    }
+
+    func load() -> Result<PersistedRunState?, PersistenceStoreError> {
+        guard fileAccess.fileExists(stateFileURL) else {
+            return .success(nil)
+        }
+
+        do {
+            let data = try fileAccess.read(stateFileURL)
+            return .success(try decoder.decode(PersistedRunState.self, from: data))
+        } catch let error as PersistenceStoreError {
+            return .failure(error)
+        } catch {
+            return .failure(
+                .corruptData(path: stateFileURL.path, reason: error.localizedDescription)
+            )
+        }
+    }
+
+    func save(
+        _ state: PersistedRunState,
+        for sessionID: UUID? = nil
+    ) -> Result<Void, PersistenceStoreError> {
+        if let sessionID {
+            guard activeSessionID == sessionID,
+                  state.runSessionID == nil || state.runSessionID == sessionID
+            else {
+                return .failure(.staleSession)
+            }
+        }
+
+        let data: Data
+        do {
+            data = try encoder.encode(state)
+        } catch {
+            return .failure(
+                .operationFailed(
+                    operation: "Encoding saved run state",
+                    path: stateFileURL.path,
+                    reason: error.localizedDescription
+                )
+            )
+        }
+
         do {
             let parent = stateFileURL.deletingLastPathComponent()
-            try fileManager.createDirectory(at: parent, withIntermediateDirectories: true)
-            let data = try encoder.encode(state)
-            try data.write(to: stateFileURL, options: [.atomic])
+            try fileAccess.createDirectory(parent)
+            try fileAccess.write(data, stateFileURL)
+            return .success(())
         } catch {
-            return
+            return .failure(
+                .operationFailed(
+                    operation: "Saving run state",
+                    path: stateFileURL.path,
+                    reason: error.localizedDescription
+                )
+            )
         }
     }
 
-    func clear() {
-        try? fileManager.removeItem(at: stateFileURL)
+    func clear(for sessionID: UUID? = nil) -> Result<Void, PersistenceStoreError> {
+        if let sessionID, activeSessionID != sessionID {
+            return .failure(.staleSession)
+        }
+        guard fileAccess.fileExists(stateFileURL) else {
+            return .success(())
+        }
+
+        do {
+            try fileAccess.remove(stateFileURL)
+            return .success(())
+        } catch {
+            return .failure(
+                .operationFailed(
+                    operation: "Clearing saved run state",
+                    path: stateFileURL.path,
+                    reason: error.localizedDescription
+                )
+            )
+        }
     }
 }

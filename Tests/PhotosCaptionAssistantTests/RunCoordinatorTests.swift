@@ -32,6 +32,26 @@ private extension CaptionWorkflowConfiguration {
 
 @MainActor
 final class RunCoordinatorTests: XCTestCase {
+    func testRunSessionAdmissionRejectsConcurrentSessionAndReleasesCleanly() {
+        let assets = [MediaAsset(id: "asset-admission", filename: "IMG_admission.jpg", captureDate: Date(), kind: .photo)]
+        let metadata = [
+            assets[0].id: ExistingMetadataState(caption: nil, keywords: [], ownershipTag: nil, isExternal: false)
+        ]
+        let coordinator = RunCoordinator(
+            photosWriter: MockPhotosWriter(assets: assets, metadataByID: metadata),
+            analyzer: MockAnalyzer(result: GeneratedMetadata(caption: "caption", keywords: ["k"]))
+        )
+        let firstSessionID = UUID()
+        let secondSessionID = UUID()
+
+        XCTAssertTrue(coordinator.reserveRunSession(firstSessionID))
+        XCTAssertFalse(coordinator.reserveRunSession(secondSessionID))
+
+        coordinator.releaseRunSession(firstSessionID)
+        XCTAssertTrue(coordinator.reserveRunSession(secondSessionID))
+        coordinator.releaseRunSession(secondSessionID)
+    }
+
     func testAutomaticPhotosRestartFiresAtConfiguredIntervalWithoutManualPrompts() async {
         let assets = makeAssets(count: 620)
         let metadata = Dictionary(uniqueKeysWithValues: assets.map { asset in
