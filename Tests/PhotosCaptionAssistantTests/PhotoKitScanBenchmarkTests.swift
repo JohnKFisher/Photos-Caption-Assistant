@@ -17,40 +17,78 @@ final class PhotoKitScanBenchmarkTests: XCTestCase {
         XCTAssertNil(configuration.maxItems)
     }
 
-    func testExperimentalPhotoKitReaderRejectsUnsupportedScopes() async {
-        let reader = ExperimentalPhotoKitScanReader()
-
+    func testPhotoKitClientRejectsCaptionWorkflowAsDirectSource() async {
+        let client = PhotoKitPhotosClient()
         do {
-            _ = try await reader.count(scope: .picker(ids: ["one"]))
-            XCTFail("Expected picker scope to be rejected")
+            _ = try await client.count(scope: .captionWorkflow)
+            XCTFail("Expected queued albums to be resolved by the run coordinator")
         } catch {
-            XCTAssertTrue(error.localizedDescription.contains("picker"))
-        }
-
-        do {
-            _ = try await reader.enumerate(scope: .captionWorkflow, offset: 0, limit: 1)
-            XCTFail("Expected caption workflow scope to be rejected")
-        } catch {
-            XCTAssertTrue(error.localizedDescription.contains("captionWorkflow"))
+            XCTAssertTrue(error.localizedDescription.contains("Queued Albums"))
         }
     }
 
-    func testExperimentalPhotoKitIdentifierCandidatesIncludeBaseIdentifier() {
+    func testPhotoKitIdentifierCandidatesPutExactIdentifierFirst() {
         XCTAssertEqual(
-            ExperimentalPhotoKitScanReader.identifierCandidates(from: "abc/def"),
+            PhotoKitPhotosClient.identifierCandidates(from: "abc/def"),
             ["abc/def", "abc"]
         )
         XCTAssertEqual(
-            ExperimentalPhotoKitScanReader.identifierCandidates(from: "abc"),
+            PhotoKitPhotosClient.identifierCandidates(from: "abc"),
             ["abc"]
         )
     }
 
-    func testExperimentalPhotoKitPageRangeClampsBounds() {
-        XCTAssertEqual(ExperimentalPhotoKitScanReader.pageRange(totalCount: 10, offset: 2, limit: 3), 2..<5)
-        XCTAssertEqual(ExperimentalPhotoKitScanReader.pageRange(totalCount: 10, offset: 9, limit: 5), 9..<10)
-        XCTAssertNil(ExperimentalPhotoKitScanReader.pageRange(totalCount: 0, offset: 0, limit: 1))
-        XCTAssertNil(ExperimentalPhotoKitScanReader.pageRange(totalCount: 5, offset: 5, limit: 1))
+    func testPhotoKitPageRangeClampsBounds() {
+        XCTAssertEqual(PhotoKitPhotosClient.pageRange(totalCount: 10, offset: 2, limit: 3), 2..<5)
+        XCTAssertEqual(PhotoKitPhotosClient.pageRange(totalCount: 10, offset: 9, limit: 5), 9..<10)
+        XCTAssertNil(PhotoKitPhotosClient.pageRange(totalCount: 0, offset: 0, limit: 1))
+        XCTAssertNil(PhotoKitPhotosClient.pageRange(totalCount: 5, offset: 5, limit: 1))
+    }
+
+    func testPhotoKitKeywordReconciliationUsesCanonicalExactKeywords() {
+        let current = ["user tag", "Cafe\u{301}", "keep-me", "Bird"]
+        let generated = ["generated", "Café", "generated", "", " missing value ", "bird", "!!!"]
+        let target = PhotoKitPhotosClient.uniqueKeywords(generated)
+        let delta = PhotoKitPhotosClient.keywordDelta(current: current, desired: target)
+
+        XCTAssertEqual(target, ["generated", "Café", "missing value", "bird", "!!!"])
+        XCTAssertEqual(delta.additions, ["generated", "missing value", "bird", "!!!"])
+        XCTAssertEqual(delta.removals, ["user tag", "keep-me", "Bird"])
+    }
+
+    func testPhotoKitTreatsLiteralMissingValueKeywordAsExternalMetadata() {
+        let state = PhotoKitPhotosClient.existingMetadata(
+            from: PhotosMetadataSnapshot(caption: nil, keywords: ["missing value"])
+        )
+
+        XCTAssertTrue(state.isExternal)
+        XCTAssertEqual(state.keywords, ["missing value"])
+    }
+
+    func testPhotoKitMetadataComparisonHandlesBlankCaptionsAndOrderChanges() {
+        let current = PhotosMetadataSnapshot(caption: "", keywords: ["one", "two"])
+        let desired = PhotosMetadataSnapshot(caption: "", keywords: ["two", "one"])
+        let changed = PhotosMetadataSnapshot(caption: "new caption", keywords: ["one", "two"])
+
+        XCTAssertNil(PhotoKitPhotosClient.normalizedCaption("  \n"))
+        XCTAssertTrue(PhotoKitPhotosClient.matchesBaseline(current, desired))
+        XCTAssertTrue(PhotoKitPhotosClient.matchesTarget(current, desired))
+        XCTAssertTrue(PhotoKitPhotosClient.matchesTarget(current, PhotosMetadataSnapshot(caption: "  \n", keywords: ["one", "two"])))
+        XCTAssertFalse(PhotoKitPhotosClient.matchesTarget(current, changed))
+        XCTAssertFalse(PhotoKitPhotosClient.matchesBaseline(
+            current,
+            PhotosMetadataSnapshot(caption: nil, keywords: ["one", "changed"])
+        ))
+    }
+
+    func testPhotoKitKeywordDeltaDoesNotConflateCaseOrPunctuation() {
+        let delta = PhotoKitPhotosClient.keywordDelta(
+            current: ["Bird", "bird's-eye", "north-east"],
+            desired: ["bird", "bird’s-eye", "north-east"]
+        )
+
+        XCTAssertEqual(delta.additions, ["bird", "bird’s-eye"])
+        XCTAssertEqual(delta.removals, ["Bird", "bird's-eye"])
     }
 
     func testBenchmarkSummaryTreatsIdentitySafetySeparatelyFromOrderDrift() async throws {
@@ -341,7 +379,7 @@ private actor FakeAppleScriptDiagnosticsClient: PhotoLibraryDiagnosticsAppleScri
         return Array(source[offset..<min(source.count, offset + max(1, limit))])
     }
 
-    func listUserAlbums() async throws -> [AlbumSummary] {
+    func listAlbums() async throws -> [AlbumSummary] {
         listedAlbums
     }
 

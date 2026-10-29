@@ -311,7 +311,11 @@ final class AppViewModel: ObservableObject {
     }
 
     @Published var capabilities = AppCapabilities(
-        photosAutomationAvailable: false,
+        photosIntegrationAvailable: false,
+        photosAccessState: .notDetermined,
+        photosBackendName: "Checking",
+        photosRequiresPhotosApp: false,
+        photosRequiresAppleEventsAutomation: false,
         ollamaAvailability: .installedNotRunning,
         pickerCapability: .unsupported(reason: "Capabilities not loaded yet.")
     )
@@ -396,26 +400,32 @@ final class AppViewModel: ObservableObject {
     private var albumCountRefreshTask: Task<Void, Never>?
     private let appSettingsDefaults: UserDefaults
 
-    private let photosClient = PhotosAppleScriptClient()
-    private let photoKitIncrementalScanSource = ExperimentalPhotoKitScanReader()
+    private let appleScriptPhotosClient = PhotosAppleScriptClient()
+    private let photoKitClient = PhotoKitPhotosClient()
+    private let photosClient: any PhotosIntegrationClient
     private let ollamaManager = OllamaManager()
     private let runResumeStore = RunResumeStore()
     private let captionWorkflowConfigurationStore = CaptionWorkflowConfigurationStore()
     private let storagePaths = AppStoragePaths.make()
     private let storageMigrator = AppStorageMigrator()
     private lazy var capabilityProbe = CapabilityProbe(photosClient: photosClient, ollamaManager: ollamaManager)
-    private lazy var scanBenchmarkRunner = PhotoLibraryScanBenchmarkRunner(appleScriptClient: photosClient)
-    private lazy var identityWriteProbeRunner = PhotoLibraryIdentityWriteProbeRunner(appleScriptClient: photosClient)
+    private lazy var scanBenchmarkRunner = PhotoLibraryScanBenchmarkRunner(appleScriptClient: appleScriptPhotosClient)
+    private lazy var identityWriteProbeRunner = PhotoLibraryIdentityWriteProbeRunner(appleScriptClient: appleScriptPhotosClient)
     private lazy var coordinator = RunCoordinator(
         photosWriter: photosClient,
         analyzer: QwenVisionLanguageAnalyzer(),
-        incrementalScanSource: photoKitIncrementalScanSource
+        incrementalScanSource: photosClient as? any ScopedIncrementalScanSource
     )
     @Published private(set) var isRunningScanBenchmark = false
     @Published private(set) var isRunningIdentityWriteProbe = false
 
     init(appSettingsDefaults: UserDefaults = .standard) {
         self.appSettingsDefaults = appSettingsDefaults
+        if #available(macOS 27.0, *) {
+            self.photosClient = photoKitClient
+        } else {
+            self.photosClient = appleScriptPhotosClient
+        }
         let snapshot = AppSettings.load(from: appSettingsDefaults)
         sourceSelection = snapshot.defaultSourceSelection
         traversalOrder = snapshot.defaultTraversalOrder
@@ -454,7 +464,7 @@ final class AppViewModel: ObservableObject {
             selectedAlbumID ?? "",
             pickerIDs.joined(separator: ","),
             queueToken,
-            capabilities.photosAutomationAvailable.description
+            capabilities.photosIntegrationAvailable.description
         ]
         .joined(separator: "||")
     }
@@ -532,13 +542,29 @@ final class AppViewModel: ObservableObject {
     func loadInitialData() async {
         await storageMigrator.migrateLegacyPersistentStateIfNeeded()
         await refreshCapabilities()
-        if capabilities.photosAutomationAvailable {
+        if !photosClient.requiresAppleEventsAutomation, capabilities.photosAccessState.needsAccessRequest {
+            do {
+                try await photosClient.prepareForRun(scope: .library)
+            } catch {
+                // The capability state below drives the user-facing recovery message.
+            }
+            await refreshCapabilities()
+        }
+        if capabilities.photosIntegrationAvailable {
             hasShownStartupAutomationAlert = false
-        } else if !hasShownStartupAutomationAlert {
+        } else if capabilities.photosRequiresAppleEventsAutomation, !hasShownStartupAutomationAlert {
             hasShownStartupAutomationAlert = true
             showMessage(
                 title: "Automation Permission Needed",
                 message: "Photos automation is not available yet. Grant Apple Events permission now so caption updates and automatic Photos restarts can run unattended later."
+            )
+        } else if capabilities.photosAccessState == .limited
+            || capabilities.photosAccessState == .denied
+            || capabilities.photosAccessState == .restricted
+        {
+            showMessage(
+                title: "Photos Library Access Needed",
+                message: "Allow full Photos library access for Photos Caption Assistant in System Settings > Privacy & Security > Photos, then reload the album list."
             )
         }
         await loadCaptionWorkflowConfiguration()
@@ -570,7 +596,7 @@ final class AppViewModel: ObservableObject {
         albumLoadState = .loadingNames
 
         do {
-            let listedAlbums = try await photosClient.listUserAlbums()
+            let listedAlbums = try await photosClient.listAlbums()
             guard refreshGeneration == albumRefreshGeneration else {
                 return
             }
@@ -586,7 +612,7 @@ final class AppViewModel: ObservableObject {
             albumLoadState = .loadingCounts
             albumCountRefreshTask = Task { @MainActor [weak self] in
                 guard let self else { return }
-                let resolvedAlbums = await self.photoKitIncrementalScanSource.withResolvedPlainAlbumCounts(listedAlbums)
+                let resolvedAlbums = await self.photosClient.withResolvedAlbumCounts(listedAlbums)
                 guard !Task.isCancelled else { return }
                 await self.applyResolvedAlbumCounts(resolvedAlbums, generation: refreshGeneration)
             }
@@ -605,25 +631,14 @@ final class AppViewModel: ObservableObject {
     func startRun() async {
         guard let runID = claimRunAdmission() else { return }
         defer { releaseRunAdmission(runID) }
-
-        guard capabilities.photosAutomationAvailable else {
-            showMessage(
-                title: "Automation Required",
-                message: "Photos automation is not available. Grant Apple Events permission and try again."
-            )
-            return
-        }
-
         guard let options = makeRunOptions() else {
             return
         }
 
-        guard await ensureOllamaInstalledForRunIfNeeded() else {
-            return
-        }
+        guard await preparePhotosForWriteRun(scope: options.source) else { return }
         guard shouldContinueRunAdmission(runID) else { return }
 
-        guard await ensurePhotosReadyForWriteRun() else {
+        guard await ensureOllamaInstalledForRunIfNeeded() else {
             return
         }
         guard shouldContinueRunAdmission(runID) else { return }
@@ -651,13 +666,6 @@ final class AppViewModel: ObservableObject {
     func retryFailedItems() async {
         guard let runID = claimRunAdmission() else { return }
         defer { releaseRunAdmission(runID) }
-        guard capabilities.photosAutomationAvailable else {
-            showMessage(
-                title: "Automation Required",
-                message: "Photos automation is not available. Grant Apple Events permission and try again."
-            )
-            return
-        }
         guard !lastFailedAssetIDs.isEmpty else {
             showMessage(title: "No Failed Items", message: "There are no failed items to retry.")
             return
@@ -666,25 +674,19 @@ final class AppViewModel: ObservableObject {
             showMessage(title: "Retry Unavailable", message: reason)
             return
         }
+        let retryOptions = RunOptions(
+            source: .picker(ids: lastFailedAssetIDs),
+            optionalCaptureDateRange: nil,
+            traversalOrder: lastRunOptions?.traversalOrder ?? traversalOrder,
+            overwriteAppOwnedSameOrNewer: lastRunOptions?.overwriteAppOwnedSameOrNewer ?? overwriteAppOwnedSameOrNewer,
+            alwaysOverwriteExternalMetadata: lastRunOptions?.alwaysOverwriteExternalMetadata ?? alwaysOverwriteExternalMetadata
+        )
+        guard await preparePhotosForWriteRun(scope: retryOptions.source) else { return }
+        guard shouldContinueRunAdmission(runID) else { return }
         guard await ensureOllamaInstalledForRunIfNeeded() else {
             return
         }
         guard shouldContinueRunAdmission(runID) else { return }
-        guard await ensurePhotosReadyForWriteRun() else {
-            return
-        }
-        guard shouldContinueRunAdmission(runID) else { return }
-
-        let overwrite = lastRunOptions?.overwriteAppOwnedSameOrNewer ?? overwriteAppOwnedSameOrNewer
-        let overwriteExternal = lastRunOptions?.alwaysOverwriteExternalMetadata ?? alwaysOverwriteExternalMetadata
-        let retryTraversalOrder = lastRunOptions?.traversalOrder ?? traversalOrder
-        let retryOptions = RunOptions(
-            source: .picker(ids: lastFailedAssetIDs),
-            optionalCaptureDateRange: nil,
-            traversalOrder: retryTraversalOrder,
-            overwriteAppOwnedSameOrNewer: overwrite,
-            alwaysOverwriteExternalMetadata: overwriteExternal
-        )
         guard await prepareModelForRunIfNeeded() else {
             return
         }
@@ -695,13 +697,6 @@ final class AppViewModel: ObservableObject {
     func resumeSavedRun() async {
         guard let runID = claimRunAdmission() else { return }
         defer { releaseRunAdmission(runID) }
-        guard capabilities.photosAutomationAvailable else {
-            showMessage(
-                title: "Automation Required",
-                message: "Photos automation is not available. Grant Apple Events permission and try again."
-            )
-            return
-        }
         guard case .supported = capabilities.pickerCapability else {
             showMessage(title: "Resume Unavailable", message: pickerUnavailableReason)
             return
@@ -710,15 +705,6 @@ final class AppViewModel: ObservableObject {
             showMessage(title: "Nothing To Resume", message: "No persisted pending IDs were found.")
             return
         }
-        guard await ensureOllamaInstalledForRunIfNeeded() else {
-            return
-        }
-        guard shouldContinueRunAdmission(runID) else { return }
-        guard await ensurePhotosReadyForWriteRun() else {
-            return
-        }
-        guard shouldContinueRunAdmission(runID) else { return }
-
         let restoredBaseOptions = persistedRunState.options.toRunOptions()
         let resumeOptions = RunOptions(
             source: .picker(ids: persistedRunState.pendingIDs),
@@ -727,6 +713,12 @@ final class AppViewModel: ObservableObject {
             overwriteAppOwnedSameOrNewer: restoredBaseOptions.overwriteAppOwnedSameOrNewer,
             alwaysOverwriteExternalMetadata: restoredBaseOptions.alwaysOverwriteExternalMetadata
         )
+        guard await preparePhotosForWriteRun(scope: resumeOptions.source) else { return }
+        guard shouldContinueRunAdmission(runID) else { return }
+        guard await ensureOllamaInstalledForRunIfNeeded() else {
+            return
+        }
+        guard shouldContinueRunAdmission(runID) else { return }
         guard await prepareModelForRunIfNeeded() else {
             return
         }
@@ -969,8 +961,8 @@ final class AppViewModel: ObservableObject {
                 preflightCountState = .message("Select an album to estimate the current scope.")
                 return
             }
-            guard capabilities.photosAutomationAvailable else {
-                preflightCountState = .message("Grant Photos automation access to estimate album and library counts.")
+            guard capabilities.photosIntegrationAvailable else {
+                preflightCountState = .message("Allow Photos library access to estimate album and library counts.")
                 return
             }
 
@@ -990,8 +982,8 @@ final class AppViewModel: ObservableObject {
                 preflightCountState = .message("Unable to count the selected album right now.")
             }
         case .library:
-            guard capabilities.photosAutomationAvailable else {
-                preflightCountState = .message("Grant Photos automation access to estimate album and library counts.")
+            guard capabilities.photosIntegrationAvailable else {
+                preflightCountState = .message("Allow Photos library access to estimate album and library counts.")
                 return
             }
 
@@ -1125,14 +1117,14 @@ final class AppViewModel: ObservableObject {
             expectedSmartAlbumName: identityProbeSmartAlbumName
         ) else {
             showMessage(
-                title: "Identity Write Probe Needs IDs",
+                title: "Legacy AppleScript Probe Needs IDs",
                 message: "Enter a sacrificial asset ID and a different control asset ID in the Diagnostics window before running the write probe."
             )
             return
         }
 
         let confirmationMessage = [
-            "This diagnostics-only probe will temporarily write a sentinel caption and keyword to the sacrificial asset, verify the result, and then restore the original metadata.",
+            "This legacy AppleScript probe targets the library currently open in Photos.app. It does not validate native PhotoKit writes. It will temporarily write a sentinel caption and keyword to the sacrificial asset, verify the result, and then restore the original metadata.",
             "Sacrificial asset: \(configuration.sacrificialAssetID)",
             "Control asset: \(configuration.controlAssetID)",
             configuration.expectedSmartAlbumID.map { "Expected smart album handoff: \($0)" }
@@ -1141,15 +1133,15 @@ final class AppViewModel: ObservableObject {
         .joined(separator: "\n")
 
         let confirmed = await requestConfirmation(
-            title: "Run Identity Write Probe?",
+            title: "Run Legacy AppleScript Identity Probe?",
             message: confirmationMessage,
-            confirmLabel: "Run Probe",
+            confirmLabel: "Run Legacy Probe",
             cancelLabel: "Cancel"
         )
         guard confirmed else { return }
 
         isRunningIdentityWriteProbe = true
-        identityProbeStatusMessage = "Preparing identity write probe..."
+        identityProbeStatusMessage = "Preparing legacy AppleScript identity probe..."
         defer {
             isRunningIdentityWriteProbe = false
         }
@@ -1157,9 +1149,9 @@ final class AppViewModel: ObservableObject {
         do {
             let authorizationStatus = await requestPhotoLibraryAccessIfNeeded()
             guard authorizationStatus == .authorized || authorizationStatus == .limited else {
-                identityProbeStatusMessage = "Identity write probe skipped."
+                identityProbeStatusMessage = "Legacy AppleScript identity probe skipped."
                 showMessage(
-                    title: "Identity Write Probe Skipped",
+                    title: "Legacy AppleScript Probe Skipped",
                     message: "Photos library access was not granted (status=\(authorizationStatus.rawValue))."
                 )
                 return
@@ -1174,10 +1166,11 @@ final class AppViewModel: ObservableObject {
             switch outcome {
             case let .completed(run):
                 lastIdentityWriteProbeReportURL = run.reportURL
-                identityProbeStatusMessage = "Identity write probe report: \(run.reportURL.lastPathComponent)"
+                identityProbeStatusMessage = "Legacy AppleScript identity probe report: \(run.reportURL.lastPathComponent)"
                 showMessage(
-                    title: run.report.overallPass ? "Identity Write Probe Passed" : "Identity Write Probe Failed",
+                    title: run.report.overallPass ? "Legacy AppleScript Probe Passed" : "Legacy AppleScript Probe Failed",
                     message: [
+                        "This validates the AppleScript write path only; it does not validate native PhotoKit writes.",
                         "Report saved to:\n\(run.reportURL.path)",
                         run.report.summaryLine,
                         run.report.failureReasons.isEmpty ? nil : run.report.failureReasons.joined(separator: "\n")
@@ -1186,16 +1179,16 @@ final class AppViewModel: ObservableObject {
                     .joined(separator: "\n\n")
                 )
             case let .skipped(reason):
-                identityProbeStatusMessage = "Identity write probe skipped."
+                identityProbeStatusMessage = "Legacy AppleScript identity probe skipped."
                 showMessage(
-                    title: "Identity Write Probe Skipped",
+                    title: "Legacy AppleScript Probe Skipped",
                     message: reason
                 )
             }
         } catch {
-            identityProbeStatusMessage = "Identity write probe failed."
+            identityProbeStatusMessage = "Legacy AppleScript identity probe failed."
             showMessage(
-                title: "Identity Write Probe Failed",
+                title: "Legacy AppleScript Probe Failed",
                 message: error.localizedDescription
             )
         }
@@ -1595,16 +1588,23 @@ final class AppViewModel: ObservableObject {
         }
     }
 
-    private func ensurePhotosReadyForWriteRun() async -> Bool {
-        let photosRunning = await photosClient.isPhotosAppRunning()
-        guard photosRunning else {
-            showMessage(
-                title: "Photos Must Be Open",
-                message: "Photos.app must be open before starting a write run."
-            )
+    private func preparePhotosForWriteRun(scope: ScopeSource) async -> Bool {
+        do {
+            try await photosClient.prepareForRun(scope: scope)
+            if photosClient.requiresPhotosAppToBeOpen, !(await photosClient.isPhotosAppRunning()) {
+                showMessage(
+                    title: "Photos Must Be Open",
+                    message: "Photos.app must be open before starting a compatibility-backend run."
+                )
+                return false
+            }
+            await refreshCapabilities()
+            return capabilities.photosIntegrationAvailable
+        } catch {
+            showMessage(title: "Photos Access Required", message: error.localizedDescription)
+            await refreshCapabilities()
             return false
         }
-        return true
     }
 
     private func ensureOllamaInstalledForRunIfNeeded() async -> Bool {
@@ -1703,6 +1703,8 @@ final class AppViewModel: ObservableObject {
         if let filterDescription = summary.filterDescription {
             lines.append(filterDescription)
         }
+
+        lines.append(summary.writeDescription)
 
         let appOwnedRule = snapshot.overwriteAppOwnedSameOrNewer
             ? "App-owned same/newer metadata will be overwritten."
@@ -1892,21 +1894,41 @@ final class AppViewModel: ObservableObject {
     private func reconcileCaptionWorkflowSelections(persistChanges: Bool) async {
         let currentAlbumsByID = Dictionary(uniqueKeysWithValues: albums.map { ($0.id, $0) })
         let priorSelections = captionWorkflowQueueRows
-        captionWorkflowQueueRows = normalizedCaptionWorkflowQueueRows(
-            captionWorkflowQueueRows.map { row in
-                guard let albumID = row.albumID else {
-                    return row
-                }
-                guard let album = currentAlbumsByID[albumID] else {
-                    return row
-                }
-                return CaptionWorkflowQueueRowState(
+        var reconciledSelections: [CaptionWorkflowQueueRowState] = []
+        reconciledSelections.reserveCapacity(priorSelections.count)
+
+        for row in priorSelections {
+            guard let albumID = row.albumID else {
+                reconciledSelections.append(row)
+                continue
+            }
+
+            let resolvedID: String
+            if currentAlbumsByID[albumID] != nil {
+                resolvedID = albumID
+            } else if let canonicalID = await photosClient.resolveAlbumID(albumID),
+                      currentAlbumsByID[canonicalID] != nil
+            {
+                resolvedID = canonicalID
+            } else {
+                reconciledSelections.append(row)
+                continue
+            }
+
+            guard let album = currentAlbumsByID[resolvedID] else {
+                reconciledSelections.append(row)
+                continue
+            }
+            reconciledSelections.append(
+                CaptionWorkflowQueueRowState(
                     id: row.id,
                     albumID: album.id,
                     savedAlbumName: album.name
                 )
-            }
-        )
+            )
+        }
+
+        captionWorkflowQueueRows = normalizedCaptionWorkflowQueueRows(reconciledSelections)
         refreshCaptionWorkflowStatus()
 
         if persistChanges, priorSelections != captionWorkflowQueueRows {
@@ -2674,7 +2696,7 @@ struct MainView: View {
             alignment: .trailing,
             spacing: 8
         ) {
-            capabilityBadge("Automation", available: viewModel.capabilities.photosAutomationAvailable, compactLayout: compactLayout)
+            capabilityBadge("Photos: \(viewModel.capabilities.photosBackendName)", available: viewModel.capabilities.photosIntegrationAvailable, compactLayout: compactLayout)
             capabilityBadge("Qwen 2.5VL 7B", available: viewModel.capabilities.qwenModelAvailable, compactLayout: compactLayout)
             capabilityBadge("Picker", available: viewModel.pickerSupported, compactLayout: compactLayout)
         }
@@ -2749,7 +2771,7 @@ struct DiagnosticCommands: Commands {
             }
             .disabled(viewModel.isRunning || viewModel.isPreparingModel || viewModel.isRunningScanBenchmark || viewModel.isRunningIdentityWriteProbe)
 
-            Button(viewModel.isRunningIdentityWriteProbe ? "Running Identity Write Probe..." : "Run Identity Write Probe") {
+            Button(viewModel.isRunningIdentityWriteProbe ? "Running Legacy Identity Probe..." : "Run Legacy AppleScript Identity Probe") {
                 Task {
                     await viewModel.runIdentityWriteProbeFromMenu()
                 }

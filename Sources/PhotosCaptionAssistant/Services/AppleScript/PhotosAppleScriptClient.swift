@@ -4,7 +4,7 @@ import Darwin
 import Foundation
 import Photos
 
-public actor PhotosAppleScriptClient: PhotosWriter, PhotosProcessMonitoring, PhotosLifecycleControlling, PhotoPreviewSource, PhotoPreviewDataSource, IncrementalPhotosWriter, BatchMetadataPhotosWriter, BatchWritePhotosWriter, AlbumListingPhotosSource {
+public actor PhotosAppleScriptClient: PhotosIntegrationClient, PhotosProcessMonitoring, PhotosLifecycleControlling, PhotosEnumerationSnapshotting {
     private struct UncheckedExportSession: @unchecked Sendable {
         let rawValue: AVAssetExportSession
     }
@@ -47,9 +47,34 @@ public actor PhotosAppleScriptClient: PhotosWriter, PhotosProcessMonitoring, Pho
 
     private let fileManager: FileManager
 
+    public nonisolated let backendName = "AppleScript compatibility"
+    public nonisolated let requiresPhotosAppToBeOpen = true
+    public nonisolated let requiresAppleEventsAutomation = true
+
     public init(fileManager: FileManager = .default) {
         self.fileManager = fileManager
     }
+
+    public func authorizationState() async -> PhotosIntegrationAccessState {
+        await verifyAutomationAccess() ? .available : .denied
+    }
+
+    public func prepareForRun(scope _: ScopeSource) async throws {
+        guard await verifyAutomationAccess() else {
+            throw PhotosAppleScriptError.scriptFailed(
+                message: "Photos automation is unavailable. Grant Apple Events access in System Settings > Privacy & Security > Automation."
+            )
+        }
+    }
+
+    public func canHandleIncrementalScan(scope: ScopeSource) async -> Bool {
+        if case .captionWorkflow = scope { return false }
+        return true
+    }
+
+    public func beginEnumerationSnapshot(scope _: ScopeSource) async throws {}
+
+    public func endEnumerationSnapshot(scope _: ScopeSource) async {}
 
     public func enumerate(scope: ScopeSource, dateRange: CaptureDateRange?) async throws -> [MediaAsset] {
         if case .captionWorkflow = scope {
@@ -460,7 +485,7 @@ public actor PhotosAppleScriptClient: PhotosWriter, PhotosProcessMonitoring, Pho
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                     .replacingOccurrences(of: String(Character(UnicodeScalar(31))), with: " ")
             }
-            .filter { !$0.isEmpty && $0.caseInsensitiveCompare("missing value") != .orderedSame }
+            .filter { !$0.isEmpty }
         let keywordBlob = normalizedKeywords.joined(separator: String(Character(UnicodeScalar(31))))
         return (normalizedCaption, keywordBlob)
     }
@@ -1018,14 +1043,15 @@ public actor PhotosAppleScriptClient: PhotosWriter, PhotosProcessMonitoring, Pho
         }
     }
 
-    public func listUserAlbums() async throws -> [AlbumSummary] {
+    public func listAlbums() async throws -> [AlbumSummary] {
         let script = """
         tell application \"Photos\"
             set rows to {}
             repeat with targetAlbum in albums
                 set albumID to id of targetAlbum
                 set albumName to name of targetAlbum
-                set end of rows to albumID & tab & albumName
+                set albumItemCount to count of media items of targetAlbum
+                set end of rows to albumID & tab & albumName & tab & (albumItemCount as text)
             end repeat
             set AppleScript's text item delimiters to linefeed
             set outputText to rows as text
@@ -1052,15 +1078,28 @@ public actor PhotosAppleScriptClient: PhotosWriter, PhotosProcessMonitoring, Pho
             .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
 
+    public func withResolvedAlbumCounts(_ albums: [AlbumSummary]) async -> [AlbumSummary] {
+        albums
+    }
+
+    public func resolveAlbumID(_ id: String) async -> String? {
+        guard let albums = try? await listAlbums(),
+              albums.contains(where: { $0.id == id })
+        else {
+            return nil
+        }
+        return id
+    }
+
     private func makeExistingMetadata(captionRaw: String, keywordsRaw: String) -> ExistingMetadataState {
         let caption = captionRaw.trimmingCharacters(in: .whitespacesAndNewlines)
         let keywords = keywordsRaw
             .split(separator: Character(UnicodeScalar(31)), omittingEmptySubsequences: true)
             .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty && $0.caseInsensitiveCompare("missing value") != .orderedSame }
+            .filter { !$0.isEmpty }
 
         let ownershipTag = OwnershipTagCodec.extract(from: keywords)
-        let hasMeaningfulCaption = !caption.isEmpty && caption.caseInsensitiveCompare("missing value") != .orderedSame
+        let hasMeaningfulCaption = !caption.isEmpty
         let hasKeywords = !keywords.isEmpty
         let isExternal = ownershipTag == nil && (hasMeaningfulCaption || hasKeywords)
 
@@ -1068,7 +1107,13 @@ public actor PhotosAppleScriptClient: PhotosWriter, PhotosProcessMonitoring, Pho
             caption: hasMeaningfulCaption ? caption : nil,
             keywords: keywords,
             ownershipTag: ownershipTag,
-            isExternal: isExternal
+            isExternal: isExternal,
+            snapshot: PhotosMetadataSnapshot(
+                caption: captionRaw,
+                keywords: keywordsRaw
+                    .split(separator: Character(UnicodeScalar(31)), omittingEmptySubsequences: true)
+                    .map(String.init)
+            )
         )
     }
 

@@ -436,11 +436,11 @@ struct DiagnosticsPanelView: View {
     var body: some View {
         GroupBox("Diagnostics") {
             VStack(alignment: .leading, spacing: 12) {
-                Text("Benchmark album override is optional. The identity write probe needs explicit sacrificial/control asset IDs and will prompt before writing anything.")
+                Text("Benchmark album override is optional. The legacy AppleScript identity probe needs explicit sacrificial/control asset IDs and will prompt before writing anything. It targets the library open in Photos.app and does not test native PhotoKit writes.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
 
-                Text("Use the Diagnostics menu to run the scan benchmark and identity write probe after updating the fields below. Reports stay local on this Mac.")
+                Text("Use the Diagnostics menu to run the scan benchmark and legacy identity probe after updating the fields below. Reports stay local on this Mac.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

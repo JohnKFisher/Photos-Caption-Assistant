@@ -1,85 +1,48 @@
 # Photos Caption Assistant
 
-Current version/build: 4.6.5 (25)
+Current version/build: 4.6.6 (27)
 Current description logic version: 3.0.0
 
-Current overall status:
-The current source tree builds locally as version 4.6.5 build 25 and now uses a more Mac-native scene model: a toolbar-first hybrid workbench, dedicated Settings and Preview windows, stronger menu/keyboard access, more Finder-style reveal actions, and a deterministic version-triggered GitHub release flow that signs, notarizes, staples, and Gatekeeper-checks release DMGs when the required Apple secrets are configured. The core local captioning workflow is working, but this is still a personal hobby app built around Apple Photos automation rather than a polished public-distribution product.
+## Current status
 
-What is working now:
-- Local photo and video analysis through Ollama with the `qwen2.5vl:7b` model.
-- Apple Photos metadata reads and writes, including captions, keywords, and app ownership tags.
-- Library, album, picker, and Queued Albums runs.
-- Visible run-summary/preflight UI showing source scope, exact count where practical, overwrite behavior, model status, and local Ollama service status.
-- The main screen now uses a resizable Mac workbench layout with a primary setup pane, an optional summary pane, and toolbar-first run actions instead of the older bottom action tray.
-- The main workbench window now opens at a shorter display-clamped size so it stays within the visible screen instead of stretching under the Dock.
-- The main workbench now switches into a denser single-column compact mode on tighter windows, with collapsible Run Summary and Progress sections so the full setup stays reachable through the main scroll view.
-- Run-start confirmation now stays in the native alert flow, but uses a shorter high-signal summary instead of the older oversized multiline message.
-- A dedicated Settings window now owns durable app-wide defaults for source mode, traversal order, overwrite defaults, and preview-window behavior.
-- A dedicated Preview window now owns completed-item playback, and it can either open in a normal window or jump straight into full screen based on the saved preference.
-- Run actions are now available from the toolbar, the `Run` menu, and keyboard shortcuts in addition to the main workbench UI.
-- Album names now surface before PhotoKit finishes resolving counts, so album-mode controls stop feeling dead on cold launch.
-- The immersive completed-item view now uses a hybrid media layout: roomy landscape items keep the slim top HUD plus low-cover bottom dock, while tighter aspect ratios fall back to a dedicated bottom shelf so the chrome stays fully visible.
-- The immersive completed-item view now buffers recent completed items even before full-screen opens, resumes any unseen backlog if you close and reopen it during a run, and suppresses same-asset replay inside that playback queue.
-- Immersive playback cadence now learns from the rolling mean of the most recent completed-item intervals, aims to stay about two learned item-times behind the newest completion, and nudges preview holds up or down gradually instead of using the old fixed backlog-delay tiers.
-- Aspect-fit immersive media now uses a restrained ambient matte instead of a flat black letterbox, and empty immersive state copy is centered until a completed preview exists.
-- Capture dates now come across from AppleScript as stable local wall-clock timestamps so immersive timestamps match the Mac's local time instead of drifting through the earlier pseudo-epoch conversion.
-- Data & Storage and Diagnostics remain separate utility windows, now with more specific Finder reveal actions for app-owned files and recent diagnostics outputs.
-- Startup defaults now select `Album` and keep no-prompt overwrite of non-app metadata enabled unless explicitly changed in Settings.
-- Whole-library runs require explicit confirmation before write work starts.
-- Runs that overwrite non-app metadata without per-item prompts require explicit confirmation.
-- Core per-item stages now retry once automatically after a short pause when asset acquisition, caption generation/JSON decode, or Photos metadata write fails transiently.
-- Common Qwen formatting slop such as smart quotes and trailing commas is now repaired before the strict JSON decode gives up.
-- If Qwen emits a broken JSON prefix and then later returns a complete JSON object, including fenced `json` output, the analyzer now recovers that later valid object instead of failing the item outright.
-- If Qwen still returns malformed JSON, the app now saves the raw reply to an app-scoped temporary diagnostics file on this Mac and includes that path in the item failure message.
-- If Ollama is missing, the app now shows a setup card and can open the official macOS download page after explicit confirmation.
-- Missing model downloads still require explicit confirmation, while ordinary local Ollama startup does not.
-- Resume-state and queued-albums files are stored under Application Support and surfaced in the Data & Storage window.
-- The build script now creates a universal `arm64` + `x86_64` app bundle in `dist/`.
-- GitHub Actions now separate ordinary build/test verification from version-triggered release publishing, and releases package a DMG from committed source.
-- Version-triggered GitHub releases import the Developer ID certificate from repository secrets, sign the app with hardened runtime and timestamping, sign the DMG, notarize and staple it, and run Gatekeeper assessment before upload.
-- Existing long-run progress, cancellation, resume-state persistence, diagnostics, and restart safeguards remain in place.
+Photos Caption Assistant is a local-first macOS captioning workbench. On macOS 27 and later, normal Photos workflows use PhotoKit for library and album enumeration, selected-asset resolution, metadata reads and writes, preview media acquisition, and post-write verification. macOS 15–26 continue to use the established AppleScript compatibility backend. The app's minimum deployment target remains macOS 15; CI uses the Xcode 27 SDK to compile the newer symbols.
 
-What is partially implemented:
-- Long-run resilience is improved, but still depends on AppleScript and Photos relaunching cleanly when the automatic restart cycle fires.
-- The guarded PhotoKit rollout still covers only the safe scan/count scopes already documented elsewhere; metadata writes remain AppleScript-backed.
-- If Ollama is installed but not already running, the app cannot know model presence until it starts the local service and checks.
+Caption and keyword generation remains local through Ollama and `qwen2.5vl:7b`. The app retains its run confirmations, overwrite policies, ownership tags, resumable state, cancellation, queued albums, retry reporting, and completed-item preview.
 
-What is not implemented yet:
-- No dedicated prompt comparison or prompt selection UI.
+## Photos integration and metadata safety
 
-Known limitations and trust warnings:
-- Local packaged apps are ad-hoc signed by default unless a Developer ID signing identity is provided.
-- Notarized GitHub Release DMGs require valid Apple Developer ID and notarization secrets in the repository.
-- The app depends on Apple Photos automation and local Ollama availability.
-- Raw malformed Qwen replies can now be written to an app-scoped temporary diagnostics folder for local troubleshooting when JSON parsing fails.
-- Photos.app must be open before starting a write run.
-- The bundle identifier is now `com.jkfisher.PhotosCaptionAssistant`, so macOS will likely prompt again for Photos and Apple Events permissions after the rename.
-- The core production write path still relies on AppleScript and Photos automation for metadata reads, writes, overwrite gating, picker resolution, queued-albums resolution, and Photos lifecycle handling.
-- The app does not install Ollama itself. It uses a manual browser handoff to the official download page when Ollama is missing.
-- Local ad-hoc builds may still require Finder `Open` or `Privacy & Security -> Open Anyway`; successful GitHub release DMGs should follow the Developer ID notarized path instead.
-- This repo is source-first. Built app bundles and temp outputs should not be treated as source-of-truth artifacts.
-- The Preview window is now its own scene, so the old “take over the main window” immersive behavior is no longer the default presentation path.
+- PhotoKit is selected at runtime on macOS 27+. It always operates on the System Photo Library; opening another library in Photos.app does not redirect native scans or writes. The app requests full Photos library access; denied, restricted, or limited access blocks runs that require the complete configured scope. Native runs do not require Photos.app to be open and do not use its quit/relaunch cycle. Preflight and run confirmation identify the target library.
+- The AppleScript backend remains for macOS 15–26. It still requires Photos.app and Apple Events automation. There is no silent fallback from a failed native write to AppleScript.
+- Asset lookup prefers exact Photos local identifiers. Legacy identifiers are accepted only when their old prefix resolves uniquely; filenames are never used as identity.
+- Existing metadata is captured before analysis and passed to the native writer as a stale-change guard. Caption and keyword changes are submitted in one `performChanges` transaction. Keywords are reconciled as exact canonical values (Unicode NFC); replace behavior removes values outside the requested target, while merge/preserve/skip decisions remain in the existing run policy.
+- The app reads metadata back after a PhotoKit change and reports the observed result. If an operation's completion is ambiguous, it checks the actual target and baseline state rather than guessing or blindly repeating a partial mutation. PhotoKit does not provide a rollback guarantee for partially applied changes.
+- Normal albums, PhotoKit-exposed smart albums, and queued album enumeration use bounded pages and stable enumeration snapshots where available. macOS-only custom smart-album parity has not been verified against a real library. PhotoKit reads and previews support photos and videos, including hidden assets; this does not imply that every iCloud-only original is already locally available. Filenames use `PHAssetResource` lookup during enumeration to avoid an extra extended-metadata fetch per asset.
+- AppleScript remains for the older-OS compatibility backend and the explicitly invoked legacy identity write/restore diagnostic. The scan benchmark compares readers and is opt-in; it does not perform metadata writes.
 
-Setup/runtime requirements:
-- macOS 15 or later.
-- Photos.app installed and open before starting a write run.
-- Ollama required before runs can start, but not required before first launch; the app can open the official macOS download page to guide setup.
-- The app does not auto-install Ollama or run remote install scripts.
-- The `qwen2.5vl:7b` model installed locally, or willingness to let the app download it through Ollama after a separate confirmation.
-- User approval for Photos library access and Apple Events automation when macOS prompts.
-- First launch after the rename should be treated like a new app for macOS permission prompts.
+## Working product behavior
 
-Important operational risks:
-- Large runs can still fail if Photos does not relaunch into an automation-ready state.
-- First-time Ollama setup is still manual after the browser handoff.
-- First-run model download can take several minutes.
-- If Ollama is missing entirely, the run cannot start until the user installs it and clicks Re-check Setup.
-- Whole-library runs and no-prompt overwrite modes are intentionally possible, but they still deserve caution even with the new confirmations.
+- Library, album, picker, and queued-album runs are available. Whole-library runs require explicit confirmation; no-prompt overwrites of metadata created outside the app require confirmation.
+- Overwrite policy and app ownership tags distinguish app-generated metadata from user-authored metadata. Resume state and queued albums remain in Application Support.
+- Normal PhotoKit runs queue every ID from the selected-scope snapshot before the first write. The existing pending-ID save is best effort, so durable recovery depends on that save succeeding. AppleScript library/album scans and queued-album runs retain discovered pending IDs; canceling during discovery may require a fresh run with the original scope to find items that were not yet queued. Explicit picker IDs remain queued during ordered preparation, then are replaced with canonical IDs before writes.
+- The UI remains a toolbar-first run workbench with dedicated Settings, Preview, Data & Storage, and Diagnostics windows. Preview can show completed photo/video items during a run.
+- Ollama setup and model download are explicit user actions. The app does not install Ollama, run remote installation scripts, upload media, or use cloud inference.
+- The build script produces a universal `arm64` + `x86_64` app. GitHub Actions build/test and release jobs use an Xcode 27 runner; release publishing remains driven by a checked-in Info.plist version change and is not triggered by this modernization.
 
-Recommended next priorities:
-- Add a small, repeatable smoke-test checklist for future known-good anchors and releases.
-- Consider whether the diagnostics tools should eventually become a more structured inspector-style utility window rather than a free-form form.
+## Verification and known limits
+
+- The implementation was compiled against the locally installed Xcode 27.0 / macOS 27.0 SDK on a macOS 27.2 host. The reviewed macOS 27.2 release notes add no further caption/keyword API used by this app; they deprecate `PHAssetResource.originalFilename` in favor of nullable `filename`, which the macOS 27+ enumerator uses.
+- Automated tests exercise metadata reconciliation, stale-baseline matching, identifiers, enumeration helpers, and the existing run-coordinator behavior with test doubles. These do not prove behavior against a real Photos library.
+- No real Photos write test or performance benchmark has been run. The production library was not modified. Consequently, there are no measured throughput claims yet; the architecture removes AppleScript invocations and Photos lifecycle restarts from macOS 27+ normal runs, but end-to-end speed depends on library and asset availability.
+- Before relying on native writes, perform one caption/keyword write and restoration using a specifically designated disposable asset in the System Photo Library. An alternate library opened in Photos.app does not isolate PhotoKit. Verify the final caption and complete keyword set in Photos after each step; do not use an unrelated production-library item.
+- iCloud-only media may require downloading or can be temporarily unavailable. Limited Photos access is not sufficient for full-library or album runs. Compatibility behavior on macOS 15–26, Photos authorization/write behavior on macOS 27, and custom smart-album parity still need on-device acceptance.
+- Local packaged apps are ad-hoc signed by default unless a Developer ID signing identity is supplied. GitHub release notarization still needs the configured Apple signing and notarization secrets.
+
+## Setup/runtime requirements
+
+- macOS 15 or later; macOS 27+ for the native PhotoKit metadata backend.
+- Ollama and the `qwen2.5vl:7b` model installed locally, or confirmation to download the model through Ollama.
+- Photos library access. Apple Events automation and an open Photos.app are additionally required only on the macOS 15–26 compatibility backend.
+- The app bundle identifier is `com.jkfisher.PhotosCaptionAssistant`.
 
 Most recent durable known-good anchor:
 - `checkpoint/20260402-180116-known-good`

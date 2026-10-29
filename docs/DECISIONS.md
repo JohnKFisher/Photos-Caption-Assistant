@@ -5,8 +5,12 @@ Status: approved
 Rationale: Caption and keyword generation stays on the local Mac through Ollama running on `127.0.0.1`. This preserves the project's privacy-first, personal-use operating model and avoids silent cloud inference.
 
 ## 2026-04-14 — Keep Apple Photos automation as the production write path
+Status: superseded by the 2026-10-28 PhotoKit modernization decision
+Rationale: This was the safe architecture before PhotoKit exposed the required extended metadata and mutation APIs. The older macOS compatibility implementation remains active where those APIs are unavailable.
+
+## 2026-10-28 — Prefer PhotoKit for normal Photos workflows on macOS 27+
 Status: approved
-Rationale: The app may expand guarded PhotoKit reads over time, but production metadata reads, writes, overwrite gating, and Photos lifecycle control remain AppleScript/automation-backed until a safer replacement is proven.
+Rationale: On macOS 27 and later, the app uses PhotoKit for asset enumeration, album and picker resolution, caption/keyword reads, caption and keyword writes, media acquisition, and post-write verification. PhotoKit always addresses the System Photo Library, regardless of which library Photos.app currently displays; the preflight and confirmation must make that target visible. The macOS 15–26 compatibility backend remains AppleScript-based and addresses the library open in Photos.app. PhotoKit writes carry the pre-analysis metadata snapshot, reject stale assets, reconcile keyword additions/removals to the requested target, and verify the result after `performChanges`. Caption and keyword mutations share one PhotoKit change block; Photos does not offer rollback guarantees if a framework change partially applies, so the app reports and re-reads actual state instead of guessing or silently retrying a partial result. Normal PhotoKit runs queue all IDs from the selected scope before the first write, without changing the saved-state format; durable recovery still depends on the existing best-effort save succeeding. Native PhotoKit runs do not require Photos.app to be open or use the AppleScript restart cycle. CI must build with an SDK containing the macOS 27 APIs while the app's minimum deployment target remains macOS 15.
 
 ## 2026-04-14 — Keep app identity on `com.jkfisher.PhotosCaptionAssistant`
 Status: approved

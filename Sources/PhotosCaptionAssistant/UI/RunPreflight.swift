@@ -72,7 +72,7 @@ enum RunPreflightSummaryBuilder {
             countDescription: countDescription,
             countIsLoading: countIsLoading,
             filterDescription: filterDescription,
-            writeDescription: "This run will generate captions and keywords locally, then write captions, keywords, and app ownership tags back to matching Photos items.",
+            writeDescription: makeWriteDescription(capabilities: capabilities),
             overwriteDescriptions: overwriteDescriptions,
             modelDescription: makeModelDescription(capabilities: capabilities),
             serviceDescription: makeServiceDescription(capabilities: capabilities),
@@ -195,8 +195,29 @@ enum RunPreflightSummaryBuilder {
     private static func makeBlockingReasons(snapshot: RunSetupSnapshot, capabilities: AppCapabilities) -> [String] {
         var reasons: [String] = []
 
-        if !capabilities.photosAutomationAvailable {
-            reasons.append("Grant Photos automation access before starting a write run.")
+        if !capabilities.photosIntegrationAvailable {
+            switch capabilities.photosAccessState {
+            case .limited:
+                reasons.append("Allow full Photos library access before starting a write run.")
+            case .denied:
+                if capabilities.photosRequiresAppleEventsAutomation {
+                    reasons.append("Grant Photos automation access before starting a write run.")
+                } else {
+                    reasons.append("Allow Photos library access in System Settings before starting a write run.")
+                }
+            case .restricted:
+                reasons.append("Photos library access is restricted on this Mac.")
+            case .notDetermined:
+                if capabilities.photosRequiresAppleEventsAutomation {
+                    reasons.append("Grant Photos automation access before starting a write run.")
+                } else {
+                    reasons.append("Allow Photos library access before starting a write run.")
+                }
+            case .available:
+                if capabilities.photosRequiresAppleEventsAutomation {
+                    reasons.append("Grant Photos automation access before starting a write run.")
+                }
+            }
         }
 
         if capabilities.ollamaAvailability.requiresInstallBeforeRun {
@@ -229,11 +250,27 @@ enum RunPreflightSummaryBuilder {
         return reasons
     }
 
-    private static func makeConfirmationReasons(snapshot: RunSetupSnapshot, capabilities _: AppCapabilities) -> [String] {
+    private static func makeWriteDescription(capabilities: AppCapabilities) -> String {
+        let appRequirement = capabilities.photosRequiresPhotosApp
+            ? "Photos.app must stay open during the run."
+            : "Photos.app can remain closed during the run."
+        let automationRequirement = capabilities.photosRequiresAppleEventsAutomation
+            ? " The compatibility backend uses Apple Events automation."
+            : " The active backend is native PhotoKit."
+        let libraryTarget = capabilities.photosRequiresAppleEventsAutomation
+            ? " AppleScript targets the library currently open in Photos.app."
+            : " PhotoKit always targets the System Photo Library. Opening another library in Photos.app does not redirect it."
+        return "This run will generate captions and keywords locally, then write captions, keywords, and app ownership tags through \(capabilities.photosBackendName). \(appRequirement)\(automationRequirement)\(libraryTarget)"
+    }
+
+    private static func makeConfirmationReasons(snapshot: RunSetupSnapshot, capabilities: AppCapabilities) -> [String] {
         var reasons: [String] = []
 
         if snapshot.sourceSelection == .library {
-            reasons.append("This run will target the whole library, subject to the current filter and overwrite settings.")
+            let library = capabilities.photosRequiresAppleEventsAutomation
+                ? "the library currently open in Photos.app"
+                : "the System Photo Library"
+            reasons.append("This run will target the whole of \(library), subject to the current filter and overwrite settings.")
         }
 
         if snapshot.alwaysOverwriteExternalMetadata {

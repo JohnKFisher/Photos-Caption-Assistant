@@ -14,7 +14,8 @@ You need:
 
 - macOS 15 or later.
 - Apple Photos installed.
-- Photos.app open before starting a captioning run.
+- Full Photos library access.
+- On macOS 15–26, Photos.app must be open and Apple Events automation must be allowed. On macOS 27+, the app uses PhotoKit and Photos.app can stay closed.
 - Homebrew installed.
 - Ollama installed through Homebrew.
 - The `qwen2.5vl:7b` Ollama model.
@@ -42,9 +43,9 @@ ollama pull qwen2.5vl:7b
 
 ## How A Run Works
 
-1. Open Photos.app.
+1. On macOS 15–26, open the Photos library you want the app to use. On macOS 27+, PhotoKit always uses the System Photo Library, regardless of which library Photos.app currently displays.
 2. Open Photos Caption Assistant.
-3. Grant Photos and automation permissions when macOS asks.
+3. Grant Photos permission when macOS asks. Apple Events automation is additionally required on macOS 15–26.
 4. Choose what to process:
    - an album,
    - the whole library,
@@ -56,15 +57,19 @@ ollama pull qwen2.5vl:7b
 
 The app reads each selected photo or video, sends local analysis input to Ollama, receives a caption and keywords, and writes the result back into Photos.
 
+On macOS 27 and later, caption and keyword metadata are read and written through PhotoKit, then read back for verification. On macOS 15–26, the app uses its AppleScript compatibility backend. Both paths retain overwrite prompts, app ownership tags, and resumable runs.
+
 ## Safety Notes
 
 The safest starting point is a small album.
+
+On macOS 27+, check the run summary to confirm the target is the System Photo Library. Opening another library in Photos.app does not isolate or redirect PhotoKit.
 
 Whole-library runs are available, but they can touch a lot of Photos metadata. The app asks for confirmation before starting a whole-library run.
 
 The app can also overwrite captions or keywords that were not created by Photos Caption Assistant. Review the run summary and overwrite settings before starting.
 
-If a run is interrupted, the app keeps resumable state so you can continue later where possible.
+If a run is interrupted, the app keeps resumable state where possible. On macOS 27+, normal PhotoKit runs queue the complete selected-scope snapshot before writing; durable recovery depends on the existing best-effort save succeeding. On the older compatibility backend, library and album scans save discovered pending items, so a fresh run with the original scope may be needed if cancellation interrupts discovery. Queued-album workflows also save discovered pending items.
 
 ## Privacy
 
@@ -97,8 +102,9 @@ If you build the app locally from source, that local build is not notarized by d
 
 ## Current Limits
 
-- Photos.app must be open before a write run starts.
-- The app depends on Apple Photos automation, which can be fragile during very large or long runs.
+- Photos.app and Apple Events automation are required for write runs only on macOS 15–26. Native PhotoKit runs on macOS 27+ can operate while Photos.app is closed.
+- Native PhotoKit writes have not yet been validated against a designated disposable asset; do not use an unrelated production photo for a write test.
+- PhotoKit authorization must grant full library access; limited access does not support the app's complete library and album workflows.
 - First-time Ollama setup is still manual.
 - First-time model download can take several minutes.
 - The app expects the local `ollama` command to be available in common Homebrew-style locations.

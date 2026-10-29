@@ -32,6 +32,263 @@ private extension CaptionWorkflowConfiguration {
 
 @MainActor
 final class RunCoordinatorTests: XCTestCase {
+    func testRunStartsAndEndsPhotosRequestCancellationSession() async {
+        let assets = makeAssets(count: 1)
+        let writer = MockPhotosWriter(
+            assets: assets,
+            metadataByID: [assets[0].id: ExistingMetadataState(caption: nil, keywords: [], ownershipTag: nil, isExternal: false)]
+        )
+        let coordinator = RunCoordinator(
+            photosWriter: writer,
+            analyzer: MockAnalyzer(result: GeneratedMetadata(caption: "caption", keywords: ["k"]))
+        )
+
+        let summary = await coordinator.run(
+            options: defaultRunOptions(),
+            capabilities: defaultCapabilities(),
+            callbacks: RunCallbacks()
+        )
+
+        let counts = await writer.photosRequestLifecycleCounts()
+        XCTAssertEqual(summary.progress.changed, 1)
+        XCTAssertEqual(counts.begin, 1)
+        XCTAssertEqual(counts.end, 1)
+    }
+
+    func testEnumerationSnapshotUsesSelectedAlternateScanSource() async {
+        let asset = MediaAsset(id: "asset-snapshot", filename: "IMG_snapshot.jpg", captureDate: Date(), kind: .photo)
+        let writer = MockPhotosWriter(
+            assets: [asset],
+            metadataByID: [asset.id: ExistingMetadataState(caption: nil, keywords: [], ownershipTag: nil, isExternal: false)]
+        )
+        let scanSource = SnapshottingScanSource(assets: [asset])
+        let coordinator = RunCoordinator(
+            photosWriter: writer,
+            analyzer: MockAnalyzer(result: GeneratedMetadata(caption: "caption", keywords: ["k"])),
+            incrementalScanSource: scanSource
+        )
+
+        let summary = await coordinator.run(
+            options: defaultRunOptions(),
+            capabilities: defaultCapabilities(),
+            callbacks: RunCallbacks()
+        )
+
+        let snapshotCounts = await scanSource.snapshotCounts()
+        XCTAssertEqual(summary.progress.changed, 1)
+        XCTAssertEqual(snapshotCounts.begin, 1)
+        XCTAssertEqual(snapshotCounts.end, 1)
+    }
+
+    func testFastTraversalSeedsResumeQueueWithCompleteSnapshotBeforeWrites() async {
+        let assets = (0..<260).map { index in
+            MediaAsset(
+                id: "asset-resume-\(index)",
+                filename: "IMG_resume_\(index).jpg",
+                captureDate: Date(timeIntervalSince1970: TimeInterval(index)),
+                kind: .photo
+            )
+        }
+        let metadata = Dictionary(uniqueKeysWithValues: assets.map { asset in
+            (asset.id, ExistingMetadataState(caption: nil, keywords: [], ownershipTag: nil, isExternal: false))
+        })
+        let writer = MockPhotosWriter(assets: assets, metadataByID: metadata)
+        let scanSource = SnapshottingScanSource(assets: assets)
+        let coordinator = RunCoordinator(
+            photosWriter: writer,
+            analyzer: MockAnalyzer(result: GeneratedMetadata(caption: "caption", keywords: ["k"])),
+            incrementalScanSource: scanSource
+        )
+        var pendingIDs: [String] = []
+
+        let summary = await coordinator.run(
+            options: defaultRunOptions(),
+            capabilities: defaultCapabilities(),
+            callbacks: RunCallbacks(
+                onProgress: { progress in
+                    if progress.changed > 0 {
+                        coordinator.cancel()
+                    }
+                },
+                onPendingIDsUpdated: { ids in
+                    pendingIDs = ids
+                }
+            )
+        )
+
+        XCTAssertGreaterThan(summary.progress.changed, 0)
+        XCTAssertEqual(pendingIDs.last, assets.last?.id)
+        XCTAssertLessThan(pendingIDs.count, assets.count)
+    }
+
+    func testOrderedResumeCancellationDuringPreparationKeepsCompleteCanonicalQueue() async {
+        let assets = (0..<3).map { index in
+            MediaAsset(
+                id: "asset-ordered-resume-\(index)",
+                filename: "IMG_ordered_resume_\(index).jpg",
+                captureDate: Date(timeIntervalSince1970: TimeInterval(index)),
+                kind: .photo
+            )
+        }
+        let scanSource = SnapshottingScanSource(assets: assets)
+        let legacyIDs = assets.map { "legacy-\($0.id)" }
+        let coordinator = RunCoordinator(
+            photosWriter: scanSource,
+            analyzer: MockAnalyzer(result: GeneratedMetadata(caption: "caption", keywords: ["k"])),
+            incrementalScanSource: nil
+        )
+        var pendingCallbacks: [[String]] = []
+        let summary = await coordinator.run(
+            options: RunOptions(
+                source: .picker(ids: legacyIDs),
+                optionalCaptureDateRange: nil,
+                traversalOrder: .oldestToNewest,
+                overwriteAppOwnedSameOrNewer: false
+            ),
+            capabilities: defaultCapabilities(),
+            callbacks: RunCallbacks(
+                onPreparationProgress: { processed, _ in
+                    if processed > 0 {
+                        coordinator.cancel()
+                    }
+                },
+                onPendingIDsUpdated: { ids in pendingCallbacks.append(ids) }
+            )
+        )
+        let writeOrder = await scanSource.writeOrderValue()
+
+        XCTAssertEqual(summary.progress.changed, 0)
+        XCTAssertEqual(pendingCallbacks.last, assets.map(\.id))
+        XCTAssertTrue(writeOrder.isEmpty)
+        XCTAssertTrue(summary.errors.isEmpty)
+    }
+
+    func testFastCompatibilityPickerDoesNotRetainLegacyAliasAfterCanonicalEnumeration() async {
+        let assets = [
+            MediaAsset(id: "asset-compat-picker-1", filename: "IMG_compat_1.jpg", captureDate: Date(), kind: .photo),
+            MediaAsset(id: "asset-compat-picker-2", filename: "IMG_compat_2.jpg", captureDate: Date(), kind: .photo)
+        ]
+        let writer = CompatibilityAliasResolvingWriter(assets: assets)
+        let coordinator = RunCoordinator(
+            photosWriter: writer,
+            analyzer: MockAnalyzer(result: GeneratedMetadata(caption: "caption", keywords: ["k"])),
+            analysisConcurrency: 1,
+            writeBatchSize: 1
+        )
+        var pendingIDs: [String] = []
+
+        let summary = await coordinator.run(
+            options: RunOptions(
+                source: .picker(ids: assets.map { "legacy-\($0.id)" }),
+                optionalCaptureDateRange: nil,
+                overwriteAppOwnedSameOrNewer: false
+            ),
+            capabilities: defaultCapabilities(),
+            callbacks: RunCallbacks(
+                onProgress: { progress in
+                    if progress.changed > 0 {
+                        coordinator.cancel()
+                    }
+                },
+                onPendingIDsUpdated: { ids in pendingIDs = ids }
+            )
+        )
+        let writes = await writer.writeOrderValue()
+
+        XCTAssertEqual(summary.progress.changed, 1)
+        XCTAssertEqual(writes, [assets[0].id])
+        XCTAssertEqual(pendingIDs, [assets[1].id])
+    }
+
+    func testDateFilteredOrderedPickerReplacesLegacyIDsWithCanonicalInScopeIDs() async {
+        let assets = [
+            MediaAsset(id: "asset-filtered-picker-1", filename: "IMG_filter_1.jpg", captureDate: Date(timeIntervalSince1970: 1), kind: .photo),
+            MediaAsset(id: "asset-filtered-picker-2", filename: "IMG_filter_2.jpg", captureDate: Date(timeIntervalSince1970: 2), kind: .photo),
+            MediaAsset(id: "asset-filtered-picker-outside", filename: "IMG_filter_outside.jpg", captureDate: Date(timeIntervalSince1970: 3), kind: .photo)
+        ]
+        let writer = CompatibilityAliasResolvingWriter(assets: assets)
+        let coordinator = RunCoordinator(
+            photosWriter: writer,
+            analyzer: MockAnalyzer(result: GeneratedMetadata(caption: "caption", keywords: ["k"])),
+            analysisConcurrency: 1,
+            writeBatchSize: 1
+        )
+        var pendingIDs: [String] = []
+
+        let summary = await coordinator.run(
+            options: RunOptions(
+                source: .picker(ids: assets.map { "legacy-\($0.id)" }),
+                optionalCaptureDateRange: CaptureDateRange(
+                    start: Date(timeIntervalSince1970: 0),
+                    end: Date(timeIntervalSince1970: 2)
+                ),
+                traversalOrder: .oldestToNewest,
+                overwriteAppOwnedSameOrNewer: false
+            ),
+            capabilities: defaultCapabilities(),
+            callbacks: RunCallbacks(
+                onProgress: { progress in
+                    if progress.changed > 0 {
+                        coordinator.cancel()
+                    }
+                },
+                onPendingIDsUpdated: { ids in pendingIDs = ids }
+            )
+        )
+
+        XCTAssertEqual(summary.progress.changed, 1)
+        XCTAssertEqual(pendingIDs, [assets[1].id])
+        XCTAssertFalse(pendingIDs.contains(assets[2].id))
+    }
+
+    func testResumeQueueOmitsLaterSkippedAssetWhenEarlierAnalysisIsCancelled() async {
+        let assets = [
+            MediaAsset(id: "asset-resume-write", filename: "IMG_resume_write.jpg", captureDate: Date(), kind: .photo),
+            MediaAsset(id: "asset-resume-skip", filename: "IMG_resume_skip.jpg", captureDate: Date(), kind: .photo)
+        ]
+        let metadata = [
+            assets[0].id: ExistingMetadataState(caption: nil, keywords: [], ownershipTag: nil, isExternal: false),
+            assets[1].id: ExistingMetadataState(caption: "Manual caption", keywords: ["manual"], ownershipTag: nil, isExternal: true)
+        ]
+        let writer = MockPhotosWriter(assets: assets, metadataByID: metadata)
+        let gate = AsyncTestGate()
+        let coordinator = RunCoordinator(
+            photosWriter: writer,
+            analyzer: GatedAnalyzer(gate: gate, result: GeneratedMetadata(caption: "generated", keywords: ["generated"]))
+        )
+        var skipWasProcessed = false
+        var pendingIDs: [String] = []
+
+        let runTask = Task {
+            await coordinator.run(
+                options: defaultRunOptions(),
+                capabilities: defaultCapabilities(),
+                callbacks: RunCallbacks(
+                    onProgress: { progress in
+                        if progress.skipped > 0 {
+                            skipWasProcessed = true
+                        }
+                    },
+                    onPendingIDsUpdated: { ids in pendingIDs = ids },
+                    confirmExternalOverwrite: { _, _ in false }
+                )
+            )
+        }
+
+        var analysisStarted = false
+        while !skipWasProcessed || !analysisStarted {
+            analysisStarted = await gate.hasStarted()
+            try? await Task.sleep(nanoseconds: 1_000_000)
+        }
+        coordinator.cancel()
+        await gate.release()
+        let summary = await runTask.value
+
+        XCTAssertEqual(summary.progress.changed, 0)
+        XCTAssertEqual(summary.progress.skipped, 1)
+        XCTAssertEqual(pendingIDs, [assets[0].id])
+    }
+
     func testRunSessionAdmissionRejectsConcurrentSessionAndReleasesCleanly() {
         let assets = [MediaAsset(id: "asset-admission", filename: "IMG_admission.jpg", captureDate: Date(), kind: .photo)]
         let metadata = [
@@ -1077,6 +1334,7 @@ final class RunCoordinatorTests: XCTestCase {
             metadataByID: metadata,
             exportFailuresByID: [asset.id: 1]
         )
+        var pendingIDs: [String] = []
         let coordinator = makeRetryingCoordinator(
             photosWriter: writer,
             analyzer: MockAnalyzer(result: GeneratedMetadata(caption: "caption", keywords: ["retry"])),
@@ -1090,6 +1348,9 @@ final class RunCoordinatorTests: XCTestCase {
                 callbacks: RunCallbacks(
                     onStatusChanged: { status in
                         statusRecorder.record(status: status)
+                    },
+                    onPendingIDsUpdated: { ids in
+                        pendingIDs = ids
                     }
                 )
             )
@@ -1104,7 +1365,9 @@ final class RunCoordinatorTests: XCTestCase {
         let exportAttemptCount = await writer.exportAttemptCountValue(for: asset.id)
         XCTAssertEqual(exportAttemptCount, 1)
         XCTAssertEqual(summary.progress.changed, 0)
-        XCTAssertEqual(summary.progress.failed, 1)
+        XCTAssertEqual(summary.progress.failed, 0)
+        XCTAssertEqual(summary.progress.processed, 0)
+        XCTAssertEqual(pendingIDs, [asset.id])
     }
 
     func testTraversalOrderOldestToNewestUsesCaptureDate() async {
@@ -2006,7 +2269,7 @@ final class RunCoordinatorTests: XCTestCase {
         )
 
         let writeOrder = await writer.writeOrderValue()
-        let listAlbumsCount = await writer.listUserAlbumsCallCountValue()
+        let listAlbumsCount = await writer.listAlbumsCallCountValue()
         let statuses = statusRecorder.values()
 
         XCTAssertEqual(summary.progress.changed, 1)
@@ -2663,6 +2926,116 @@ final class RunCoordinatorTests: XCTestCase {
     }
 }
 
+private actor SnapshottingScanSource: IncrementalPhotosWriter, ScopedIncrementalScanSource, PhotosEnumerationSnapshotting, PhotosResumeSnapshotting {
+    private let assets: [MediaAsset]
+    private var beginCount = 0
+    private var endCount = 0
+    private var writeOrder: [String] = []
+
+    init(assets: [MediaAsset]) {
+        self.assets = assets
+    }
+
+    func canHandleIncrementalScan(scope _: ScopeSource) async -> Bool {
+        true
+    }
+
+    func count(scope _: ScopeSource) async throws -> Int {
+        assets.count
+    }
+
+    func enumerate(scope _: ScopeSource, dateRange: CaptureDateRange?) async throws -> [MediaAsset] {
+        guard let dateRange else { return assets }
+        return assets.filter { dateRange.contains($0.captureDate) }
+    }
+
+    func enumerate(scope _: ScopeSource, offset: Int, limit: Int) async throws -> [MediaAsset] {
+        let start = max(0, offset)
+        guard start < assets.count else { return [] }
+        return Array(assets[start..<min(assets.count, start + max(1, limit))])
+    }
+
+    func beginEnumerationSnapshot(scope _: ScopeSource) async throws {
+        beginCount += 1
+    }
+
+    func endEnumerationSnapshot(scope _: ScopeSource) async {
+        endCount += 1
+    }
+
+    func resumeSnapshotAssetIdentifiers(scope _: ScopeSource) async throws -> [String] {
+        assets.map(\.id)
+    }
+
+    func readMetadata(id _: String) async throws -> ExistingMetadataState {
+        ExistingMetadataState(caption: nil, keywords: [], ownershipTag: nil, isExternal: false)
+    }
+
+    func writeMetadata(id: String, caption _: String, keywords _: [String]) async throws {
+        writeOrder.append(id)
+    }
+
+    func exportAssetToTemporaryURL(id _: String, kind _: MediaKind) async throws -> URL {
+        URL(fileURLWithPath: "/private/tmp/unused-resume-test.jpg")
+    }
+
+    func isPhotosAppRunning() async -> Bool {
+        true
+    }
+
+    func snapshotCounts() -> (begin: Int, end: Int) {
+        (beginCount, endCount)
+    }
+
+    func writeOrderValue() -> [String] {
+        writeOrder
+    }
+}
+
+private actor CompatibilityAliasResolvingWriter: IncrementalPhotosWriter {
+    private let assets: [MediaAsset]
+    private var writeOrder: [String] = []
+
+    init(assets: [MediaAsset]) {
+        self.assets = assets
+    }
+
+    func count(scope _: ScopeSource) async throws -> Int {
+        assets.count
+    }
+
+    func enumerate(scope _: ScopeSource, offset: Int, limit: Int) async throws -> [MediaAsset] {
+        let start = max(0, offset)
+        guard start < assets.count else { return [] }
+        return Array(assets[start..<min(assets.count, start + max(1, limit))])
+    }
+
+    func enumerate(scope _: ScopeSource, dateRange: CaptureDateRange?) async throws -> [MediaAsset] {
+        guard let dateRange else { return assets }
+        return assets.filter { dateRange.contains($0.captureDate) }
+    }
+
+    func readMetadata(id _: String) async throws -> ExistingMetadataState {
+        ExistingMetadataState(caption: nil, keywords: [], ownershipTag: nil, isExternal: false)
+    }
+
+    func writeMetadata(id: String, caption _: String, keywords _: [String]) async throws {
+        writeOrder.append(id)
+    }
+
+    func exportAssetToTemporaryURL(id _: String, kind _: MediaKind) async throws -> URL {
+        FileManager.default.temporaryDirectory.appendingPathComponent("unused-compatibility-picker-\(UUID().uuidString).jpg")
+    }
+
+    func isPhotosAppRunning() async -> Bool {
+        true
+    }
+
+    func writeOrderValue() -> [String] {
+        writeOrder
+    }
+}
+
 private actor TimelineRecorder {
     private var timestamps: [String: UInt64] = [:]
 
@@ -2983,19 +3356,19 @@ private actor MockScopedIncrementalScanSource: ScopedIncrementalScanSource {
             return assets
         case let .album(id):
             guard let assetIDs = albumAssetIDsByID[id] else {
-                throw ExperimentalPhotoKitScanError.albumNotFound(id)
+                throw PhotoKitPhotosClientError.albumNotFound(id)
             }
             let assetsByID = Dictionary(uniqueKeysWithValues: assets.map { ($0.id, $0) })
             return assetIDs.compactMap { assetsByID[$0] }
         case .picker:
-            throw ExperimentalPhotoKitScanError.unsupportedScope("picker")
+            throw PhotoKitPhotosClientError.unsupportedScope("picker")
         case .captionWorkflow:
-            throw ExperimentalPhotoKitScanError.unsupportedScope("captionWorkflow")
+            throw PhotoKitPhotosClientError.unsupportedScope("captionWorkflow")
         }
     }
 }
 
-private actor MockPhotosWriter: PhotosWriter, PhotosProcessMonitoring, PhotosLifecycleControlling, PhotoPreviewSource, PhotoPreviewDataSource, BatchMetadataPhotosWriter, BatchWritePhotosWriter, IncrementalPhotosWriter, AlbumListingPhotosSource {
+private actor MockPhotosWriter: PhotosWriter, PhotosProcessMonitoring, PhotosLifecycleControlling, PhotoPreviewSource, PhotoPreviewDataSource, BatchMetadataPhotosWriter, BatchWritePhotosWriter, IncrementalPhotosWriter, AlbumListingPhotosSource, PhotosOperationCancellation {
     private let assets: [MediaAsset]
     private let photosResidentMemoryBytesValue: UInt64?
     private let previewDataByID: [String: Data]
@@ -3019,6 +3392,9 @@ private actor MockPhotosWriter: PhotosWriter, PhotosProcessMonitoring, PhotosLif
     private var isPhotosRunning = true
     private var quitResultIndex = 0
     private var waitForReadyResultIndex = 0
+    private(set) var photosRequestBeginCount = 0
+    private(set) var photosRequestCancelCount = 0
+    private(set) var photosRequestEndCount = 0
     private(set) var writes: [String: (caption: String, keywords: [String])] = [:]
     private(set) var writeOrder: [String] = []
     private(set) var previewRequests: [String] = []
@@ -3034,7 +3410,7 @@ private actor MockPhotosWriter: PhotosWriter, PhotosProcessMonitoring, PhotosLif
     private(set) var quitRequestCount = 0
     private(set) var launchRequestCount = 0
     private(set) var waitForReadyCallCount = 0
-    private(set) var listUserAlbumsCallCount = 0
+    private(set) var listAlbumsCallCount = 0
 
     init(
         assets: [MediaAsset],
@@ -3113,8 +3489,8 @@ private actor MockPhotosWriter: PhotosWriter, PhotosProcessMonitoring, PhotosLif
         return stableResolvedAssets(forAlbumID: albumID)
     }
 
-    func listUserAlbums() async throws -> [AlbumSummary] {
-        listUserAlbumsCallCount += 1
+    func listAlbums() async throws -> [AlbumSummary] {
+        listAlbumsCallCount += 1
         guard !listedAlbums.isEmpty else { return [] }
 
         return listedAlbums.map { album in
@@ -3312,6 +3688,22 @@ private actor MockPhotosWriter: PhotosWriter, PhotosProcessMonitoring, PhotosLif
         isPhotosRunning
     }
 
+    func beginPhotosRequests() async {
+        photosRequestBeginCount += 1
+    }
+
+    func cancelPendingPhotosRequests() async {
+        photosRequestCancelCount += 1
+    }
+
+    func endPhotosRequests() async {
+        photosRequestEndCount += 1
+    }
+
+    func photosRequestLifecycleCounts() -> (begin: Int, cancel: Int, end: Int) {
+        (photosRequestBeginCount, photosRequestCancelCount, photosRequestEndCount)
+    }
+
     func quitPhotosAppGracefully() async -> Bool {
         quitRequestCount += 1
         let result = quitResults.indices.contains(quitResultIndex) ? quitResults[quitResultIndex] : true
@@ -3400,8 +3792,8 @@ private actor MockPhotosWriter: PhotosWriter, PhotosProcessMonitoring, PhotosLif
         waitForReadyCallCount
     }
 
-    func listUserAlbumsCallCountValue() async -> Int {
-        listUserAlbumsCallCount
+    func listAlbumsCallCountValue() async -> Int {
+        listAlbumsCallCount
     }
 }
 
@@ -3410,6 +3802,43 @@ private struct MockAnalyzer: Analyzer {
 
     func analyze(input _: AnalysisInput, kind _: MediaKind) async throws -> GeneratedMetadata {
         result
+    }
+}
+
+private struct GatedAnalyzer: Analyzer {
+    let gate: AsyncTestGate
+    let result: GeneratedMetadata
+
+    func analyze(input _: AnalysisInput, kind _: MediaKind) async throws -> GeneratedMetadata {
+        await gate.wait()
+        return result
+    }
+}
+
+private actor AsyncTestGate {
+    private var started = false
+    private var released = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func wait() async {
+        started = true
+        let waiters = startWaiters
+        startWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+        guard !released else { return }
+        await withCheckedContinuation { releaseWaiters.append($0) }
+    }
+
+    func hasStarted() async -> Bool {
+        started
+    }
+
+    func release() {
+        released = true
+        let waiters = releaseWaiters
+        releaseWaiters.removeAll()
+        waiters.forEach { $0.resume() }
     }
 }
 

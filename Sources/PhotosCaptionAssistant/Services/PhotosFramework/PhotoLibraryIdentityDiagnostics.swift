@@ -4,7 +4,7 @@ import Photos
 protocol PhotoLibraryDiagnosticsAppleScriptAccessing: Sendable {
     func count(scope: ScopeSource) async throws -> Int
     func enumerate(scope: ScopeSource, offset: Int, limit: Int) async throws -> [MediaAsset]
-    func listUserAlbums() async throws -> [AlbumSummary]
+    func listAlbums() async throws -> [AlbumSummary]
     func verifyAutomationAccess() async -> Bool
     func inspectResolvedMediaItem(id: String) async throws -> PhotoLibraryResolvedMediaItem
     func inspectResolvedMediaItems(ids: [String]) async -> [String: PhotoLibraryResolvedMediaItem]
@@ -249,7 +249,7 @@ actor PhotoLibraryIdentityWriteProbeRunner {
 
     init(
         appleScriptClient: any PhotoLibraryDiagnosticsAppleScriptAccessing,
-        photoKitReader: any PhotoLibraryDiagnosticsPhotoKitAccessing = ExperimentalPhotoKitScanReader(),
+        photoKitReader: any PhotoLibraryDiagnosticsPhotoKitAccessing = PhotoKitPhotosClient(),
         fileManager: FileManager = .default,
         authorizationStatusProvider: @escaping @Sendable () -> PHAuthorizationStatus = {
             PHPhotoLibrary.authorizationStatus(for: .readWrite)
@@ -265,9 +265,17 @@ actor PhotoLibraryIdentityWriteProbeRunner {
         configuration: PhotoLibraryIdentityWriteProbeConfiguration,
         progressHandler: ProgressHandler? = nil
     ) async throws -> PhotoLibraryIdentityWriteProbeOutcome {
-        let authorizationStatus = authorizationStatusProvider()
-        guard authorizationStatus == .authorized || authorizationStatus == .limited else {
-            return .skipped("Photos library access is unavailable for this process (status=\(authorizationStatus.rawValue)).")
+        if let runtime = photoKitReader as? PhotosRuntimeRequirements {
+            do {
+                try await runtime.prepareForRun(scope: .library)
+            } catch {
+                return .skipped(error.localizedDescription)
+            }
+        } else {
+            let authorizationStatus = authorizationStatusProvider()
+            guard authorizationStatus == .authorized else {
+                return .skipped("Full Photos library access is required for this process (status=\(authorizationStatus.rawValue)).")
+            }
         }
 
         guard await appleScriptClient.verifyAutomationAccess() else {
@@ -504,5 +512,3 @@ actor PhotoLibraryIdentityWriteProbeRunner {
 }
 
 extension PhotosAppleScriptClient: PhotoLibraryDiagnosticsAppleScriptAccessing {}
-
-extension ExperimentalPhotoKitScanReader: PhotoLibraryDiagnosticsPhotoKitAccessing {}

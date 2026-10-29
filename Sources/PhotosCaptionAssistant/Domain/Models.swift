@@ -148,12 +148,30 @@ public struct ExistingMetadataState: Sendable, Equatable {
     public let keywords: [String]
     public let ownershipTag: OwnershipTag?
     public let isExternal: Bool
+    public let snapshot: PhotosMetadataSnapshot
 
-    public init(caption: String?, keywords: [String], ownershipTag: OwnershipTag?, isExternal: Bool) {
+    public init(
+        caption: String?,
+        keywords: [String],
+        ownershipTag: OwnershipTag?,
+        isExternal: Bool,
+        snapshot: PhotosMetadataSnapshot? = nil
+    ) {
         self.caption = caption
         self.keywords = keywords
         self.ownershipTag = ownershipTag
         self.isExternal = isExternal
+        self.snapshot = snapshot ?? PhotosMetadataSnapshot(caption: caption, keywords: keywords)
+    }
+}
+
+public struct PhotosMetadataSnapshot: Sendable, Equatable {
+    public let caption: String?
+    public let keywords: [String]
+
+    public init(caption: String?, keywords: [String]) {
+        self.caption = caption
+        self.keywords = keywords
     }
 }
 
@@ -344,8 +362,50 @@ public protocol PhotosWriter: Sendable {
     func isPhotosAppRunning() async -> Bool
 }
 
+public protocol PhotosRuntimeRequirements: Sendable {
+    var backendName: String { get }
+    var requiresPhotosAppToBeOpen: Bool { get }
+    var requiresAppleEventsAutomation: Bool { get }
+    func authorizationState() async -> PhotosIntegrationAccessState
+    func prepareForRun(scope: ScopeSource) async throws
+}
+
+public protocol PhotosIntegrationClient:
+    PhotosWriter,
+    IncrementalPhotosWriter,
+    BatchMetadataPhotosWriter,
+    BatchWritePhotosWriter,
+    AlbumListingPhotosSource,
+    PhotoPreviewSource,
+    PhotoPreviewDataSource,
+    PhotosRuntimeRequirements
+{
+    func withResolvedAlbumCounts(_ albums: [AlbumSummary]) async -> [AlbumSummary]
+    func resolveAlbumID(_ id: String) async -> String?
+}
+
+public protocol PhotosEnumerationSnapshotting: Sendable {
+    func beginEnumerationSnapshot(scope: ScopeSource) async throws
+    func endEnumerationSnapshot(scope: ScopeSource) async
+}
+
+public protocol PhotosResumeSnapshotting: Sendable {
+    /// Returns every identifier in the active enumeration snapshot so resumable state is complete before writes begin.
+    func resumeSnapshotAssetIdentifiers(scope: ScopeSource) async throws -> [String]
+}
+
+public protocol PhotosOperationCancellation: Sendable {
+    func beginPhotosRequests() async
+    func cancelPendingPhotosRequests() async
+    func endPhotosRequests() async
+}
+
+public protocol ContextualMetadataPhotosWriter: Sendable {
+    func writeMetadata(_ payload: MetadataWritePayload) async throws -> MetadataWriteResult
+}
+
 public protocol AlbumListingPhotosSource: Sendable {
-    func listUserAlbums() async throws -> [AlbumSummary]
+    func listAlbums() async throws -> [AlbumSummary]
 }
 
 public protocol PhotosProcessMonitoring: Sendable {
@@ -385,11 +445,18 @@ public struct MetadataWritePayload: Sendable, Equatable {
     public let id: String
     public let caption: String
     public let keywords: [String]
+    public let expectedMetadata: PhotosMetadataSnapshot?
 
-    public init(id: String, caption: String, keywords: [String]) {
+    public init(
+        id: String,
+        caption: String,
+        keywords: [String],
+        expectedMetadata: PhotosMetadataSnapshot? = nil
+    ) {
         self.id = id
         self.caption = caption
         self.keywords = keywords
+        self.expectedMetadata = expectedMetadata
     }
 }
 
@@ -412,6 +479,22 @@ public protocol BatchWritePhotosWriter: PhotosWriter {
 public enum PickerCapability: Sendable, Equatable {
     case supported
     case unsupported(reason: String)
+}
+
+public enum PhotosIntegrationAccessState: Sendable, Equatable {
+    case available
+    case notDetermined
+    case limited
+    case denied
+    case restricted
+
+    public var permitsRunAdmission: Bool {
+        self == .available
+    }
+
+    public var needsAccessRequest: Bool {
+        self == .notDetermined
+    }
 }
 
 public enum OllamaAvailability: Sendable, Equatable {
@@ -489,6 +572,11 @@ public enum OllamaAvailability: Sendable, Equatable {
 
 public struct AppCapabilities: Sendable, Equatable {
     public let photosAutomationAvailable: Bool
+    public let photosIntegrationAvailable: Bool
+    public let photosAccessState: PhotosIntegrationAccessState
+    public let photosBackendName: String
+    public let photosRequiresPhotosApp: Bool
+    public let photosRequiresAppleEventsAutomation: Bool
     public let ollamaAvailability: OllamaAvailability
     public let pickerCapability: PickerCapability
 
@@ -510,6 +598,30 @@ public struct AppCapabilities: Sendable, Equatable {
         pickerCapability: PickerCapability
     ) {
         self.photosAutomationAvailable = photosAutomationAvailable
+        self.photosIntegrationAvailable = photosAutomationAvailable
+        self.photosAccessState = photosAutomationAvailable ? .available : .denied
+        self.photosBackendName = "AppleScript"
+        self.photosRequiresPhotosApp = true
+        self.photosRequiresAppleEventsAutomation = true
+        self.ollamaAvailability = ollamaAvailability
+        self.pickerCapability = pickerCapability
+    }
+
+    public init(
+        photosIntegrationAvailable: Bool,
+        photosAccessState: PhotosIntegrationAccessState,
+        photosBackendName: String,
+        photosRequiresPhotosApp: Bool,
+        photosRequiresAppleEventsAutomation: Bool,
+        ollamaAvailability: OllamaAvailability,
+        pickerCapability: PickerCapability
+    ) {
+        self.photosAutomationAvailable = photosRequiresAppleEventsAutomation && photosIntegrationAvailable
+        self.photosIntegrationAvailable = photosIntegrationAvailable
+        self.photosAccessState = photosAccessState
+        self.photosBackendName = photosBackendName
+        self.photosRequiresPhotosApp = photosRequiresPhotosApp
+        self.photosRequiresAppleEventsAutomation = photosRequiresAppleEventsAutomation
         self.ollamaAvailability = ollamaAvailability
         self.pickerCapability = pickerCapability
     }
@@ -521,6 +633,11 @@ public struct AppCapabilities: Sendable, Equatable {
         pickerCapability: PickerCapability
     ) {
         self.photosAutomationAvailable = photosAutomationAvailable
+        self.photosIntegrationAvailable = photosAutomationAvailable
+        self.photosAccessState = photosAutomationAvailable ? .available : .denied
+        self.photosBackendName = "AppleScript"
+        self.photosRequiresPhotosApp = true
+        self.photosRequiresAppleEventsAutomation = true
         self.ollamaAvailability = .legacy(
             qwenModelAvailable: qwenModelAvailable,
             ollamaServiceReachable: ollamaServiceReachable

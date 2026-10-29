@@ -33,9 +33,68 @@ final class RunPreflightTests: XCTestCase {
 
         XCTAssertEqual(summary.sourceTitle, "Whole Library")
         XCTAssertEqual(summary.countDescription, "Exact current scope count before overwrite checks: 120 items.")
-        XCTAssertTrue(summary.confirmationReasons.contains("This run will target the whole library, subject to the current filter and overwrite settings."))
+        XCTAssertTrue(summary.confirmationReasons.contains("This run will target the whole of the library currently open in Photos.app, subject to the current filter and overwrite settings."))
         XCTAssertTrue(summary.modelDescription.contains("not installed locally"))
         XCTAssertEqual(summary.confirmationLabel, "Start Run")
+    }
+
+    func testPhotoKitPreflightNamesTheSystemPhotoLibraryTarget() {
+        let snapshot = RunSetupSnapshot(
+            sourceSelection: .library,
+            selectedAlbum: nil,
+            pickerIDs: [],
+            captionWorkflowConfiguration: CaptionWorkflowConfiguration(queue: []),
+            useDateFilter: false,
+            dateRange: nil,
+            overwriteAppOwnedSameOrNewer: false,
+            alwaysOverwriteExternalMetadata: false
+        )
+        let capabilities = AppCapabilities(
+            photosIntegrationAvailable: true,
+            photosAccessState: .available,
+            photosBackendName: "PhotoKit",
+            photosRequiresPhotosApp: false,
+            photosRequiresAppleEventsAutomation: false,
+            ollamaAvailability: .ready,
+            pickerCapability: .supported
+        )
+
+        let summary = RunPreflightSummaryBuilder.build(
+            snapshot: snapshot,
+            capabilities: capabilities,
+            countState: .exact(10)
+        )
+
+        XCTAssertTrue(summary.writeDescription.contains("System Photo Library"))
+        XCTAssertTrue(summary.writeDescription.contains("Opening another library in Photos.app does not redirect it."))
+        XCTAssertTrue(summary.confirmationReasons.contains("This run will target the whole of the System Photo Library, subject to the current filter and overwrite settings."))
+    }
+
+    func testCompatibilityPreflightExplainsAutomationPermissionWhenUnavailable() {
+        let snapshot = RunSetupSnapshot(
+            sourceSelection: .library,
+            selectedAlbum: nil,
+            pickerIDs: [],
+            captionWorkflowConfiguration: CaptionWorkflowConfiguration(queue: []),
+            useDateFilter: false,
+            dateRange: nil,
+            overwriteAppOwnedSameOrNewer: false,
+            alwaysOverwriteExternalMetadata: false
+        )
+        let capabilities = AppCapabilities(
+            photosAutomationAvailable: false,
+            qwenModelAvailable: true,
+            pickerCapability: .unsupported(reason: "Photos automation is unavailable.")
+        )
+
+        let summary = RunPreflightSummaryBuilder.build(
+            snapshot: snapshot,
+            capabilities: capabilities,
+            countState: .message("Count unavailable")
+        )
+
+        XCTAssertTrue(summary.blockingReasons.contains("Grant Photos automation access before starting a write run."))
+        XCTAssertFalse(summary.blockingReasons.contains("Allow Photos library access in System Settings before starting a write run."))
     }
 
     func testQueuedAlbumsPreflightExplainsDeferredCountAndConfiguredAlbums() {

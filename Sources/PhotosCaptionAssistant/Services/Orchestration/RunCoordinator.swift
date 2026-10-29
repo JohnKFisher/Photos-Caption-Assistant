@@ -77,6 +77,12 @@ private enum RetryableItemStage: String, Sendable {
     }
 }
 
+private struct MetadataWriteReportedFailure: Error, LocalizedError {
+    let message: String
+
+    var errorDescription: String? { message }
+}
+
 private enum CaptionWorkflowRunError: LocalizedError {
     case albumListingUnavailable
     case incompleteConfiguration([String])
@@ -310,6 +316,7 @@ public final class RunCoordinator {
 
     private struct AnalysisJobResult: Sendable {
         let asset: MediaAsset
+        let expectedMetadata: PhotosMetadataSnapshot
         let input: AnalysisInput?
         let preparedPayload: PreparedAnalysisPayload?
         let generated: GeneratedMetadata?
@@ -320,6 +327,7 @@ public final class RunCoordinator {
     private struct PreparationJobResult: Sendable {
         let index: Int
         let asset: MediaAsset
+        let expectedMetadata: PhotosMetadataSnapshot
         let input: AnalysisInput?
         let preparedPayload: PreparedAnalysisPayload?
         let failedStage: RetryableItemStage?
@@ -328,6 +336,7 @@ public final class RunCoordinator {
 
     private struct PendingWrite: Sendable {
         let asset: MediaAsset
+        let expectedMetadata: PhotosMetadataSnapshot
         let sourceContext: String
         let input: AnalysisInput
         let generated: GeneratedMetadata
@@ -465,6 +474,7 @@ public final class RunCoordinator {
 
     private var activeRunSessionID: UUID?
     private var isCancelled = false
+    private var isEndingPhotosRequests = false
 
     public convenience init(
         photosWriter: PhotosWriter,
@@ -575,7 +585,7 @@ public final class RunCoordinator {
             }
 
             Self.debugLog(
-                "PhotoKit incremental scan path could not handle \(Self.scopeLogDescription(options.source)); using AppleScript incremental scan path."
+                "Preferred PhotoKit scan path could not handle \(Self.scopeLogDescription(options.source)); using the active Photos writer's incremental scan path."
             )
         }
 
@@ -589,6 +599,7 @@ public final class RunCoordinator {
         }
         activeRunSessionID = sessionID
         isCancelled = false
+        isEndingPhotosRequests = false
         return true
     }
 
@@ -598,15 +609,22 @@ public final class RunCoordinator {
         }
         activeRunSessionID = nil
         isCancelled = false
+        isEndingPhotosRequests = false
     }
 
     public func cancel(sessionID: UUID? = nil) {
         guard let activeRunSessionID,
-              sessionID == nil || sessionID == activeRunSessionID
+              sessionID == nil || sessionID == activeRunSessionID,
+              !isEndingPhotosRequests
         else {
             return
         }
         isCancelled = true
+        if let requestCanceller = photosWriter as? PhotosOperationCancellation {
+            Task {
+                await requestCanceller.cancelPendingPhotosRequests()
+            }
+        }
     }
 
     public func run(
@@ -632,9 +650,13 @@ public final class RunCoordinator {
             return RunSummary(progress: .init(), errors: [reason])
         }
 
-        let photosRunning = await photosWriter.isPhotosAppRunning()
-        guard photosRunning else {
-            return RunSummary(progress: .init(), errors: ["Photos.app must be open before starting a write run."])
+        let runtimeRequirements = photosWriter as? PhotosRuntimeRequirements
+        let writerSnapshotter = photosWriter as? PhotosEnumerationSnapshotting
+        if runtimeRequirements?.requiresPhotosAppToBeOpen ?? true {
+            let photosRunning = await photosWriter.isPhotosAppRunning()
+            guard photosRunning else {
+                return RunSummary(progress: .init(), errors: ["Photos.app must be open before starting a write run."])
+            }
         }
 
         guard capabilities.qwenModelAvailable else {
@@ -657,6 +679,12 @@ public final class RunCoordinator {
             )
         }
 
+        let requestCanceller = photosWriter as? PhotosOperationCancellation
+        await requestCanceller?.beginPhotosRequests()
+        if isCancelled {
+            await requestCanceller?.cancelPendingPhotosRequests()
+        }
+
         let timingRecorder = RunTimingRecorder()
         let runStartedNanoseconds = DispatchTime.now().uptimeNanoseconds
 
@@ -668,10 +696,13 @@ public final class RunCoordinator {
         var photosRestartRequested = false
 
         var queuedAssetIDs: [String] = []
+        var queuedAssetIDSet = Set<String>()
         var processedAssetIDs = Set<String>()
         var queueCursor = 0
         var processedSincePendingUpdate = 0
+        var hasCompleteResumeQueue = false
 
+        let isFastTraversal = options.traversalOrder == .photosOrderFast
         let targetEngine: EngineTier = .qwen25vl7b
         let lifecycleController = photosWriter as? PhotosLifecycleControlling
         let albumListingSource = photosWriter as? AlbumListingPhotosSource
@@ -708,7 +739,7 @@ public final class RunCoordinator {
             guard queueCursor < queuedAssetIDs.count else {
                 return []
             }
-            return Array(queuedAssetIDs[queueCursor...])
+            return queuedAssetIDs[queueCursor...].filter { !processedAssetIDs.contains($0) }
         }
 
         func emitPendingIDs(force: Bool = false) {
@@ -719,10 +750,26 @@ public final class RunCoordinator {
             callbacks.onPendingIDsUpdated(snapshotPendingIDs())
         }
 
-        func appendPendingAssets(_ assets: [MediaAsset]) {
-            guard !assets.isEmpty else { return }
-            queuedAssetIDs.append(contentsOf: assets.map(\.id))
+        func appendPendingIDs(_ assetIDs: [String]) {
+            let newIDs = assetIDs.filter { queuedAssetIDSet.insert($0).inserted }
+            guard !newIDs.isEmpty else { return }
+            queuedAssetIDs.append(contentsOf: newIDs)
             callbacks.onPendingIDsUpdated(snapshotPendingIDs())
+        }
+
+        func replacePendingIDs(_ assetIDs: [String]) {
+            queuedAssetIDs.removeAll(keepingCapacity: true)
+            queuedAssetIDSet.removeAll(keepingCapacity: true)
+            queueCursor = 0
+            processedSincePendingUpdate = 0
+            for assetID in assetIDs where queuedAssetIDSet.insert(assetID).inserted {
+                queuedAssetIDs.append(assetID)
+            }
+            callbacks.onPendingIDsUpdated(snapshotPendingIDs())
+        }
+
+        func appendPendingAssets(_ assets: [MediaAsset]) {
+            appendPendingIDs(assets.map(\.id))
         }
 
         func markAssetProcessed(_ assetID: String) {
@@ -733,6 +780,10 @@ public final class RunCoordinator {
         }
 
         callbacks.onPendingIDsUpdated([])
+        if case let .picker(ids) = options.source, !isFastTraversal {
+            appendPendingIDs(ids)
+            hasCompleteResumeQueue = true
+        }
         defer {
             emitPendingIDs(force: true)
             callbacks.onStatusChanged(nil)
@@ -793,6 +844,7 @@ public final class RunCoordinator {
         }
 
         func verifyPhotosStillRunning() async -> Bool {
+            guard runtimeRequirements?.requiresPhotosAppToBeOpen ?? true else { return true }
             let photosRunningNow = await photosWriter.isPhotosAppRunning()
             if photosRunningNow {
                 return true
@@ -899,14 +951,14 @@ public final class RunCoordinator {
         }
 
         func handlePostChangeMaintenanceIfNeeded() async {
-            if !isCancelled, progress.changed >= nextPhotosRestartAtChanged {
+            if lifecycleController != nil, !isCancelled, progress.changed >= nextPhotosRestartAtChanged {
                 requestPhotosRestartIfNeeded()
                 repeat {
                     nextPhotosRestartAtChanged += photosRestartInterval
                 } while nextPhotosRestartAtChanged <= progress.changed
             }
 
-            if !isCancelled, progress.changed >= nextPhotosMemoryCheckAtChanged {
+            if lifecycleController != nil, !isCancelled, progress.changed >= nextPhotosMemoryCheckAtChanged {
                 nextPhotosMemoryCheckAtChanged = progress.changed + photosMemoryCheckInterval
                 if let monitor = photosWriter as? PhotosProcessMonitoring,
                    let photosMemoryBytes = await monitor.photosResidentMemoryBytes(),
@@ -932,6 +984,8 @@ public final class RunCoordinator {
 
         func completeRun() async -> RunSummary {
             await drainCompletedPreviewTasks(forceWaitForAll: true)
+            isEndingPhotosRequests = true
+            await requestCanceller?.endPhotosRequests()
             return await makeSummary()
         }
 
@@ -949,7 +1003,7 @@ public final class RunCoordinator {
                     return "Selected Album"
                 }
                 if let albumName = try? await albumListingSource
-                    .listUserAlbums()
+                    .listAlbums()
                     .first(where: { $0.id == id })?
                     .name
                 {
@@ -1008,7 +1062,8 @@ public final class RunCoordinator {
                 keywords: OwnershipTagCodec.appendTags(
                     OwnershipTag(logicVersion: logicVersion, engineTier: targetEngine),
                     to: write.generated.keywords
-                )
+                ),
+                expectedMetadata: write.expectedMetadata
             )
         }
 
@@ -1018,6 +1073,15 @@ public final class RunCoordinator {
         ) async -> MetadataWriteResult {
             do {
                 try await measureOnMain(.write) {
+                    if let contextualWriter = photosWriter as? ContextualMetadataPhotosWriter {
+                        let result = try await contextualWriter.writeMetadata(payload)
+                        guard result.success else {
+                            throw MetadataWriteReportedFailure(
+                                message: result.errorMessage ?? "The metadata change did not complete."
+                            )
+                        }
+                        return
+                    }
                     try await photosWriter.writeMetadata(
                         id: write.asset.id,
                         caption: payload.caption,
@@ -1173,6 +1237,9 @@ public final class RunCoordinator {
                 var nextAnalysisIndex = 0
 
                 func nextWriteChunkSize(for readyCount: Int) -> Int {
+                    guard lifecycleController != nil else {
+                        return max(1, min(readyCount, writeBatchSize))
+                    }
                     let untilRestart = max(1, nextPhotosRestartAtChanged - progress.changed)
                     let untilMemory = max(1, nextPhotosMemoryCheckAtChanged - progress.changed)
                     let safeChunkSize = max(1, min(writeBatchSize, untilRestart, untilMemory))
@@ -1189,6 +1256,13 @@ public final class RunCoordinator {
                 }
 
                 func handleOrderedResult(index: Int, result: AnalysisJobResult) async {
+                    if isCancelled {
+                        if let input = result.input {
+                            Self.cleanupAnalysisInput(input)
+                        }
+                        return
+                    }
+
                     func retryAnalysisResultIfNeeded(
                         index: Int,
                         initialResult: AnalysisJobResult
@@ -1202,6 +1276,7 @@ public final class RunCoordinator {
                             let retriedPreparation = await Self.prepareAnalysisInput(
                                 index: index,
                                 asset: currentResult.asset,
+                                expectedMetadata: currentResult.expectedMetadata,
                                 photosWriter: writer,
                                 preparedAnalyzer: preparedAnalysisEngine,
                                 timingRecorder: recorder
@@ -1223,6 +1298,7 @@ public final class RunCoordinator {
                                 PreparationJobResult(
                                     index: index,
                                     asset: currentResult.asset,
+                                    expectedMetadata: currentResult.expectedMetadata,
                                     input: input,
                                     preparedPayload: currentResult.preparedPayload,
                                     failedStage: nil,
@@ -1242,12 +1318,20 @@ public final class RunCoordinator {
                         initialResult: result
                     )
 
+                    if isCancelled {
+                        if let input = resolvedResult.input {
+                            Self.cleanupAnalysisInput(input)
+                        }
+                        return
+                    }
+
                     if let generated = resolvedResult.generated,
                        let input = resolvedResult.input
                     {
                         pendingWrites.append(
                             PendingWrite(
                                 asset: resolvedResult.asset,
+                                expectedMetadata: resolvedResult.expectedMetadata,
                                 sourceContext: sourceContext,
                                 input: input,
                                 generated: generated
@@ -1285,7 +1369,7 @@ public final class RunCoordinator {
                 }
 
                 await withTaskGroup(of: Void.self) { group in
-                    func scheduleAnalysis(for asset: MediaAsset) {
+                    func scheduleAnalysis(for asset: MediaAsset, expectedMetadata: PhotosMetadataSnapshot) {
                         let index = nextAnalysisIndex
                         nextAnalysisIndex += 1
 
@@ -1294,6 +1378,7 @@ public final class RunCoordinator {
                             let prepared = await Self.prepareAnalysisInput(
                                 index: index,
                                 asset: asset,
+                                expectedMetadata: expectedMetadata,
                                 photosWriter: writer,
                                 preparedAnalyzer: preparedAnalysisEngine,
                                 timingRecorder: recorder
@@ -1354,7 +1439,7 @@ public final class RunCoordinator {
                             }
 
                             if shouldWrite {
-                                scheduleAnalysis(for: asset)
+                                scheduleAnalysis(for: asset, expectedMetadata: existing.snapshot)
                             } else {
                                 progress.processed += 1
                                 progress.skipped += 1
@@ -1374,6 +1459,10 @@ public final class RunCoordinator {
 
                 await analyzedResults.finish()
                 _ = await consumerTask.value
+                if isCancelled {
+                    pendingWrites.forEach { Self.cleanupAnalysisInput($0.input) }
+                    pendingWrites.removeAll()
+                }
             }
 
             var windowStart = 0
@@ -1601,6 +1690,9 @@ public final class RunCoordinator {
             targetCount: Int
         ) async throws -> [MediaAsset] {
             // Smart albums can shrink as writes complete, so each chunk must come from a fresh offset-0 pass.
+            let scope = ScopeSource.album(id: albumID)
+            let enumerationSnapshotter = (incrementalWriter as? PhotosEnumerationSnapshotting) ?? writerSnapshotter
+            try await enumerationSnapshotter?.beginEnumerationSnapshot(scope: scope)
             var offset = 0
             var assets: [MediaAsset] = []
             assets.reserveCapacity(targetCount)
@@ -1614,38 +1706,44 @@ public final class RunCoordinator {
                 )
             )
 
-            while !isCancelled && assets.count < targetCount {
-                let batch = try await enumeratePageResilient(
-                    incrementalWriter: incrementalWriter,
-                    scope: .album(id: albumID),
-                    offset: offset,
-                    preferredLimit: Self.enumerationPageSize
-                )
-                if batch.isEmpty {
-                    break
-                }
-
-                offset += batch.count
-
-                for asset in batch where seenAssetIDs.insert(asset.id).inserted {
-                    guard isCaptionWorkflowAssetEligible(asset) else {
-                        continue
-                    }
-                    assets.append(asset)
-                    if assets.count >= targetCount {
+            do {
+                while !isCancelled && assets.count < targetCount {
+                    let batch = try await enumeratePageResilient(
+                        incrementalWriter: incrementalWriter,
+                        scope: scope,
+                        offset: offset,
+                        preferredLimit: Self.enumerationPageSize
+                    )
+                    if batch.isEmpty {
                         break
                     }
-                }
 
-                callbacks.onStatusChanged(
-                    captionWorkflowChunkCollectionStatus(
-                        queueItem: queueItem,
-                        discovered: assets.count,
-                        target: targetCount
+                    offset += batch.count
+
+                    for asset in batch where seenAssetIDs.insert(asset.id).inserted {
+                        guard isCaptionWorkflowAssetEligible(asset) else {
+                            continue
+                        }
+                        assets.append(asset)
+                        if assets.count >= targetCount {
+                            break
+                        }
+                    }
+
+                    callbacks.onStatusChanged(
+                        captionWorkflowChunkCollectionStatus(
+                            queueItem: queueItem,
+                            discovered: assets.count,
+                            target: targetCount
+                        )
                     )
-                )
+                }
+            } catch {
+                await enumerationSnapshotter?.endEnumerationSnapshot(scope: scope)
+                throw error
             }
 
+            await enumerationSnapshotter?.endEnumerationSnapshot(scope: scope)
             guard !isCancelled else {
                 return []
             }
@@ -1671,7 +1769,7 @@ public final class RunCoordinator {
                 }
 
                 do {
-                    let albums = try await albumListingSource!.listUserAlbums()
+                    let albums = try await albumListingSource!.listAlbums()
                     let refreshedQueue = try resolveCaptionWorkflowQueue(from: albums)
                     guard let refreshedQueueItem = captionWorkflowQueueItem(at: queueItemPlan.queueIndex, from: refreshedQueue)
                         ?? captionWorkflowQueueItem(at: queueItemPlan.queueIndex, from: preflightQueue)
@@ -1731,7 +1829,7 @@ public final class RunCoordinator {
                 }
 
                 do {
-                    let albums = try await albumListingSource!.listUserAlbums()
+                    let albums = try await albumListingSource!.listAlbums()
                     let refreshedQueue = try resolveCaptionWorkflowQueue(from: albums)
                     guard let refreshedQueueItem = captionWorkflowQueueItem(at: queueItemPlan.queueIndex, from: refreshedQueue)
                         ?? captionWorkflowQueueItem(at: queueItemPlan.queueIndex, from: preflightQueue)
@@ -1810,7 +1908,7 @@ public final class RunCoordinator {
 
             let preflightAlbums: [AlbumSummary]
             do {
-                preflightAlbums = try await albumListingSource!.listUserAlbums()
+                preflightAlbums = try await albumListingSource!.listAlbums()
             } catch {
                 errors.append("\(AppPresentation.queuedAlbumsTitle) failed while refreshing albums: \(error.localizedDescription)")
                 return await completeRun()
@@ -2011,11 +2109,21 @@ public final class RunCoordinator {
 
         let defaultSourceContext = await resolveSourceContext(for: options.source)
 
-        let isFastTraversal = options.traversalOrder == .photosOrderFast
-
         if options.optionalCaptureDateRange == nil,
            let incrementalWriter = await preferredIncrementalScanSource(for: options) {
+            let enumerationSnapshotter = (incrementalWriter as? PhotosEnumerationSnapshotting) ?? writerSnapshotter
             do {
+                try await enumerationSnapshotter?.beginEnumerationSnapshot(scope: options.source)
+                do {
+                if let resumeSnapshotter = incrementalWriter as? PhotosResumeSnapshotting {
+                    let allAssetIDs = try await resumeSnapshotter.resumeSnapshotAssetIdentifiers(scope: options.source)
+                    if case .picker = options.source {
+                        replacePendingIDs(allAssetIDs)
+                    } else {
+                        appendPendingIDs(allAssetIDs)
+                    }
+                    hasCompleteResumeQueue = true
+                }
                 if isFastTraversal {
                     var offset = 0
                     while !isCancelled {
@@ -2043,7 +2151,8 @@ public final class RunCoordinator {
                     callbacks.onProgress(progress)
 
                     if !(await promptForSlowOrderedRunIfNeeded(totalCount: totalCount)) {
-                        return await makeSummary()
+                        await enumerationSnapshotter?.endEnumerationSnapshot(scope: options.source)
+                        return await completeRun()
                     }
 
                     callbacks.onPreparationProgress(0, totalCount)
@@ -2066,27 +2175,40 @@ public final class RunCoordinator {
                         callbacks.onPreparationProgress(min(offset, totalCount), totalCount)
                     }
 
+                    guard !isCancelled else {
+                        if !hasCompleteResumeQueue {
+                            errors.append("Preparation was canceled before processing began. Start a fresh run to scan the full selection.")
+                        }
+                        await enumerationSnapshotter?.endEnumerationSnapshot(scope: options.source)
+                        return await completeRun()
+                    }
+
                     progress.totalDiscovered = allAssets.count
                     callbacks.onProgress(progress)
                     let ordered = orderedAssets(allAssets, by: options.traversalOrder)
-                    appendPendingAssets(ordered)
+                    replacePendingIDs(ordered.map(\.id))
                     await processAssetsInBatches(
                         ordered,
                         sourceContext: defaultSourceContext
                     )
                 }
+                } catch {
+                    await enumerationSnapshotter?.endEnumerationSnapshot(scope: options.source)
+                    throw error
+                }
+                await enumerationSnapshotter?.endEnumerationSnapshot(scope: options.source)
             } catch {
                 errors.append("Failed to enumerate assets: \(error.localizedDescription)")
                 progress = .init()
                 failedAssets = []
-                return await makeSummary()
+                return await completeRun()
             }
         } else {
             if !isFastTraversal,
                let incrementalWriter = await preferredIncrementalScanSource(for: options),
                let totalCount = try? await incrementalWriter.count(scope: options.source),
                !(await promptForSlowOrderedRunIfNeeded(totalCount: totalCount)) {
-                return await makeSummary()
+                return await completeRun()
             }
 
             let assets: [MediaAsset]
@@ -2096,7 +2218,7 @@ public final class RunCoordinator {
                 errors.append("Failed to enumerate assets: \(error.localizedDescription)")
                 progress = .init()
                 failedAssets = []
-                return await makeSummary()
+                return await completeRun()
             }
 
             progress.totalDiscovered = assets.count
@@ -2109,7 +2231,7 @@ public final class RunCoordinator {
                 )
             } else {
                 let ordered = orderedAssets(assets, by: options.traversalOrder)
-                appendPendingAssets(ordered)
+                replacePendingIDs(ordered.map(\.id))
                 await processAssetsInBatches(
                     ordered,
                     sourceContext: defaultSourceContext
@@ -2226,6 +2348,7 @@ public final class RunCoordinator {
     private nonisolated static func prepareAnalysisInput(
         index: Int,
         asset: MediaAsset,
+        expectedMetadata: PhotosMetadataSnapshot,
         photosWriter: PhotosWriter,
         preparedAnalyzer: (any PreparedInputAnalyzer)?,
         timingRecorder: RunTimingRecorder
@@ -2245,6 +2368,7 @@ public final class RunCoordinator {
             return PreparationJobResult(
                 index: index,
                 asset: asset,
+                expectedMetadata: expectedMetadata,
                 input: input,
                 preparedPayload: preparedPayload,
                 failedStage: nil,
@@ -2254,6 +2378,7 @@ public final class RunCoordinator {
             return PreparationJobResult(
                 index: index,
                 asset: asset,
+                expectedMetadata: expectedMetadata,
                 input: input,
                 preparedPayload: preparedPayload,
                 failedStage: .assetAcquire,
@@ -2271,6 +2396,7 @@ public final class RunCoordinator {
         guard let input = prepared.input else {
             let result = AnalysisJobResult(
                 asset: prepared.asset,
+                expectedMetadata: prepared.expectedMetadata,
                 input: nil,
                 preparedPayload: prepared.preparedPayload,
                 generated: nil,
@@ -2295,6 +2421,7 @@ public final class RunCoordinator {
             }
             let result = AnalysisJobResult(
                 asset: prepared.asset,
+                expectedMetadata: prepared.expectedMetadata,
                 input: input,
                 preparedPayload: prepared.preparedPayload,
                 generated: generated,
@@ -2305,6 +2432,7 @@ public final class RunCoordinator {
         } catch {
             let result = AnalysisJobResult(
                 asset: prepared.asset,
+                expectedMetadata: prepared.expectedMetadata,
                 input: input,
                 preparedPayload: prepared.preparedPayload,
                 generated: nil,
@@ -2322,20 +2450,33 @@ public final class RunCoordinator {
         if asset.kind == .photo,
            let previewDataSource = photosWriter as? PhotoPreviewDataSource
         {
-            if let previewData = try? await previewDataSource.photoPreviewJPEGData(
-                id: asset.id,
-                maxPixelSize: Self.photoPreviewMaxPixelSize
-            ) {
-                return .photoPreviewJPEGData(previewData)
+            do {
+                if let previewData = try await previewDataSource.photoPreviewJPEGData(
+                    id: asset.id,
+                    maxPixelSize: Self.photoPreviewMaxPixelSize
+                ) {
+                    return .photoPreviewJPEGData(previewData)
+                }
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                // A missing or unavailable thumbnail may still be recoverable from the full asset.
             }
         } else if asset.kind == .photo,
-                  let previewSource = photosWriter as? PhotoPreviewSource,
-                  let previewURL = try? await previewSource.photoPreviewToTemporaryURL(
-                      id: asset.id,
-                      maxPixelSize: Self.photoPreviewMaxPixelSize
-                  )
+                  let previewSource = photosWriter as? PhotoPreviewSource
         {
-            return .fileURL(previewURL)
+            do {
+                if let previewURL = try await previewSource.photoPreviewToTemporaryURL(
+                    id: asset.id,
+                    maxPixelSize: Self.photoPreviewMaxPixelSize
+                ) {
+                    return .fileURL(previewURL)
+                }
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                // A missing or unavailable thumbnail may still be recoverable from the full asset.
+            }
         }
 
         let exportURL = try await photosWriter.exportAssetToTemporaryURL(id: asset.id, kind: asset.kind)

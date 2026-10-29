@@ -98,7 +98,7 @@ actor PhotoLibraryScanBenchmarkRunner {
 
     init(
         appleScriptClient: any PhotoLibraryDiagnosticsAppleScriptAccessing,
-        photoKitReader: any PhotoLibraryDiagnosticsPhotoKitAccessing = ExperimentalPhotoKitScanReader(),
+        photoKitReader: any PhotoLibraryDiagnosticsPhotoKitAccessing = PhotoKitPhotosClient(),
         fileManager: FileManager = .default,
         authorizationStatusProvider: @escaping @Sendable () -> PHAuthorizationStatus = {
             PHPhotoLibrary.authorizationStatus(for: .readWrite)
@@ -114,9 +114,17 @@ actor PhotoLibraryScanBenchmarkRunner {
         configuration: PhotoLibraryScanBenchmarkConfiguration = .appHostedDefault,
         progressHandler: ProgressHandler? = nil
     ) async throws -> PhotoLibraryScanBenchmarkOutcome {
-        let authorizationStatus = authorizationStatusProvider()
-        guard authorizationStatus == .authorized || authorizationStatus == .limited else {
-            return .skipped("Photos library access is unavailable for this process (status=\(authorizationStatus.rawValue)).")
+        if let runtime = photoKitReader as? PhotosRuntimeRequirements {
+            do {
+                try await runtime.prepareForRun(scope: .library)
+            } catch {
+                return .skipped(error.localizedDescription)
+            }
+        } else {
+            let authorizationStatus = authorizationStatusProvider()
+            guard authorizationStatus == .authorized else {
+                return .skipped("Full Photos library access is required for this process (status=\(authorizationStatus.rawValue)).")
+            }
         }
 
         await reportProgress(
@@ -176,7 +184,7 @@ actor PhotoLibraryScanBenchmarkRunner {
                 }
             ),
             PhotoLibraryBenchmarkBackend(
-                name: "PhotoKitExperimental",
+                name: "PhotoKit",
                 count: { scope in try await self.photoKitReader.count(scope: scope) },
                 enumerate: { scope, offset, limit in
                     try await self.photoKitReader.enumerate(scope: scope, offset: offset, limit: limit)
@@ -309,8 +317,8 @@ actor PhotoLibraryScanBenchmarkRunner {
             scopeLabel: scopePlan.label,
             scopeDescription: scopePlan.description,
             appleScriptCount: countMeasurements["AppleScript"]?.result ?? -1,
-            photoKitCount: countMeasurements["PhotoKitExperimental"]?.result ?? -1,
-            countParity: countMeasurements["AppleScript"]?.result == countMeasurements["PhotoKitExperimental"]?.result,
+            photoKitCount: countMeasurements["PhotoKit"]?.result ?? -1,
+            countParity: countMeasurements["AppleScript"]?.result == countMeasurements["PhotoKit"]?.result,
             countMeasurements: countMeasurements,
             firstAssetMeasurements: firstAssetMeasurements,
             firstPageMeasurements: firstPageMeasurements,
@@ -713,7 +721,7 @@ actor PhotoLibraryScanBenchmarkRunner {
             return PhotoLibraryBenchmarkScopeDiscovery(scope: configuredScope, notice: nil)
         }
 
-        let albums = try await appleScriptClient.listUserAlbums()
+        let albums = try await appleScriptClient.listAlbums()
         for album in albums.prefix(10) {
             let count = try await appleScriptClient.count(scope: .album(id: album.id))
             if count > 0 {
@@ -733,7 +741,7 @@ actor PhotoLibraryScanBenchmarkRunner {
 
         return PhotoLibraryBenchmarkScopeDiscovery(
             scope: nil,
-            notice: "Skipping album benchmark because no AppleScript album in the sampled set could be resolved by the experimental PhotoKit reader."
+            notice: "Skipping album benchmark because no AppleScript album in the sampled set could be resolved by PhotoKit."
         )
     }
 
